@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { HookState, type HookBroadcast } from "./lib/hookState.js";
 import { resolveTmuxPaneForPid } from "./lib/pane.js";
 import { sendKey, sendText } from "./lib/sendKeys.js";
 import {
@@ -91,15 +92,66 @@ async function findTranscriptPath(sessionId: string): Promise<string | null> {
 
 app.use(express.json({ limit: "1mb" }));
 
+const hookState = new HookState();
+type HookSubscriber = (ev: HookBroadcast) => void;
+const hookSubscribers = new Set<HookSubscriber>();
+
+function broadcastHook(ev: HookBroadcast): void {
+  for (const fn of hookSubscribers) {
+    try {
+      fn(ev);
+    } catch {
+      /* skip broken subscriber */
+    }
+  }
+}
+
 app.get("/api/sessions", async (_req, res) => {
   const sessions = await listLiveSessions();
+  const attention = hookState.snapshot();
   const augmented = await Promise.all(
-    sessions.map(async (s) => ({
-      ...s,
-      hasTmuxPane: (await resolveTmuxPaneForPid(s.pid)) !== null,
-    })),
+    sessions.map(async (s) => {
+      const att = attention[s.sessionId];
+      return {
+        ...s,
+        hasTmuxPane: (await resolveTmuxPaneForPid(s.pid)) !== null,
+        needsAttention: att?.needsAttention ?? false,
+        lastEvent: att?.lastEvent,
+        lastEventAt: att?.lastEventAt,
+        lastEventMessage: att?.message,
+      };
+    }),
   );
   res.json({ sessions: augmented });
+});
+
+app.post("/api/hook", (req, res) => {
+  try {
+    const ev = hookState.record(req.body);
+    broadcastHook(ev);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: String(err) });
+  }
+});
+
+app.get("/api/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  writeEvent(res, "snapshot", hookState.snapshot());
+
+  const sub: HookSubscriber = (ev) => writeEvent(res, "hook", ev);
+  hookSubscribers.add(sub);
+
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    hookSubscribers.delete(sub);
+    res.end();
+  });
 });
 
 app.get("/api/sessions/:id/transcript", async (req, res) => {
@@ -198,11 +250,26 @@ app.post("/api/sessions/:id/send", async (req, res) => {
       res.status(400).json({ error: "expected text or key" });
       return;
     }
+    clearAttention(session.sessionId);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
+
+app.post("/api/sessions/:id/attention/clear", (req, res) => {
+  clearAttention(req.params.id);
+  res.json({ ok: true });
+});
+
+function clearAttention(sessionId: string): void {
+  const prev = hookState.get(sessionId);
+  if (!prev || !prev.needsAttention) return;
+  hookState.clear(sessionId);
+  const next = hookState.get(sessionId);
+  if (!next) return;
+  broadcastHook({ sessionId, ...next });
+}
 
 app.use(express.static(path.join(__dirname, "..", "public")));
 
