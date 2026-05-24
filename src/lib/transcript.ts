@@ -15,17 +15,30 @@ export type TranscriptEvent =
       toolUseId: string;
       output: string;
       isError: boolean;
-    };
+    }
+  | { kind: "system"; uuid: string; ts: string; text: string };
 
 type RawEntry = {
   type?: string;
   uuid?: string;
   timestamp?: string;
+  isMeta?: boolean;
   message?: {
     role?: string;
     content?: unknown;
   };
 };
+
+const SYSTEM_REMINDER_RE = /^<system-reminder>([\s\S]*)<\/system-reminder>$/;
+
+function stripSystemReminder(text: string): string {
+  const m = text.trim().match(SYSTEM_REMINDER_RE);
+  return m ? m[1].trim() : text;
+}
+
+function isWholeSystemReminder(text: string): boolean {
+  return SYSTEM_REMINDER_RE.test(text.trim());
+}
 
 function stringifyContent(content: unknown): string {
   if (typeof content === "string") return content;
@@ -92,6 +105,14 @@ export function parseLine(line: string): TranscriptEvent | null {
   if (entry.type === "user") {
     const content = entry.message?.content;
     if (typeof content === "string") {
+      if (entry.isMeta === true || isWholeSystemReminder(content)) {
+        return {
+          kind: "system",
+          uuid: entry.uuid ?? "",
+          ts: entry.timestamp ?? "",
+          text: stripSystemReminder(content),
+        };
+      }
       return {
         kind: "user",
         uuid: entry.uuid ?? "",

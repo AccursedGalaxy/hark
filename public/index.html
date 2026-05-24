@@ -160,6 +160,15 @@
         font-size: 12px; color: var(--text-dim);
       }
       .ev.tool_result.error { border-left: 2px solid #ef4444; }
+      .ev.system {
+        align-self: center; max-width: 80%;
+        font-size: 11px; color: var(--muted); font-style: italic;
+        background: transparent; border-top: 1px dashed var(--border);
+        border-bottom: 1px dashed var(--border);
+        padding: 6px 10px; white-space: pre-wrap; word-wrap: break-word;
+        text-align: center;
+      }
+      .ev.system .who { display: none; }
       .ev.tool_result pre {
         margin: 0; white-space: pre-wrap; word-wrap: break-word;
         font-family: inherit; font-size: inherit;
@@ -321,6 +330,10 @@
       function renderEvent(ev) {
         if (ev.kind === "user") {
           return `<div class="ev user"><div class="who">you</div><div class="body">${esc(ev.text)}</div></div>`;
+        }
+        if (ev.kind === "system") {
+          const preview = ev.text.length > 200 ? ev.text.slice(0, 200) + "..." : ev.text;
+          return `<div class="ev system" title="${esc(ev.text)}">system: ${esc(preview)}</div>`;
         }
         if (ev.kind === "assistant") {
           const blocks = ev.blocks

@@ -55,6 +55,24 @@ const attachment = JSON.stringify({
   attachment: { type: "deferred_tools_delta", addedNames: ["Foo"] },
 });
 
+const stopHookFeedback = JSON.stringify({
+  type: "user",
+  uuid: "sys1",
+  timestamp: "2026-05-24T22:15:42.657Z",
+  isMeta: true,
+  message: { role: "user", content: "Stop hook feedback:\nDOC-PIPELINE CHECK" },
+});
+
+const systemReminderOnly = JSON.stringify({
+  type: "user",
+  uuid: "sys2",
+  timestamp: "2026-05-24T22:20:00.000Z",
+  message: {
+    role: "user",
+    content: "<system-reminder>cache invalidated</system-reminder>",
+  },
+});
+
 const permissionMode = JSON.stringify({
   type: "permission-mode",
   permissionMode: "auto",
@@ -123,6 +141,24 @@ describe("parseLine", () => {
   it("returns null for blank lines", () => {
     expect(parseLine("")).toBeNull();
     expect(parseLine("   ")).toBeNull();
+  });
+
+  it("flags isMeta user entries as system events", () => {
+    expect(parseLine(stopHookFeedback)).toEqual({
+      kind: "system",
+      uuid: "sys1",
+      ts: "2026-05-24T22:15:42.657Z",
+      text: "Stop hook feedback:\nDOC-PIPELINE CHECK",
+    });
+  });
+
+  it("flags pure <system-reminder> user content as system events and strips wrapper", () => {
+    expect(parseLine(systemReminderOnly)).toEqual({
+      kind: "system",
+      uuid: "sys2",
+      ts: "2026-05-24T22:20:00.000Z",
+      text: "cache invalidated",
+    });
   });
 });
 
