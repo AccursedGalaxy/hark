@@ -8,12 +8,18 @@
       :root {
         --bg: #0a0a0a;
         --sidebar: #111213;
+        --panel: #0f1011;
         --border: #1f2123;
+        --border-soft: #161718;
         --text: #e6e6e6;
+        --text-dim: #b3b3b3;
         --muted: #8a8a8a;
+        --accent: #3b82f6;
         --accent-busy: #d97706;
         --accent-idle: #22c55e;
         --accent-dead: #4b5563;
+        --user-bubble: #1d2532;
+        --tool-bg: #15171a;
       }
       * { box-sizing: border-box; }
       html, body {
@@ -35,6 +41,7 @@
         overflow-y: auto;
         display: flex;
         flex-direction: column;
+        min-width: 0;
       }
       aside header {
         padding: 14px 16px;
@@ -42,6 +49,9 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        position: sticky;
+        top: 0;
+        background: var(--sidebar);
       }
       aside header h1 {
         margin: 0;
@@ -58,85 +68,216 @@
         padding: 2px 8px;
         border-radius: 10px;
       }
-      #sessions {
-        list-style: none;
-        margin: 0;
-        padding: 6px 0;
-      }
+      #sessions { list-style: none; margin: 0; padding: 6px 0; }
       #sessions li {
         padding: 10px 16px;
-        border-bottom: 1px solid #161718;
-        cursor: default;
+        border-bottom: 1px solid var(--border-soft);
+        cursor: pointer;
       }
       #sessions li:hover { background: #16181a; }
-      .row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
+      #sessions li.active { background: #1a1f2b; border-left: 2px solid var(--accent); padding-left: 14px; }
+      .row { display: flex; align-items: center; gap: 8px; }
       .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        flex-shrink: 0;
-        background: var(--accent-dead);
+        width: 8px; height: 8px; border-radius: 50%;
+        flex-shrink: 0; background: var(--accent-dead);
       }
       .dot.busy { background: var(--accent-busy); box-shadow: 0 0 6px var(--accent-busy); }
       .dot.idle { background: var(--accent-idle); }
       .title {
-        font-weight: 500;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        flex: 1;
+        font-weight: 500; flex: 1; min-width: 0;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
       .kind {
-        font-size: 10px;
-        color: var(--muted);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
+        font-size: 10px; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.05em;
+      }
+      .badge-ro {
+        font-size: 9px; color: var(--muted);
+        background: #2a2d31; padding: 1px 5px; border-radius: 3px;
+        text-transform: uppercase; letter-spacing: 0.06em;
       }
       .cwd {
         margin-top: 3px;
-        font-size: 11px;
-        color: var(--muted);
+        font-size: 11px; color: var(--muted);
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        direction: rtl;
-        text-align: left;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        direction: rtl; text-align: left;
       }
       .empty {
-        padding: 20px 16px;
-        color: var(--muted);
+        padding: 20px 16px; color: var(--muted); font-size: 12px;
+      }
+      main {
+        background: var(--bg); display: flex; flex-direction: column;
+        min-width: 0; min-height: 0;
+      }
+      #placeholder {
+        flex: 1; display: flex; align-items: center; justify-content: center;
+        color: var(--muted); font-size: 13px;
+      }
+      #session-view { display: none; flex: 1; flex-direction: column; min-height: 0; }
+      #session-view.active { display: flex; }
+      .session-header {
+        padding: 12px 18px; border-bottom: 1px solid var(--border);
+        display: flex; align-items: center; gap: 10px;
+      }
+      .session-header .title { font-size: 14px; }
+      .session-header .meta {
+        font-size: 11px; color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #transcript {
+        flex: 1; overflow-y: auto; padding: 16px 18px;
+        display: flex; flex-direction: column; gap: 12px;
+      }
+      .ev { max-width: 100%; }
+      .ev .who {
+        font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+        color: var(--muted); margin-bottom: 4px;
+      }
+      .ev.user .body {
+        background: var(--user-bubble); padding: 10px 12px;
+        border-radius: 8px; max-width: 75%; align-self: flex-end;
+        white-space: pre-wrap; word-wrap: break-word;
+      }
+      .ev.user { display: flex; flex-direction: column; align-items: flex-end; }
+      .ev.assistant .body { white-space: pre-wrap; word-wrap: break-word; }
+      .ev.assistant .block-thinking {
+        color: var(--text-dim); font-style: italic;
+        border-left: 2px solid var(--border); padding-left: 10px;
+        margin: 6px 0; font-size: 12px;
+      }
+      .ev.assistant .block-tool {
+        background: var(--tool-bg); padding: 8px 10px;
+        border-radius: 6px; margin: 6px 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         font-size: 12px;
       }
-      main { background: var(--bg); }
+      .ev.assistant .block-tool .tname { color: var(--accent); }
+      .ev.tool_result {
+        background: var(--tool-bg); padding: 8px 12px;
+        border-radius: 6px; max-width: 100%;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px; color: var(--text-dim);
+        white-space: pre-wrap; word-wrap: break-word;
+        max-height: 200px; overflow-y: auto;
+      }
+      .ev.tool_result.error { border-left: 2px solid #ef4444; }
+      .composer {
+        border-top: 1px solid var(--border);
+        padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+        background: var(--panel);
+      }
+      .composer textarea {
+        background: #0a0a0a; color: var(--text);
+        border: 1px solid var(--border); border-radius: 6px;
+        padding: 8px 10px; font: inherit; resize: none;
+        min-height: 40px; max-height: 200px;
+      }
+      .composer textarea:focus { outline: none; border-color: var(--accent); }
+      .composer .row-actions {
+        display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+      }
+      .composer button {
+        background: #1a1d22; color: var(--text);
+        border: 1px solid var(--border); border-radius: 5px;
+        padding: 6px 12px; font-size: 12px; cursor: pointer;
+      }
+      .composer button:hover:not(:disabled) { background: #242830; }
+      .composer button:disabled { opacity: 0.4; cursor: not-allowed; }
+      .composer button.primary { background: var(--accent); border-color: var(--accent); }
+      .composer button.primary:hover:not(:disabled) { background: #2563eb; }
+      .composer button.ghost { background: transparent; }
+      .composer .hint {
+        color: var(--muted); font-size: 11px; margin-left: auto;
+      }
+      .composer.disabled { opacity: 0.6; }
+
+      @media (max-width: 720px) {
+        #app { grid-template-columns: 1fr; }
+        aside { display: flex; }
+        aside.hidden { display: none; }
+        main.hidden { display: none; }
+        .back-btn { display: inline-flex !important; }
+      }
+      .back-btn {
+        display: none;
+        background: transparent; border: none; color: var(--text);
+        font-size: 18px; cursor: pointer; padding: 0 8px 0 0;
+      }
     </style>
   </head>
   <body>
     <div id="app">
-      <aside>
+      <aside id="sidebar">
         <header>
           <h1>Claude sessions</h1>
           <span class="count" id="count">0</span>
         </header>
         <ul id="sessions"></ul>
       </aside>
-      <main></main>
+      <main id="main">
+        <div id="placeholder">Select a session</div>
+        <div id="session-view">
+          <div class="session-header">
+            <button class="back-btn" id="back">&larr;</button>
+            <span class="dot" id="sv-dot"></span>
+            <span class="title" id="sv-title"></span>
+            <span class="meta" id="sv-meta"></span>
+          </div>
+          <div id="transcript"></div>
+          <div class="composer" id="composer">
+            <textarea
+              id="composer-text"
+              placeholder="Send a message  -  Enter to send, Shift+Enter for newline"
+              rows="1"
+            ></textarea>
+            <div class="row-actions">
+              <button class="primary" id="btn-send">Send</button>
+              <button class="ghost" id="btn-approve" title="Send '1' + Enter">Approve</button>
+              <button class="ghost" id="btn-deny" title="Send '2' + Enter">Deny</button>
+              <button class="ghost" id="btn-escape" title="Send Escape">Esc</button>
+              <span class="hint" id="composer-hint"></span>
+            </div>
+          </div>
+        </div>
+      </main>
     </div>
 
-    <script>
-      const list = document.getElementById("sessions");
-      const count = document.getElementById("count");
+    <script type="module">
+      const $ = (id) => document.getElementById(id);
+      const list = $("sessions");
+      const count = $("count");
+      const placeholder = $("placeholder");
+      const sessionView = $("session-view");
+      const sidebar = $("sidebar");
+      const main = $("main");
+      const transcriptEl = $("transcript");
+      const composerEl = $("composer");
+      const composerText = $("composer-text");
+      const composerHint = $("composer-hint");
+      const btnSend = $("btn-send");
+      const btnApprove = $("btn-approve");
+      const btnDeny = $("btn-deny");
+      const btnEscape = $("btn-escape");
+      const back = $("back");
 
-      function basename(p) {
+      let activeSessionId = null;
+      let activeSession = null;
+      let stream = null;
+      let sessionsById = new Map();
+
+      const esc = (s) =>
+        String(s).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        })[c]);
+
+      const basename = (p) => {
         const parts = p.split("/").filter(Boolean);
         return parts[parts.length - 1] || p;
-      }
+      };
 
-      function render(sessions) {
+      function renderSidebar(sessions) {
+        sessionsById = new Map(sessions.map((s) => [s.sessionId, s]));
         count.textContent = String(sessions.length);
         if (sessions.length === 0) {
           list.innerHTML = '<div class="empty">No active sessions</div>';
@@ -146,38 +287,168 @@
           .map((s) => {
             const title = s.name || basename(s.cwd);
             const status = s.status || "";
+            const activeCls = s.sessionId === activeSessionId ? " active" : "";
+            const ro = !s.hasTmuxPane ? '<span class="badge-ro">read-only</span>' : "";
             return `
-              <li>
+              <li data-id="${esc(s.sessionId)}" class="${activeCls.trim()}">
                 <div class="row">
-                  <span class="dot ${status}"></span>
-                  <span class="title">${escapeHtml(title)}</span>
-                  <span class="kind">${escapeHtml(s.kind || "")}</span>
+                  <span class="dot ${esc(status)}"></span>
+                  <span class="title">${esc(title)}</span>
+                  ${ro}
+                  <span class="kind">${esc(s.kind || "")}</span>
                 </div>
-                <div class="cwd" title="${escapeHtml(s.cwd)}">${escapeHtml(s.cwd)}</div>
+                <div class="cwd" title="${esc(s.cwd)}">${esc(s.cwd)}</div>
               </li>
             `;
           })
           .join("");
+        for (const li of list.querySelectorAll("li[data-id]")) {
+          li.addEventListener("click", () => openSession(li.dataset.id));
+        }
       }
 
-      function escapeHtml(s) {
-        return String(s).replace(/[&<>"']/g, (c) => ({
-          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-        })[c]);
+      function renderEvent(ev) {
+        if (ev.kind === "user") {
+          return `<div class="ev user"><div class="who">you</div><div class="body">${esc(ev.text)}</div></div>`;
+        }
+        if (ev.kind === "assistant") {
+          const blocks = ev.blocks
+            .map((b) => {
+              if (b.type === "text")
+                return `<div class="body">${esc(b.text)}</div>`;
+              if (b.type === "thinking")
+                return `<div class="block-thinking">${esc(b.text)}</div>`;
+              if (b.type === "tool_use") {
+                const input = typeof b.input === "object" ? JSON.stringify(b.input) : String(b.input ?? "");
+                const trimmed = input.length > 240 ? input.slice(0, 240) + "..." : input;
+                return `<div class="block-tool"><span class="tname">${esc(b.name)}</span> ${esc(trimmed)}</div>`;
+              }
+              return "";
+            })
+            .join("");
+          return `<div class="ev assistant"><div class="who">claude</div>${blocks}</div>`;
+        }
+        if (ev.kind === "tool_result") {
+          const out = ev.output.length > 1200 ? ev.output.slice(0, 1200) + "\n..." : ev.output;
+          return `<div class="ev tool_result${ev.isError ? " error" : ""}">${esc(out)}</div>`;
+        }
+        return "";
       }
 
-      async function refresh() {
+      function appendEvents(events) {
+        const wasAtBottom =
+          transcriptEl.scrollTop + transcriptEl.clientHeight >=
+          transcriptEl.scrollHeight - 40;
+        transcriptEl.insertAdjacentHTML(
+          "beforeend",
+          events.map(renderEvent).join(""),
+        );
+        if (wasAtBottom) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      }
+
+      async function openSession(id) {
+        activeSessionId = id;
+        activeSession = sessionsById.get(id) ?? null;
+        for (const li of list.querySelectorAll("li")) {
+          li.classList.toggle("active", li.dataset.id === id);
+        }
+        placeholder.style.display = "none";
+        sessionView.classList.add("active");
+        if (window.innerWidth <= 720) {
+          sidebar.classList.add("hidden");
+          main.classList.remove("hidden");
+        }
+        const s = activeSession;
+        if (s) {
+          $("sv-dot").className = `dot ${esc(s.status || "")}`;
+          $("sv-title").textContent = s.name || basename(s.cwd);
+          $("sv-meta").textContent = `${s.cwd}  ${s.kind}  ${s.sessionId.slice(0, 8)}`;
+          const noTmux = !s.hasTmuxPane;
+          composerEl.classList.toggle("disabled", noTmux);
+          composerText.disabled = noTmux;
+          btnSend.disabled = noTmux;
+          btnApprove.disabled = noTmux;
+          btnDeny.disabled = noTmux;
+          btnEscape.disabled = noTmux;
+          composerHint.textContent = noTmux ? "session not in tmux" : "";
+        }
+        transcriptEl.innerHTML = '<div class="empty">Loading...</div>';
+
+        const r = await fetch(`/api/sessions/${id}/transcript`);
+        if (!r.ok) {
+          transcriptEl.innerHTML = '<div class="empty">No transcript</div>';
+          return;
+        }
+        const { events } = await r.json();
+        transcriptEl.innerHTML = "";
+        appendEvents(events);
+
+        if (stream) stream.close();
+        stream = new EventSource(`/api/sessions/${id}/stream`);
+        stream.addEventListener("event", (e) => {
+          try {
+            appendEvents([JSON.parse(e.data)]);
+          } catch {}
+        });
+        stream.addEventListener("error", () => {
+          /* auto-reconnect handled by browser */
+        });
+      }
+
+      async function send(body) {
+        if (!activeSessionId) return;
+        const r = await fetch(`/api/sessions/${activeSessionId}/send`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          composerHint.textContent = `send failed: ${err.error ?? r.status}`;
+          setTimeout(() => (composerHint.textContent = ""), 3000);
+        }
+      }
+
+      btnSend.addEventListener("click", () => {
+        const text = composerText.value;
+        if (!text.trim()) return;
+        send({ text });
+        composerText.value = "";
+        autosize();
+      });
+      btnApprove.addEventListener("click", () => send({ key: "1" }).then(() => send({ key: "Enter" })));
+      btnDeny.addEventListener("click", () => send({ key: "2" }).then(() => send({ key: "Enter" })));
+      btnEscape.addEventListener("click", () => send({ key: "Escape" }));
+      back.addEventListener("click", () => {
+        sidebar.classList.remove("hidden");
+        main.classList.add("hidden");
+      });
+
+      composerText.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          btnSend.click();
+        }
+      });
+      function autosize() {
+        composerText.style.height = "auto";
+        composerText.style.height =
+          Math.min(composerText.scrollHeight, 200) + "px";
+      }
+      composerText.addEventListener("input", autosize);
+
+      async function refreshSidebar() {
         try {
-          const res = await fetch("/api/sessions");
-          const { sessions } = await res.json();
-          render(sessions);
+          const r = await fetch("/api/sessions");
+          const { sessions } = await r.json();
+          renderSidebar(sessions);
         } catch (err) {
           console.error(err);
         }
       }
 
-      refresh();
-      setInterval(refresh, 3000);
+      refreshSidebar();
+      setInterval(refreshSidebar, 3000);
     </script>
   </body>
 </html>
