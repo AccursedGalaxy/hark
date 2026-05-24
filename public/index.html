@@ -158,10 +158,18 @@
         border-radius: 6px; max-width: 100%;
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         font-size: 12px; color: var(--text-dim);
-        white-space: pre-wrap; word-wrap: break-word;
-        max-height: 200px; overflow-y: auto;
       }
       .ev.tool_result.error { border-left: 2px solid #ef4444; }
+      .ev.tool_result pre {
+        margin: 0; white-space: pre-wrap; word-wrap: break-word;
+        font-family: inherit; font-size: inherit;
+      }
+      .ev.tool_result .tr-more {
+        margin-top: 6px; background: transparent; color: var(--accent);
+        border: none; padding: 0; font-size: 11px; cursor: pointer;
+        font-family: inherit;
+      }
+      .ev.tool_result .tr-more:hover { text-decoration: underline; }
       .composer {
         border-top: 1px solid var(--border);
         padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
@@ -265,6 +273,9 @@
       let activeSession = null;
       let stream = null;
       let sessionsById = new Map();
+      const fullOutputs = new Map();
+      const TR_LINE_LIMIT = 24;
+      const TR_CHAR_LIMIT = 2000;
 
       const esc = (s) =>
         String(s).replace(/[&<>"']/g, (c) => ({
@@ -329,8 +340,21 @@
           return `<div class="ev assistant"><div class="who">claude</div>${blocks}</div>`;
         }
         if (ev.kind === "tool_result") {
-          const out = ev.output.length > 1200 ? ev.output.slice(0, 1200) + "\n..." : ev.output;
-          return `<div class="ev tool_result${ev.isError ? " error" : ""}">${esc(out)}</div>`;
+          const text = ev.output ?? "";
+          const lines = text.split("\n");
+          const truncated =
+            lines.length > TR_LINE_LIMIT || text.length > TR_CHAR_LIMIT;
+          let display = text;
+          if (truncated) {
+            display = lines.slice(0, TR_LINE_LIMIT).join("\n");
+            if (display.length > TR_CHAR_LIMIT)
+              display = display.slice(0, TR_CHAR_LIMIT);
+            fullOutputs.set(ev.uuid, text);
+          }
+          const more = truncated
+            ? `<button class="tr-more" data-uuid="${esc(ev.uuid)}">show full (${lines.length} lines)</button>`
+            : "";
+          return `<div class="ev tool_result${ev.isError ? " error" : ""}"><pre>${esc(display)}</pre>${more}</div>`;
         }
         return "";
       }
@@ -436,6 +460,17 @@
           Math.min(composerText.scrollHeight, 200) + "px";
       }
       composerText.addEventListener("input", autosize);
+
+      transcriptEl.addEventListener("click", (e) => {
+        const btn = e.target.closest(".tr-more");
+        if (!btn) return;
+        const uuid = btn.dataset.uuid;
+        const full = fullOutputs.get(uuid);
+        if (!full) return;
+        const pre = btn.parentElement.querySelector("pre");
+        if (pre) pre.textContent = full;
+        btn.remove();
+      });
 
       async function refreshSidebar() {
         try {
