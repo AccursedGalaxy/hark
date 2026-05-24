@@ -1,3 +1,12 @@
 node_modules
 dist
 .env
+.env.local
+
+# Vite build output — produced by `npm run build`, served by Express
+public/index.html
+public/assets/
+
+# Editor / scratch
+.playwright-mcp/
+*.png
