@@ -1,0 +1,33 @@
+/* Theme toggle — small chip that lives in the rail head. */
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 2px;
+  font-size: var(--font-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.theme-toggle button {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+.theme-toggle button:hover {
+  color: var(--text);
+}
+.theme-toggle button.is-active {
+  background: var(--surface-3);
+  color: var(--text);
+}

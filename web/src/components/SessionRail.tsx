@@ -3,6 +3,7 @@ import { STATE_LABEL } from "../lib/protocol";
 import { sessionLabel, tildeify } from "../lib/format";
 import { Dot } from "./Dot";
 import { NewSessionButton } from "./NewSessionButton";
+import { ThemeToggle } from "./ThemeToggle";
 
 export function SessionRail({
   sessions,
@@ -20,11 +21,14 @@ export function SessionRail({
   return (
     <aside className="rail" aria-label="Sessions">
       <div className="rail-head">
-        <span className="rail-head-title">Claude sessions</span>
-        <span className="rail-head-count">
-          {attentionCount > 0
-            ? `${attentionCount} / ${sessions.length}`
-            : sessions.length}
+        <span className="rail-head-title">Sessions</span>
+        <span className="rail-head-actions">
+          <span className="rail-head-count">
+            {attentionCount > 0
+              ? `${attentionCount} / ${sessions.length}`
+              : sessions.length}
+          </span>
+          <ThemeToggle />
         </span>
       </div>
       <div className="rail-toolbar">

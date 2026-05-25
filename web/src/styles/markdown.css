@@ -1,0 +1,132 @@
+/* Rendered markdown — applied via the `.md` class on the container.
+ * All styles scoped to `.md` so they don't leak into the rest of the app. */
+
+.md {
+  color: var(--text);
+  font-size: var(--font-md);
+  line-height: 1.6;
+}
+
+.md > * + * {
+  margin-top: var(--space-3);
+}
+
+.md p {
+  margin: 0;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+}
+.md h1 { font-size: 1.45em; letter-spacing: -0.01em; }
+.md h2 { font-size: 1.25em; letter-spacing: -0.005em; }
+.md h3 { font-size: 1.10em; }
+.md h4 { font-size: 1.00em; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+
+.md ul,
+.md ol {
+  margin: 0;
+  padding-left: var(--space-5);
+}
+.md li + li {
+  margin-top: var(--space-1);
+}
+.md ul li::marker {
+  color: var(--muted);
+}
+.md ol li::marker {
+  color: var(--muted);
+}
+
+.md a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.md a:hover {
+  border-bottom-color: var(--accent);
+}
+
+.md strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.md em {
+  font-style: italic;
+}
+
+.md blockquote {
+  margin: 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: var(--space-4) 0;
+}
+
+/* Inline code. */
+.md code {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: var(--radius-1);
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  color: var(--text);
+}
+
+/* Code blocks. Marked produces <pre><code>. */
+.md pre {
+  margin: 0;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: var(--radius-2);
+  padding: var(--space-3);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  line-height: 1.55;
+}
+.md pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  color: var(--text);
+}
+
+/* Tables — Markdown supports them too. */
+.md table {
+  border-collapse: collapse;
+  font-size: var(--font-md);
+  width: 100%;
+}
+.md th,
+.md td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.md th {
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: var(--font-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Tight variant for places where vertical rhythm matters less. */
+.md.md-tight > * + * {
+  margin-top: var(--space-2);
+}

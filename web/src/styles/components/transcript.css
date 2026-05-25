@@ -1,0 +1,177 @@
+/* Transcript — user bubbles, assistant blocks, tool results, system rows.
+ * Markdown styling lives in markdown.css so it can be reused outside the
+ * transcript later. */
+
+.transcript {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--space-4) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  font-size: var(--font-md);
+  line-height: 1.55;
+}
+.transcript-inner {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.transcript-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: var(--font-md);
+}
+
+.ev {
+  max-width: 100%;
+  min-width: 0;
+}
+.ev .who {
+  font-size: var(--font-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: var(--muted);
+  margin-bottom: var(--space-1);
+  font-weight: 600;
+}
+
+/* ---- User bubble (right-aligned) ---- */
+
+.ev-user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+.ev-user .who {
+  align-self: flex-end;
+}
+.bubble-user {
+  background: var(--user-bubble);
+  border: 1px solid var(--user-bubble-border);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-4) var(--radius-4) var(--radius-1) var(--radius-4);
+  max-width: min(85%, 640px);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+/* ---- Assistant (left-aligned, no bubble — chrome-free reading) ---- */
+
+/* `.assistant-text` is a container for either rendered markdown (the .md
+ * child handles its own typography) or, if we ever fall back, a plain string.
+ * Keep it minimal so it doesn't conflict with markdown.css. */
+.ev-assistant .assistant-text {
+  min-width: 0;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+.ev-assistant .assistant-text + .assistant-text {
+  margin-top: var(--space-3);
+}
+.ev-assistant .assistant-text + .block-tool,
+.ev-assistant .block-tool + .assistant-text {
+  margin-top: var(--space-3);
+}
+.ev-assistant .block-thinking {
+  color: var(--text-dim);
+  font-style: italic;
+  border-left: 2px solid var(--border);
+  padding-left: var(--space-3);
+  margin: var(--space-2) 0;
+  font-size: var(--font-md);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.ev-assistant .block-tool {
+  background: var(--tool-bg);
+  border: 1px solid var(--border-soft);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-2);
+  margin: var(--space-2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.block-tool .tool-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+.block-tool .tool-args {
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+/* ---- Tool result ---- */
+
+.ev-tool-result {
+  background: var(--tool-bg);
+  border: 1px solid var(--border-soft);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+}
+.ev-tool-result.is-error {
+  border-left: 2px solid var(--attn);
+}
+.ev-tool-result pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+.ev-tool-result .tr-more {
+  margin-top: var(--space-2);
+  background: transparent;
+  color: var(--accent);
+  border: none;
+  padding: 0;
+  font-size: var(--font-sm);
+  cursor: pointer;
+}
+.ev-tool-result .tr-more:hover {
+  text-decoration: underline;
+}
+
+/* ---- System row (centered, low-key) ---- */
+
+.ev-system {
+  align-self: center;
+  max-width: 90%;
+  font-size: var(--font-sm);
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+}
+.ev-system .system-label {
+  margin-right: var(--space-2);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-style: normal;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+@media (max-width: 480px) {
+  .transcript {
+    padding: var(--space-3);
+    gap: var(--space-3);
+  }
+}

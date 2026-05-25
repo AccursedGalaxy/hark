@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useKeyboardInset } from "../hooks/useKeyboardInset";
 import type { PendingPermission, PromptKind, SendBody } from "../lib/protocol";
+import { Markdown } from "./Markdown";
 
 const PROMPT_LABEL: Record<Exclude<PromptKind, null>, string> = {
   permission: "permission requested",
@@ -63,6 +64,11 @@ export function Composer({
   // prompts get the Approve/Deny pair; everything else hides both.
   const showApproveDeny = promptKind === "permission" && !isPlanMode;
   const showPlanButtons = isPlanMode;
+  // The secondary tools (Esc, Keys) and the prompt-status chip only matter
+  // when Claude is mid-interaction — otherwise they're visual noise in a
+  // calm "just type a message" state. We surface them whenever there's an
+  // active prompt (permission/elicitation/idle/plan).
+  const showInteractiveTools = !disabled && promptKind !== null;
   // Auto-open the keypad when Claude is awaiting a discrete choice
   // (permission digit, MCP elicitation form). Skip for "idle" — there the
   // user types a message in the textarea, raw keys aren't useful.
@@ -72,6 +78,11 @@ export function Composer({
   useEffect(() => {
     if (autoOpenKeypad) setKeypadOpen(true);
   }, [autoOpenKeypad]);
+  // When the prompt clears, retract the keypad so the composer returns to
+  // its calm state instead of leaving a wall of chips behind.
+  useEffect(() => {
+    if (!showInteractiveTools) setKeypadOpen(false);
+  }, [showInteractiveTools]);
 
   // Auto-grow the textarea up to a cap; matches the old composer's behavior.
   useLayoutEffect(() => {
@@ -131,113 +142,133 @@ export function Composer({
       )}
       <div className="composer">
         {pendingPermission && <PermissionCard pending={pendingPermission} />}
-        <textarea
-          ref={taRef}
-          rows={1}
-          value={text}
-          placeholder={
-            disabled
-              ? (disabledReason ?? "Disabled")
-              : "Send a message · Enter to send, Shift+Enter for newline"
-          }
-          disabled={disabled}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
-          aria-label="Message"
-        />
-        <div className="composer-actions">
+
+        {/* Textarea + floating send button inside its bottom-right corner.
+         * Padding-right on the textarea reserves room for the button so the
+         * text never slides underneath it. */}
+        <div className="composer-input">
+          <textarea
+            ref={taRef}
+            rows={1}
+            value={text}
+            placeholder={
+              disabled
+                ? (disabledReason ?? "Disabled")
+                : "Send a message…"
+            }
+            disabled={disabled}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={onKeyDown}
+            aria-label="Message"
+          />
           <button
             type="button"
-            className="btn-primary"
+            className="composer-send"
             onClick={() => void submitText()}
             disabled={disabled || busy || !text.trim()}
+            title="Send (Enter)"
+            aria-label="Send"
           >
-            Send
+            <SendIcon />
           </button>
-          {showApproveDeny && (
-            <>
-              <button
-                type="button"
-                className="btn-approve"
-                title="Send '1' then Enter (approve a permission prompt)"
-                onClick={() => void sendKeySequence(["1", "Enter"])}
-                disabled={disabled || busy}
-              >
-                Approve
-              </button>
-              <button
-                type="button"
-                className="btn-deny"
-                title="Send '2' then Enter (deny a permission prompt)"
-                onClick={() => void sendKeySequence(["2", "Enter"])}
-                disabled={disabled || busy}
-              >
-                Deny
-              </button>
-            </>
-          )}
-          {showPlanButtons && (
-            <>
-              <button
-                type="button"
-                className="btn-approve"
-                title="Send '1' then Enter — accept plan, auto-accept file edits"
-                onClick={() => void sendKeySequence(["1", "Enter"])}
-                disabled={disabled || busy}
-              >
-                Accept (auto)
-              </button>
-              <button
-                type="button"
-                className="btn-approve btn-approve-soft"
-                title="Send '2' then Enter — accept plan, review each edit"
-                onClick={() => void sendKeySequence(["2", "Enter"])}
-                disabled={disabled || busy}
-              >
-                Accept (review)
-              </button>
-              <button
-                type="button"
-                className="btn-deny"
-                title="Send '3' then Enter — keep planning"
-                onClick={() => void sendKeySequence(["3", "Enter"])}
-                disabled={disabled || busy}
-              >
-                Keep planning
-              </button>
-            </>
-          )}
-          <button
-            type="button"
-            className="btn-ghost"
-            title="Send Escape"
-            onClick={() => void sendKeySequence(["Escape"])}
-            disabled={disabled || busy}
-          >
-            Esc
-          </button>
-          <button
-            type="button"
-            className="btn-ghost btn-keypad-toggle"
-            title="Toggle raw key pad"
-            aria-expanded={keypadOpen}
-            onClick={() => setKeypadOpen((v) => !v)}
-            disabled={disabled}
-          >
-            {keypadOpen ? "Hide keys" : "Keys"}
-          </button>
-          {promptKind && !disabled && (
-            <span
-              className={`composer-hint composer-hint-prompt prompt-${promptKind}`}
-              title="What Claude Code is waiting for"
-            >
-              {PROMPT_LABEL[promptKind]}
-            </span>
-          )}
-          {disabled && disabledReason && (
-            <span className="composer-hint">{disabledReason}</span>
-          )}
         </div>
+
+        {/* Contextual action row — only renders when Claude is mid-interaction.
+         * Calm state shows the textarea alone, with no row below. */}
+        {(showInteractiveTools || (disabled && disabledReason)) && (
+          <div className="composer-actions">
+            <div className="composer-actions-primary">
+              {showApproveDeny && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-approve"
+                    title="Send '1' then Enter (approve a permission prompt)"
+                    onClick={() => void sendKeySequence(["1", "Enter"])}
+                    disabled={disabled || busy}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-deny"
+                    title="Send '2' then Enter (deny a permission prompt)"
+                    onClick={() => void sendKeySequence(["2", "Enter"])}
+                    disabled={disabled || busy}
+                  >
+                    Deny
+                  </button>
+                </>
+              )}
+              {showPlanButtons && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-approve"
+                    title="Send '1' then Enter — accept plan, auto-accept file edits"
+                    onClick={() => void sendKeySequence(["1", "Enter"])}
+                    disabled={disabled || busy}
+                  >
+                    Accept (auto)
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-approve btn-approve-soft"
+                    title="Send '2' then Enter — accept plan, review each edit"
+                    onClick={() => void sendKeySequence(["2", "Enter"])}
+                    disabled={disabled || busy}
+                  >
+                    Accept (review)
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-deny"
+                    title="Send '3' then Enter — keep planning"
+                    onClick={() => void sendKeySequence(["3", "Enter"])}
+                    disabled={disabled || busy}
+                  >
+                    Keep planning
+                  </button>
+                </>
+              )}
+            </div>
+
+            <div className="composer-actions-secondary">
+              {showInteractiveTools && (
+                <>
+                  <span
+                    className={`composer-hint-prompt prompt-${promptKind}`}
+                    title="What Claude Code is waiting for"
+                  >
+                    {PROMPT_LABEL[promptKind!]}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    title="Toggle raw key pad"
+                    aria-expanded={keypadOpen}
+                    aria-label={keypadOpen ? "Hide key pad" : "Show key pad"}
+                    onClick={() => setKeypadOpen((v) => !v)}
+                  >
+                    {keypadOpen ? "▾ Keys" : "▸ Keys"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    title="Send Escape"
+                    onClick={() => void sendKeySequence(["Escape"])}
+                    disabled={busy}
+                  >
+                    Esc
+                  </button>
+                </>
+              )}
+              {disabled && disabledReason && (
+                <span className="composer-hint">{disabledReason}</span>
+              )}
+            </div>
+          </div>
+        )}
         {keypadOpen && (
           <div className="composer-keypad" role="group" aria-label="Raw keys">
             {KEY_ROWS.map((row, i) => (
@@ -267,6 +298,27 @@ function isTouch() {
   return (
     typeof window !== "undefined" &&
     window.matchMedia("(pointer: coarse)").matches
+  );
+}
+
+// Up-arrow glyph; matches the "send" convention used by ChatGPT/Claude.ai.
+function SendIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M8 13V3M8 3L4 7M8 3L12 7"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -350,16 +402,16 @@ function PermissionCard({ pending }: { pending: PendingPermission }) {
         <span className="perm-card-label">permission</span>
         <span className="perm-card-badge">{summary.badge}</span>
       </div>
-      <pre
-        className="perm-card-body"
-        style={
-          summary.kind === "plan"
-            ? { maxHeight: PLAN_CARD_MAX_HEIGHT, overflow: "auto" }
-            : undefined
-        }
-      >
-        {display}
-      </pre>
+      {summary.kind === "plan" ? (
+        <div
+          className="perm-card-body"
+          style={{ maxHeight: PLAN_CARD_MAX_HEIGHT, overflow: "auto" }}
+        >
+          <Markdown source={display} tight />
+        </div>
+      ) : (
+        <pre className="perm-card-body">{display}</pre>
+      )}
       {summary.detail && <div className="perm-card-detail">{summary.detail}</div>}
       {tooLong && (
         <button

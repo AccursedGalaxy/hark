@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ContentBlock, TranscriptEvent } from "../lib/protocol";
 import { TR_CHAR_LIMIT, TR_LINE_LIMIT } from "../lib/format";
+import { Markdown } from "./Markdown";
 
 export function Transcript({
   events,
@@ -44,9 +45,11 @@ export function Transcript({
 
   return (
     <div className="transcript" ref={ref} onScroll={onScroll}>
-      {events.map((ev, i) => (
-        <EventRow key={ev.uuid || `${ev.kind}-${i}`} ev={ev} />
-      ))}
+      <div className="transcript-inner">
+        {events.map((ev, i) => (
+          <EventRow key={ev.uuid || `${ev.kind}-${i}`} ev={ev} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -89,7 +92,7 @@ function AssistantRow({ blocks }: { blocks: ContentBlock[] }) {
         if (b.type === "text")
           return (
             <div key={i} className="assistant-text">
-              {b.text}
+              <Markdown source={b.text} />
             </div>
           );
         if (b.type === "thinking")

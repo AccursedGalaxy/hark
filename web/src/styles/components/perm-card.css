@@ -1,0 +1,86 @@
+/* Pending-permission card — surfaced above the textarea when Claude is asking. */
+
+.perm-card {
+  background: var(--attn-bg);
+  border: 1px solid var(--attn);
+  border-radius: var(--radius-3);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.perm-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  font-weight: 600;
+}
+.perm-card-label {
+  color: var(--attn);
+}
+.perm-card-badge {
+  color: var(--text);
+  background: var(--bg);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  letter-spacing: 0;
+  text-transform: none;
+  font-weight: 500;
+}
+.perm-card-body {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+.perm-command .perm-card-body::before {
+  content: "$ ";
+  color: var(--muted);
+}
+.perm-path .perm-card-body,
+.perm-url .perm-card-body {
+  color: var(--accent);
+  word-break: break-all;
+}
+
+/* Plan mode — elevate as the body IS the artifact, not just a label. */
+.perm-plan {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+.perm-plan .perm-card-label {
+  color: var(--accent);
+}
+.perm-plan .perm-card-body {
+  /* Render markdown inside the plan card. The .md class is applied by the
+   * component for plan kind so users get formatted output for plans. */
+  font-family: var(--font-sans);
+  font-size: var(--font-md);
+}
+
+.perm-card-detail {
+  font-size: var(--font-sm);
+  color: var(--muted);
+}
+.perm-card-more {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  padding: 0;
+  font-size: var(--font-sm);
+  cursor: pointer;
+}
+.perm-card-more:hover {
+  text-decoration: underline;
+}

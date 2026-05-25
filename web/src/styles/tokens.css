@@ -1,0 +1,50 @@
+/* Design tokens — non-color primitives.
+ * Colors live in themes/*.css and are switched via [data-theme="..."] on <html>.
+ *
+ * Components should reference tokens, never raw values. If you find yourself
+ * reaching for a hex/px in a component, add a token here first.
+ */
+:root {
+  /* Spacing scale — 4px base. Keep it small and additive. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Corner radii — small for chrome, medium for cards, full for pills. */
+  --radius-1: 4px;
+  --radius-2: 6px;
+  --radius-3: 10px;
+  --radius-4: 14px;
+  --radius-pill: 999px;
+
+  /* Type scale. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    "Inter var", "Inter", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --font-xs: 10px;
+  --font-sm: 11px;
+  --font-md: 13px;
+  --font-base: 14px;
+  --font-lg: 15px;
+
+  /* Motion. */
+  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+  --duration-fast: 80ms;
+  --duration-med: 160ms;
+
+  /* Elevation. Use sparingly — refined/minimal favours flat surfaces. */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.32);
+
+  /* Layout. */
+  --rail-width: 280px;
+  --content-max: 760px;
+  --header-height: 52px; /* rail-head + session-head must match */
+
+  /* Focus ring width — colour comes from the theme. */
+  --focus-ring: 2px;
+}

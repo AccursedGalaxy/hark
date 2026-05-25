@@ -1,0 +1,89 @@
+/* Session pane and header. */
+
+.session-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.session-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  min-height: var(--header-height);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+/* On narrow screens the meta wraps onto its own line; let the header expand. */
+.is-narrow .session-head {
+  min-height: var(--header-height);
+  height: auto;
+  padding: var(--space-2) var(--space-4);
+}
+.back-btn {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-2);
+  transition: background var(--duration-fast) var(--ease);
+}
+.back-btn:hover {
+  background: var(--surface-2);
+}
+
+.session-head-title {
+  font-size: var(--font-base);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-head-state {
+  font-size: var(--font-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.session-head-meta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--font-sm);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  min-width: 0;
+}
+.session-head-dir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40ch;
+}
+.session-head-kind {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: var(--font-xs);
+}
+.session-head-id {
+  color: var(--text-dim);
+}
+.is-narrow .session-head-meta {
+  width: 100%;
+  margin-left: 0;
+  flex-wrap: wrap;
+}
+.is-narrow .session-head-dir {
+  max-width: 100%;
+}

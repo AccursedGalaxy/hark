@@ -1,0 +1,45 @@
+/* Light theme — warm off-white, easy on the eyes for long sessions. */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #fbfaf6;
+  --surface-1: #f4f2ec;
+  --surface-2: #ecebe4;
+  --surface-3: #e2e0d8;
+  --panel: #f7f5f0;
+
+  --border-soft: rgba(0, 0, 0, 0.06);
+  --border: rgba(0, 0, 0, 0.10);
+  --border-strong: rgba(0, 0, 0, 0.20);
+
+  --text: #1a1c1f;
+  --text-dim: #4d5158;
+  --muted: #767a80;
+
+  --accent: #3a6fc7;
+  --accent-strong: #2a55a4;
+  --accent-bg: rgba(58, 111, 199, 0.10);
+  --accent-bg-strong: rgba(58, 111, 199, 0.18);
+  --on-accent: #ffffff;
+
+  --busy: #a76311;
+  --busy-bg: rgba(167, 99, 17, 0.10);
+  --idle: #2f7a55;
+  --idle-bg: rgba(47, 122, 85, 0.10);
+  --attn: #b03038;
+  --attn-bg: rgba(176, 48, 56, 0.10);
+  --attn-bg-strong: rgba(176, 48, 56, 0.18);
+  --dead: #9ea0a3;
+
+  --user-bubble: rgba(58, 111, 199, 0.10);
+  --user-bubble-border: rgba(58, 111, 199, 0.20);
+  --tool-bg: #efedd6;
+  --code-bg: #f1efe6;
+  --code-border: rgba(0, 0, 0, 0.07);
+  --kbd-bg: #e2e0d8;
+
+  --scrollbar-thumb: rgba(0, 0, 0, 0.14);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.26);
+
+  --focus: rgba(58, 111, 199, 0.45);
+}

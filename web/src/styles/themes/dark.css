@@ -1,0 +1,57 @@
+/* Dark theme — default.
+ * Refined palette: near-black surfaces with a single warm-blue accent.
+ * To add a new theme, copy this file and override only the colour tokens.
+ */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surfaces — layered from deepest (bg) to highest (surface-3). */
+  --bg: #0b0c0d;
+  --surface-1: #111315;
+  --surface-2: #16191c;
+  --surface-3: #1c2024;
+  --panel: #0f1113;
+
+  /* Borders, in increasing strength. */
+  --border-soft: rgba(255, 255, 255, 0.05);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  /* Text. */
+  --text: #e7e8ea;
+  --text-dim: #a8acb1;
+  --muted: #70757b;
+
+  /* Accent (interaction). */
+  --accent: #7aa2f7;
+  --accent-strong: #5d87e8;
+  --accent-bg: rgba(122, 162, 247, 0.12);
+  --accent-bg-strong: rgba(122, 162, 247, 0.22);
+  --on-accent: #0b0c0d;
+
+  /* State colours — busy/idle/wait/dead drive Dot and rail rows. */
+  --busy: #e0a458;
+  --busy-bg: rgba(224, 164, 88, 0.12);
+  --idle: #7ec699;
+  --idle-bg: rgba(126, 198, 153, 0.12);
+  --attn: #f07178;
+  --attn-bg: rgba(240, 113, 120, 0.12);
+  --attn-bg-strong: rgba(240, 113, 120, 0.20);
+  --dead: #4b5159;
+
+  /* Surfaces for specific content types. */
+  --user-bubble: rgba(122, 162, 247, 0.14);
+  --user-bubble-border: rgba(122, 162, 247, 0.22);
+  --tool-bg: #141618;
+  --code-bg: #0e1013;
+  --code-border: rgba(255, 255, 255, 0.06);
+  --kbd-bg: #1c2024;
+
+  /* Scrollbar. */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.10);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.20);
+
+  /* Focus ring. */
+  --focus: rgba(122, 162, 247, 0.45);
+}

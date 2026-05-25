@@ -70,7 +70,7 @@ export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
       <div className="rail-new-actions">
         <button
           type="button"
-          className="btn-primary"
+          className="btn btn-primary"
           onClick={() => void go()}
           disabled={busy || !cwd.trim()}
         >
@@ -78,7 +78,7 @@ export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
         </button>
         <button
           type="button"
-          className="btn-ghost"
+          className="btn btn-ghost"
           onClick={close}
           disabled={busy}
         >
