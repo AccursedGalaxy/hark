@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -23,5 +24,15 @@ export default defineConfig({
   build: {
     outDir: "../public",
     emptyOutDir: true,
+    rollupOptions: {
+      // Multi-page build: the main app + a dev-only preview at /preview.html
+      // that renders every PromptPanel variant in isolation. The preview
+      // page bypasses the hook stream entirely so we can screenshot each
+      // pending state for visual review without a live Claude session.
+      input: {
+        index: resolve(__dirname, "index.html"),
+        preview: resolve(__dirname, "preview.html"),
+      },
+    },
   },
 });

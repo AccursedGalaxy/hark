@@ -7,15 +7,16 @@ import {
 } from "react";
 import { useKeyboardInset } from "../hooks/useKeyboardInset";
 import type {
-  PendingPermission,
+  Pending,
   PromptKind,
   SendBody,
+  SessionError,
   SlashCommand,
   UploadedFile,
 } from "../lib/protocol";
 import { useSlashMenu } from "../lib/slashMenu";
 import { fetchSlashCommands } from "../lib/transport";
-import { Markdown } from "./Markdown";
+import { PromptPanel } from "./PromptPanel";
 import { SlashCommandMenu } from "./SlashCommandMenu";
 
 const PROMPT_LABEL: Record<Exclude<PromptKind, null>, string> = {
@@ -24,8 +25,6 @@ const PROMPT_LABEL: Record<Exclude<PromptKind, null>, string> = {
   idle: "awaiting your reply",
 };
 
-const PERMISSION_CARD_MAX = 400; // chars in collapsed summary
-const PLAN_CARD_MAX_HEIGHT = "40vh";
 // Pastes longer than this prompt the user to attach the content as a file
 // instead of jamming a wall of text into the textarea (and into the tmux
 // pane). Tuned so a typical stack trace still goes inline.
@@ -81,7 +80,8 @@ export function Composer({
   disabledReason,
   errorMessage,
   promptKind,
-  pendingPermission,
+  pending,
+  lastError,
   cwd,
   onSend,
   onUpload,
@@ -90,7 +90,11 @@ export function Composer({
   disabledReason?: string;
   errorMessage: string | null;
   promptKind: PromptKind;
-  pendingPermission: PendingPermission | null;
+  // Discriminated "what is Claude waiting for" — drives the rich
+  // PromptPanel surface above the textarea. Null when not waiting.
+  pending: Pending | null;
+  // Most recent error from StopFailure, surfaced as a retry chip.
+  lastError: SessionError | null;
   cwd?: string;
   onSend: (body: SendBody) => Promise<void>;
   onUpload: (
@@ -122,10 +126,15 @@ export function Composer({
   const dragDepth = useRef(0);
   const kbInset = useKeyboardInset();
 
-  const isPlanMode = pendingPermission?.toolName === "ExitPlanMode";
-  const showApproveDeny = promptKind === "permission" && !isPlanMode;
-  const showPlanButtons = isPlanMode;
+  // Tier-0 prompt classes that the PromptPanel renders inline (each carries
+  // its own primary action buttons). For everything else (a generic
+  // `permission` from the legacy hook path with no `pending` payload), the
+  // composer keeps the simple Approve/Deny pair as the fallback.
+  const richKind = pending?.kind ?? null;
+  const showApproveDeny =
+    promptKind === "permission" && richKind === null;
   const showInteractiveTools = !disabled && promptKind !== null;
+  const showRichPanel = !disabled && (pending !== null || lastError !== null);
   const autoOpenKeypad =
     promptKind === "permission" || promptKind === "elicitation";
 
@@ -453,7 +462,14 @@ export function Composer({
       )}
 
       <div className="composer">
-        {pendingPermission && <PermissionCard pending={pendingPermission} />}
+        {showRichPanel && (
+          <PromptPanel
+            pending={pending}
+            lastError={lastError}
+            busy={busy}
+            onSend={onSend}
+          />
+        )}
 
         {allChips.length > 0 && (
           <div className="composer-attachments" role="list" aria-label="Attachments">
@@ -649,37 +665,6 @@ export function Composer({
                     disabled={disabled || busy}
                   >
                     Deny
-                  </button>
-                </>
-              )}
-              {showPlanButtons && (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn-approve"
-                    title="Send '1' then Enter — accept plan, auto-accept file edits"
-                    onClick={() => void sendKeySequence(["1", "Enter"])}
-                    disabled={disabled || busy}
-                  >
-                    Accept (auto)
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-approve btn-approve-soft"
-                    title="Send '2' then Enter — accept plan, review each edit"
-                    onClick={() => void sendKeySequence(["2", "Enter"])}
-                    disabled={disabled || busy}
-                  >
-                    Accept (review)
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-deny"
-                    title="Send '3' then Enter — keep planning"
-                    onClick={() => void sendKeySequence(["3", "Enter"])}
-                    disabled={disabled || busy}
-                  >
-                    Keep planning
                   </button>
                 </>
               )}
@@ -1021,100 +1006,3 @@ function CloseIcon() {
   );
 }
 
-// ---- Permission card -------------------------------------------------------
-
-type PermissionSummary = {
-  badge: string;
-  kind: "command" | "path" | "url" | "plan" | "raw";
-  body: string;
-  detail?: string;
-};
-
-function summarizePermission(p: PendingPermission): PermissionSummary {
-  const input = (p.toolInput ?? {}) as Record<string, unknown>;
-  const str = (v: unknown): string =>
-    typeof v === "string" ? v : v == null ? "" : JSON.stringify(v);
-
-  switch (p.toolName) {
-    case "Bash":
-    case "PowerShell":
-      return { badge: p.toolName, kind: "command", body: str(input.command) };
-    case "Edit":
-    case "Write":
-    case "NotebookEdit":
-      return {
-        badge: p.toolName,
-        kind: "path",
-        body: str(input.file_path ?? input.path ?? input.notebook_path),
-      };
-    case "WebFetch":
-      return { badge: "WebFetch", kind: "url", body: str(input.url) };
-    case "WebSearch":
-      return { badge: "WebSearch", kind: "raw", body: str(input.query) };
-    case "ExitPlanMode":
-      return { badge: "Plan ready", kind: "plan", body: str(input.plan) };
-    case "Agent":
-    case "Task": {
-      const subagent = str(input.subagent_type) || "agent";
-      const desc = str(input.description) || str(input.prompt);
-      return { badge: `Agent · ${subagent}`, kind: "raw", body: desc };
-    }
-    default: {
-      if (p.toolName.startsWith("mcp__")) {
-        const parts = p.toolName.split("__");
-        const server = parts[1] ?? "?";
-        const tool = parts.slice(2).join("__") || "?";
-        return {
-          badge: `MCP · ${server}`,
-          kind: "raw",
-          body: `${tool}(${JSON.stringify(input)})`,
-        };
-      }
-      return {
-        badge: p.toolName,
-        kind: "raw",
-        body: JSON.stringify(input),
-      };
-    }
-  }
-}
-
-function PermissionCard({ pending }: { pending: PendingPermission }) {
-  const summary = summarizePermission(pending);
-  const [expanded, setExpanded] = useState(false);
-  const tooLong =
-    summary.kind !== "plan" && summary.body.length > PERMISSION_CARD_MAX;
-  const display =
-    tooLong && !expanded
-      ? summary.body.slice(0, PERMISSION_CARD_MAX) + "…"
-      : summary.body;
-
-  return (
-    <div className={`perm-card perm-${summary.kind}`} role="region" aria-label="Pending permission">
-      <div className="perm-card-head">
-        <span className="perm-card-label">permission</span>
-        <span className="perm-card-badge">{summary.badge}</span>
-      </div>
-      {summary.kind === "plan" ? (
-        <div
-          className="perm-card-body"
-          style={{ maxHeight: PLAN_CARD_MAX_HEIGHT, overflow: "auto" }}
-        >
-          <Markdown source={display} tight />
-        </div>
-      ) : (
-        <pre className="perm-card-body">{display}</pre>
-      )}
-      {summary.detail && <div className="perm-card-detail">{summary.detail}</div>}
-      {tooLong && (
-        <button
-          type="button"
-          className="perm-card-more"
-          onClick={() => setExpanded((v) => !v)}
-        >
-          {expanded ? "show less" : `show full (${summary.body.length} chars)`}
-        </button>
-      )}
-    </div>
-  );
-}

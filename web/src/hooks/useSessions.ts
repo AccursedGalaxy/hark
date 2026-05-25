@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AttentionInfo,
-  PendingPermission,
+  Pending,
   PromptKind,
   RawSession,
   SendBody,
+  SessionError,
   SessionState,
+  SubagentInfo,
   TranscriptEvent,
   UploadedFile,
 } from "../lib/protocol";
@@ -47,9 +49,14 @@ export interface SessionsApi {
   // isn't. Decided server-side by PromptState and broadcast as the
   // `promptKind` field on AttentionInfo.
   currentPromptKind: PromptKind;
-  // Tool detail for the pending permission on the current session, if any
-  // (from the PermissionRequest hook). Drives the rich permission card.
-  currentPendingPermission: PendingPermission | null;
+  // Discriminated "Claude is waiting" state (per-tool permission, plan
+  // acceptance, ask-user-question, elicitation, oauth). Drives the rich
+  // PromptPanel surface.
+  currentPending: Pending | null;
+  // Last StopFailure on the current session, if any.
+  currentLastError: SessionError | null;
+  // Currently-running subagents on the current session.
+  currentSubagents: SubagentInfo[];
   clearAttention: (id: string) => void;
   closeSession: (id: string) => Promise<void>;
   refresh: () => void;
@@ -85,6 +92,10 @@ function applyAttention(
         lastEventMessage: att.message ?? s.lastEventMessage,
         notificationType: att.notificationType ?? s.notificationType,
         pendingPermission: att.pendingPermission ?? s.pendingPermission,
+        pending: att.pending ?? s.pending,
+        lastError: att.lastError ?? s.lastError,
+        subagents: att.subagents ?? s.subagents,
+        cwd: att.cwd ?? s.cwd,
       }
     : s;
   return { ...merged, state: deriveState(merged) };
@@ -141,6 +152,10 @@ export function useSessions(): SessionsApi {
               message: v.message,
               notificationType: v.notificationType,
               pendingPermission: v.pendingPermission,
+              pending: v.pending,
+              lastError: v.lastError,
+              subagents: v.subagents,
+              cwd: v.cwd,
               promptKind: v.promptKind ?? null,
             };
           }
@@ -157,6 +172,10 @@ export function useSessions(): SessionsApi {
               message: ev.message,
               notificationType: ev.notificationType,
               pendingPermission: ev.pendingPermission,
+              pending: ev.pending,
+              lastError: ev.lastError,
+              subagents: ev.subagents,
+              cwd: ev.cwd,
               promptKind: ev.promptKind ?? null,
             },
           }));
@@ -199,9 +218,19 @@ export function useSessions(): SessionsApi {
     return attention[current]?.promptKind ?? null;
   }, [current, attention]);
 
-  const currentPendingPermission = useMemo<PendingPermission | null>(() => {
+  const currentPending = useMemo<Pending | null>(() => {
     if (!current) return null;
-    return attention[current]?.pendingPermission ?? null;
+    return attention[current]?.pending ?? null;
+  }, [current, attention]);
+
+  const currentLastError = useMemo<SessionError | null>(() => {
+    if (!current) return null;
+    return attention[current]?.lastError ?? null;
+  }, [current, attention]);
+
+  const currentSubagents = useMemo<SubagentInfo[]>(() => {
+    if (!current) return [];
+    return attention[current]?.subagents ?? [];
   }, [current, attention]);
 
   const setCurrent = useCallback((id: string | null) => {
@@ -286,7 +315,7 @@ export function useSessions(): SessionsApi {
         if (cancelled) return;
         setEvents((prev) => [...prev, ev]);
         // External resolution: any new transcript event newer than the
-        // pending permission means the user already answered the prompt
+        // pending state means the user already answered the prompt
         // somewhere else (e.g., typing 1 in the CLI). Clear the local
         // attention immediately instead of waiting for the server-side
         // broadcast — which fires from the same signal but takes a
@@ -296,14 +325,17 @@ export function useSessions(): SessionsApi {
         if (!Number.isFinite(tsMs)) return;
         setAttention((prev) => {
           const cur = prev[sessionId];
-          const pp = cur?.pendingPermission;
-          if (!cur || !pp || tsMs <= pp.requestedAt) return prev;
+          const requestedAt =
+            cur?.pending?.requestedAt ?? cur?.pendingPermission?.requestedAt;
+          if (!cur || requestedAt === undefined || tsMs <= requestedAt)
+            return prev;
           return {
             ...prev,
             [sessionId]: {
               ...cur,
               needsAttention: false,
               pendingPermission: undefined,
+              pending: undefined,
               promptKind: null,
             },
           };
@@ -329,13 +361,21 @@ export function useSessions(): SessionsApi {
         setAttention((prev) => {
           const cur = prev[current];
           if (!cur) return prev;
-          if (!cur.needsAttention && !cur.pendingPermission) return prev;
+          if (
+            !cur.needsAttention &&
+            !cur.pendingPermission &&
+            !cur.pending &&
+            !cur.lastError
+          )
+            return prev;
           return {
             ...prev,
             [current]: {
               ...cur,
               needsAttention: false,
               pendingPermission: undefined,
+              pending: undefined,
+              lastError: undefined,
               promptKind: null,
             },
           };
@@ -409,7 +449,9 @@ export function useSessions(): SessionsApi {
     sendError,
     upload,
     currentPromptKind,
-    currentPendingPermission,
+    currentPending,
+    currentLastError,
+    currentSubagents,
     clearAttention,
     closeSession,
     refresh,

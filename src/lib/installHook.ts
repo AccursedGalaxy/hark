@@ -3,10 +3,31 @@ export type HookGroup = { matcher?: string; hooks: HookCommand[] };
 export type HooksMap = Record<string, HookGroup[]>;
 export type Settings = { hooks?: HooksMap; [k: string]: unknown };
 
-// Notification + Stop signal "needs attention"; PermissionRequest carries
-// the tool name + input so hark can render "Allow `npm test`?" instead of
-// a generic "needs you". See docs/interactions.md.
-const MANAGED_EVENTS = ["Notification", "Stop", "PermissionRequest"] as const;
+// Hook events hark consumes — anything Claude Code can fire that we render
+// in the UI. Adding an event here is the first step; the second is teaching
+// PromptState what to do with it in src/lib/promptState.ts.
+//
+// - Notification: coarse "needs you" signal (idle_prompt, auth_success, ...)
+// - Stop: turn boundary — clears pending state
+// - StopFailure: turn ended with an error (rate_limit, auth, billing, …)
+// - PermissionRequest: tool decision dialog (Bash/Edit/WebFetch/AskUserQuestion/ExitPlanMode/MCP)
+// - PermissionDenied: auto-mode classifier rejected — surfaces as a toast
+// - Elicitation / ElicitationResult: MCP server-driven form lifecycle
+// - SubagentStart / SubagentStop: per-session running-agent badges
+// - CwdChanged: header path tracking
+// See docs/interactions.md and docs/prompts.md for the full catalog.
+const MANAGED_EVENTS = [
+  "Notification",
+  "Stop",
+  "StopFailure",
+  "PermissionRequest",
+  "PermissionDenied",
+  "Elicitation",
+  "ElicitationResult",
+  "SubagentStart",
+  "SubagentStop",
+  "CwdChanged",
+] as const;
 
 export function buildHookCommand(url: string): string {
   return `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}' >/dev/null 2>&1 || true`;

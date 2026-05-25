@@ -22,6 +22,120 @@ export interface PendingPermission {
   requestedAt: number;
 }
 
+// ---- AskUserQuestion schema (Tier 0.2) ----
+//
+// Mirrors the `AskUserQuestion` tool input the model writes when it wants a
+// structured clarification. Each call carries 1–4 questions; each question
+// 2–4 options. Anthropic auto-injects an "Other" affordance in the TUI.
+export interface AskQuestionOption {
+  label: string;
+  description?: string;
+  // Optional inline preview (markdown). Rendered next to the label so the
+  // user can compare options visually instead of guessing from labels alone.
+  preview?: string;
+}
+export interface AskQuestion {
+  question: string;
+  // Short chip-style label (~12 chars) the TUI shows above the question.
+  header?: string;
+  options: AskQuestionOption[];
+  multiSelect?: boolean;
+}
+
+// ---- ExitPlanMode (Tier 0.3) ----
+//
+// `tool_input.plan` is a markdown string the user judges before continuing.
+export interface PlanModeInput {
+  plan: string;
+}
+
+// ---- MCP elicitation (Tier 0.4) ----
+//
+// Fields the server asks the user to fill in. Type maps loosely to JSON
+// Schema primitives; renderer degrades to a plain text field on unknown.
+export type ElicitationFieldType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "enum"
+  | string;
+export interface ElicitationField {
+  name: string;
+  type: ElicitationFieldType;
+  required?: boolean;
+  // For `enum` fields. Renderer treats as <select>.
+  options?: string[];
+  // Optional display hint pulled from the schema's `description`.
+  description?: string;
+}
+
+// ---- StopFailure (Tier 1.2) ----
+//
+// Documented `error_type` values as of 2026 — kept open with `string` so
+// future categories don't silently drop.
+export type StopErrorType =
+  | "rate_limit"
+  | "authentication_failed"
+  | "oauth_org_not_allowed"
+  | "billing_error"
+  | "invalid_request"
+  | "model_not_found"
+  | "server_error"
+  | "max_output_tokens"
+  | "unknown"
+  | string;
+export interface SessionError {
+  errorType: StopErrorType;
+  errorMessage: string;
+  occurredAt: number;
+}
+
+// ---- Subagent activity (Tier 1.3) ----
+export interface SubagentInfo {
+  agentId: string;
+  agentType: string;
+  startedAt: number;
+}
+
+// ---- Discriminated "blocked on user" union ----
+//
+// Replaces the single `pendingPermission` field. Every Tier-0 state is one
+// `Pending` variant; the frontend switches on `kind` to render the right UI.
+// We still expose `pendingPermission` on the wire for back-compat (existing
+// clients) — the union is the new authoritative field.
+export type Pending =
+  | {
+      kind: "tool_permission";
+      toolName: string;
+      toolInput: unknown;
+      toolUseId?: string;
+      requestedAt: number;
+    }
+  | {
+      kind: "ask_user_question";
+      questions: AskQuestion[];
+      toolUseId?: string;
+      requestedAt: number;
+    }
+  | {
+      kind: "exit_plan_mode";
+      plan: string;
+      toolUseId?: string;
+      requestedAt: number;
+    }
+  | {
+      kind: "elicitation";
+      serverName: string;
+      message?: string;
+      fields: ElicitationField[];
+      requestedAt: number;
+    }
+  | {
+      kind: "oauth";
+      message: string;
+      requestedAt: number;
+    };
+
 export interface RawSession {
   pid: number;
   sessionId: string;
@@ -44,6 +158,12 @@ export interface RawSession {
   lastEventMessage?: string;
   notificationType?: string;
   pendingPermission?: PendingPermission;
+  // Discriminated "blocked on user" state — superset of pendingPermission.
+  pending?: Pending;
+  // StopFailure metadata if the last turn ended with an error.
+  lastError?: SessionError;
+  // Live subagents on this session (populated by Subagent{Start,Stop} hooks).
+  subagents?: SubagentInfo[];
 }
 
 // Derived UI state. The backend's raw `status` plus the hook attention layer
@@ -179,6 +299,11 @@ export function indexToolResults(
 // "permission" shows Approve/Deny; "elicitation" shows just the keypad;
 // "idle" lets the user type freely; null means not waiting on the user.
 // Map per docs/interactions.md — informational types collapse to null.
+//
+// Note: this is the *coarse* kind for back-compat. The fine-grained shape
+// lives on `pending` (discriminated union) and supersedes it for new
+// renderers. `permission` here covers ALL Pending variants except `idle`,
+// so legacy code that only branches on `promptKind` still behaves.
 export type PromptKind = "permission" | "elicitation" | "idle" | null;
 
 // Per-session attention state, exactly as recorded by PromptState on the
@@ -194,8 +319,22 @@ export interface AttentionInfo {
   lastEventAt: number;
   message?: string;
   notificationType?: string;
+  // Legacy field: present only when `pending.kind === "tool_permission"`,
+  // mirrored from `pending` for back-compat. New clients should read
+  // `pending` directly.
   pendingPermission?: PendingPermission;
+  // Authoritative "what is Claude waiting for" — discriminated by `kind`.
+  // Absent when nothing is pending (idle or just status notifications).
+  pending?: Pending;
   promptKind: PromptKind;
+  // Most recent StopFailure on this session, if any. Cleared when the user
+  // takes any action (send, clear-attention) or the session goes idle.
+  lastError?: SessionError;
+  // Currently-running subagents on this session, indexed by id.
+  subagents?: SubagentInfo[];
+  // Cached working directory — updated by CwdChanged hooks so the header
+  // reflects the live cwd without round-tripping `claude --info`.
+  cwd?: string;
 }
 
 export interface HookBroadcast extends AttentionInfo {
@@ -211,13 +350,17 @@ export function derivePromptKind(
   att:
     | (Pick<AttentionInfo, "needsAttention" | "lastEvent" | "notificationType"> & {
         pendingPermission?: PendingPermission;
+        pending?: Pending;
       })
     | undefined,
 ): PromptKind {
   if (!att) return null;
   if (!att.needsAttention) return null;
-  // PermissionRequest always wins — even if a later Notification of a
-  // different kind arrived, the tool decision is the user's actual gate.
+  // The discriminated `pending` field is authoritative when present.
+  if (att.pending) {
+    return att.pending.kind === "elicitation" ? "elicitation" : "permission";
+  }
+  // Legacy: PermissionRequest may have set only the back-compat field.
   if (att.pendingPermission) return "permission";
   if (att.lastEvent !== "Notification") return null;
   switch (att.notificationType) {

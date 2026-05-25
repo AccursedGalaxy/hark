@@ -33,21 +33,44 @@ describe("isManagedCommand", () => {
 });
 
 describe("installHooks", () => {
-  it("creates Notification + Stop + PermissionRequest entries on empty settings", () => {
+  it("creates entries for every managed hook event on empty settings", () => {
     const next = installHooks({}, URL);
-    expect(next.hooks.Notification).toHaveLength(1);
-    expect(next.hooks.Stop).toHaveLength(1);
-    expect(next.hooks.PermissionRequest).toHaveLength(1);
-    expect(next.hooks.Notification[0].hooks[0].command).toContain(URL);
-    expect(next.hooks.PermissionRequest[0].hooks[0].command).toContain(URL);
+    // The exhaustive list lives in installHook.ts MANAGED_EVENTS; we assert
+    // each event is wired so adding one there forces a test update too.
+    for (const ev of [
+      "Notification",
+      "Stop",
+      "StopFailure",
+      "PermissionRequest",
+      "PermissionDenied",
+      "Elicitation",
+      "ElicitationResult",
+      "SubagentStart",
+      "SubagentStop",
+      "CwdChanged",
+    ]) {
+      expect(next.hooks[ev]).toHaveLength(1);
+      expect(next.hooks[ev][0].hooks[0].command).toContain(URL);
+    }
   });
 
   it("is idempotent — re-installing does not duplicate entries", () => {
     const once = installHooks({}, URL);
     const twice = installHooks(once, URL);
-    expect(twice.hooks.Notification).toHaveLength(1);
-    expect(twice.hooks.Stop).toHaveLength(1);
-    expect(twice.hooks.PermissionRequest).toHaveLength(1);
+    for (const ev of [
+      "Notification",
+      "Stop",
+      "StopFailure",
+      "PermissionRequest",
+      "PermissionDenied",
+      "Elicitation",
+      "ElicitationResult",
+      "SubagentStart",
+      "SubagentStop",
+      "CwdChanged",
+    ]) {
+      expect(twice.hooks[ev]).toHaveLength(1);
+    }
   });
 
   it("preserves unrelated keys and unrelated hooks", () => {
@@ -102,6 +125,9 @@ describe("uninstallHooks", () => {
     expect(next.hooks.Notification).toHaveLength(1);
     expect(next.hooks.Notification[0].hooks[0].command).toBe("say 'hi'");
     expect(next.hooks.Stop ?? []).toHaveLength(0);
+    expect(next.hooks.StopFailure ?? []).toHaveLength(0);
+    expect(next.hooks.Elicitation ?? []).toHaveLength(0);
+    expect(next.hooks.SubagentStart ?? []).toHaveLength(0);
   });
 
   it("leaves settings untouched if not installed", () => {

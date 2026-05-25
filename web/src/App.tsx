@@ -39,7 +39,8 @@ export default function App() {
     sendError,
     upload,
     currentPromptKind,
-    currentPendingPermission,
+    currentPending,
+    currentLastError,
     closeSession,
     refresh,
   } = useSessions();
@@ -154,7 +155,8 @@ export default function App() {
                     }
                     errorMessage={sendError}
                     promptKind={currentPromptKind}
-                    pendingPermission={currentPendingPermission}
+                    pending={currentPending}
+                    lastError={currentLastError}
                     cwd={currentSession.cwd}
                     onSend={send}
                     onUpload={upload}

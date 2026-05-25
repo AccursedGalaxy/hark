@@ -366,4 +366,261 @@ describe("PromptState", () => {
       expect(state.snapshot().s1.pendingPermission).toBeDefined();
     });
   });
+
+  // ---- NEW: discriminated `pending` for AskUserQuestion / plan / etc. ---
+
+  describe("pending discriminated union", () => {
+    it("Bash PermissionRequest → pending.kind 'tool_permission'", () => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+        tool_use_id: "use-1",
+      });
+      expect(ev.pending?.kind).toBe("tool_permission");
+      if (ev.pending?.kind !== "tool_permission") throw new Error("kind");
+      expect(ev.pending.toolName).toBe("Bash");
+      expect(ev.pending.toolUseId).toBe("use-1");
+      // Legacy field still set for back-compat with old clients.
+      expect(ev.pendingPermission?.toolName).toBe("Bash");
+    });
+
+    it("AskUserQuestion PermissionRequest → pending.kind 'ask_user_question' with questions", () => {
+      const questions = [
+        {
+          question: "How should I format?",
+          header: "Format",
+          options: [{ label: "Summary" }, { label: "Detailed" }],
+          multiSelect: false,
+        },
+      ];
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "AskUserQuestion",
+        tool_input: { questions },
+      });
+      expect(ev.pending?.kind).toBe("ask_user_question");
+      if (ev.pending?.kind !== "ask_user_question") throw new Error("kind");
+      expect(ev.pending.questions).toHaveLength(1);
+      expect(ev.pending.questions[0].header).toBe("Format");
+      // No legacy mirror — only tool_permission variants set pendingPermission.
+      expect(ev.pendingPermission).toBeUndefined();
+      // promptKind stays "permission" — covers all blocking variants.
+      expect(ev.promptKind).toBe("permission");
+    });
+
+    it("ExitPlanMode PermissionRequest → pending.kind 'exit_plan_mode' with plan", () => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "ExitPlanMode",
+        tool_input: { plan: "# Plan\n- Step one\n- Step two" },
+      });
+      expect(ev.pending?.kind).toBe("exit_plan_mode");
+      if (ev.pending?.kind !== "exit_plan_mode") throw new Error("kind");
+      expect(ev.pending.plan).toContain("Step one");
+    });
+
+    it("AskUserQuestion with malformed tool_input still yields an empty questions array", () => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "AskUserQuestion",
+        tool_input: { questions: "not-an-array" },
+      });
+      expect(ev.pending?.kind).toBe("ask_user_question");
+      if (ev.pending?.kind !== "ask_user_question") throw new Error("kind");
+      expect(ev.pending.questions).toEqual([]);
+    });
+
+    it("Stop after PermissionRequest drops pending union as well as legacy field", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "AskUserQuestion",
+        tool_input: {
+          questions: [{ question: "?", options: [{ label: "a" }] }],
+        },
+      });
+      const ev = state.record({ session_id: "s1", hook_event_name: "Stop" });
+      expect(ev.pending).toBeUndefined();
+      expect(ev.pendingPermission).toBeUndefined();
+      expect(ev.promptKind).toBe(null);
+    });
+
+    it("transcript-based resolver also clears pending union state", async () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "AskUserQuestion",
+        tool_input: {
+          questions: [{ question: "?", options: [{ label: "a" }] }],
+        },
+        transcript_path: "/tmp/sess.jsonl",
+      });
+      const requestedAt = state.snapshot().s1.pending!.requestedAt;
+      const out = await state.resolveStaleFromTranscripts(async () => ({
+        mtimeMs: requestedAt + 1000,
+      }));
+      expect(out).toHaveLength(1);
+      expect(state.snapshot().s1.pending).toBeUndefined();
+    });
+  });
+
+  // ---- NEW: Elicitation hook --------------------------------------------
+
+  describe("Elicitation", () => {
+    it("records form fields as pending.kind 'elicitation' with normalized fields", () => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "Elicitation",
+        server_name: "github",
+        message: "Pick a repo",
+        form_fields: [
+          { name: "repo", type: "string", required: true },
+          {
+            name: "visibility",
+            type: "enum",
+            options: ["public", "private"],
+            required: false,
+          },
+          // malformed entry — must be skipped, not thrown
+          { type: "string" },
+          "garbage",
+        ],
+      });
+      expect(ev.pending?.kind).toBe("elicitation");
+      if (ev.pending?.kind !== "elicitation") throw new Error("kind");
+      expect(ev.pending.serverName).toBe("github");
+      expect(ev.pending.fields).toHaveLength(2);
+      expect(ev.pending.fields[0]).toMatchObject({
+        name: "repo",
+        type: "string",
+        required: true,
+      });
+      expect(ev.pending.fields[1]).toMatchObject({
+        name: "visibility",
+        type: "enum",
+        options: ["public", "private"],
+      });
+      expect(ev.promptKind).toBe("elicitation");
+    });
+
+    it("ElicitationResult clears pending state without raising needsAttention", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "Elicitation",
+        server_name: "github",
+        form_fields: [{ name: "repo", type: "string" }],
+      });
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "ElicitationResult",
+      });
+      expect(ev.needsAttention).toBe(false);
+      expect(ev.pending).toBeUndefined();
+    });
+  });
+
+  // ---- NEW: StopFailure --------------------------------------------------
+
+  describe("StopFailure", () => {
+    it("records lastError with type + message; drops any prior pending", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "StopFailure",
+        error_type: "rate_limit",
+        error_message: "Try again in 30s",
+      });
+      expect(ev.lastError).toEqual(
+        expect.objectContaining({
+          errorType: "rate_limit",
+          errorMessage: "Try again in 30s",
+        }),
+      );
+      expect(ev.pending).toBeUndefined();
+      expect(ev.pendingPermission).toBeUndefined();
+      expect(ev.needsAttention).toBe(true);
+    });
+
+    it("clear() also drops lastError", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "StopFailure",
+        error_type: "server_error",
+        error_message: "x",
+      });
+      state.clear("s1");
+      expect(state.snapshot().s1.lastError).toBeUndefined();
+    });
+
+    it("clean Stop clears any stale lastError", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "StopFailure",
+        error_type: "server_error",
+        error_message: "boom",
+      });
+      const ev = state.record({ session_id: "s1", hook_event_name: "Stop" });
+      expect(ev.lastError).toBeUndefined();
+    });
+  });
+
+  // ---- NEW: Subagent activity -------------------------------------------
+
+  describe("subagent tracking", () => {
+    it("SubagentStart adds an entry; SubagentStop removes it; neither marks needs-attention", () => {
+      const a = state.record({
+        session_id: "s1",
+        hook_event_name: "SubagentStart",
+        agent_id: "sub-1",
+        agent_type: "general-purpose",
+      });
+      expect(a.subagents).toHaveLength(1);
+      expect(a.subagents?.[0]).toMatchObject({
+        agentId: "sub-1",
+        agentType: "general-purpose",
+      });
+      expect(a.needsAttention).toBe(false);
+
+      const b = state.record({
+        session_id: "s1",
+        hook_event_name: "SubagentStart",
+        agent_id: "sub-2",
+        agent_type: "explore",
+      });
+      expect(b.subagents).toHaveLength(2);
+
+      const c = state.record({
+        session_id: "s1",
+        hook_event_name: "SubagentStop",
+        agent_id: "sub-1",
+      });
+      expect(c.subagents).toHaveLength(1);
+      expect(c.subagents?.[0].agentId).toBe("sub-2");
+    });
+  });
+
+  // ---- NEW: CwdChanged ---------------------------------------------------
+
+  describe("CwdChanged", () => {
+    it("updates the cached cwd without raising needs-attention", () => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "CwdChanged",
+        cwd: "/new/dir",
+        previous_cwd: "/old/dir",
+      });
+      expect(ev.cwd).toBe("/new/dir");
+      expect(ev.needsAttention).toBe(false);
+    });
+  });
 });
