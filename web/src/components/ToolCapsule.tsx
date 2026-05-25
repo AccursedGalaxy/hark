@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ToolResultEvent } from "../lib/protocol";
 import { TR_CHAR_LIMIT, TR_LINE_LIMIT } from "../lib/format";
 import {
@@ -51,18 +51,25 @@ export function ToolCapsule({ name, input, result, standalone, taskSubject }: Pr
   });
   const status = deriveStatus(result);
   const [open, setOpen] = useState<boolean>(status === "bad" || !!standalone);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const canExpand = !!result || standalone;
 
   return (
     <div
+      ref={rootRef}
       className={"tool " + toneToClass(summary.tone) + " " + statusToClass(status)}
       data-open={open ? "true" : "false"}
     >
       <button
         type="button"
         className="tool-head"
-        onClick={() => canExpand && setOpen((v) => !v)}
+        onClick={() => {
+          if (!canExpand) return;
+          const wasOpen = open;
+          setOpen((v) => !v);
+          if (!wasOpen) scrollIntoViewIfClipped(rootRef.current);
+        }}
         disabled={!canExpand && status !== "running"}
         aria-expanded={open}
       >
@@ -130,16 +137,23 @@ function AgentCapsule({
   const [open, setOpen] = useState<boolean>(false);
   const [promptOpen, setPromptOpen] = useState<boolean>(false);
   const canExpand = !!result;
+  const rootRef = useRef<HTMLDivElement>(null);
 
   return (
     <div
+      ref={rootRef}
       className={"tool agent " + statusToClass(status)}
       data-open={open ? "true" : "false"}
     >
       <button
         type="button"
         className="tool-head agent-head"
-        onClick={() => canExpand && setOpen((v) => !v)}
+        onClick={() => {
+          if (!canExpand) return;
+          const wasOpen = open;
+          setOpen((v) => !v);
+          if (!wasOpen) scrollIntoViewIfClipped(rootRef.current);
+        }}
         disabled={!canExpand && status !== "running"}
         aria-expanded={open}
       >
@@ -177,7 +191,11 @@ function AgentCapsule({
               <button
                 type="button"
                 className="agent-section-head"
-                onClick={() => setPromptOpen((v) => !v)}
+                onClick={() => {
+                  const wasOpen = promptOpen;
+                  setPromptOpen((v) => !v);
+                  if (!wasOpen) scrollIntoViewIfClipped(rootRef.current);
+                }}
                 aria-expanded={promptOpen}
               >
                 <span className="lbl">Prompt</span>
@@ -382,6 +400,40 @@ function Badge({ badge }: { badge: ToolBadge }) {
           ? "new"
           : "info";
   return <span className={`diff-pill ${cls}`}>{badge.text}</span>;
+}
+
+// Scroll the capsule into view after the expanded body has laid out, but
+// only when its bottom is below the scroll container. We defer to rAF so
+// React's commit + the browser's layout pass for the now-mounted body have
+// finished — measuring before that would use the pre-expand height.
+function scrollIntoViewIfClipped(el: HTMLElement | null) {
+  if (!el) return;
+  requestAnimationFrame(() => {
+    const container = findScrollContainer(el);
+    const r = el.getBoundingClientRect();
+    if (container) {
+      const c = container.getBoundingClientRect();
+      if (r.bottom <= c.bottom && r.top >= c.top) return;
+    } else {
+      if (r.bottom <= window.innerHeight && r.top >= 0) return;
+    }
+    el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+}
+
+function findScrollContainer(el: HTMLElement): HTMLElement | null {
+  let p: HTMLElement | null = el.parentElement;
+  while (p) {
+    const style = getComputedStyle(p);
+    if (
+      (style.overflowY === "auto" || style.overflowY === "scroll") &&
+      p.scrollHeight > p.clientHeight
+    ) {
+      return p;
+    }
+    p = p.parentElement;
+  }
+  return null;
 }
 
 function toneToClass(tone: ToolTone): string {
