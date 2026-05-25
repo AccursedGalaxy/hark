@@ -115,6 +115,30 @@ export interface TranscriptStreamHandlers {
   onError?: () => void;
 }
 
+// Diagnostic timestamps attached by the server when HARK_TIMING=1. Used only
+// to log latency breakdowns in the browser console; not part of the protocol.
+interface ServerTiming {
+  tWatch: number;
+  tParsed: number;
+  tSse: number;
+}
+
+function logEventTiming(ev: TranscriptEvent, t: ServerTiming): void {
+  const tReceive = Date.now();
+  const parsed = ev.ts ? new Date(ev.ts).getTime() : NaN;
+  const tJsonl = Number.isFinite(parsed) ? parsed : t.tWatch;
+  const uuid = ev.uuid ? ev.uuid.slice(0, 8) : "-";
+  // eslint-disable-next-line no-console
+  console.log(
+    `[timing] kind=${ev.kind} uuid=${uuid} ` +
+      `jsonl→watch=${t.tWatch - tJsonl}ms ` +
+      `watch→parse=${t.tParsed - t.tWatch}ms ` +
+      `parse→sse=${t.tSse - t.tParsed}ms ` +
+      `sse→recv=${tReceive - t.tSse}ms ` +
+      `total=${tReceive - tJsonl}ms`,
+  );
+}
+
 export function openTranscriptStream(
   sessionId: string,
   handlers: TranscriptStreamHandlers,
@@ -125,7 +149,11 @@ export function openTranscriptStream(
   es.addEventListener("ready", () => handlers.onReady?.());
   es.addEventListener("event", (e: MessageEvent) => {
     try {
-      handlers.onEvent(JSON.parse(e.data) as TranscriptEvent);
+      const data = JSON.parse(e.data) as TranscriptEvent & {
+        _timing?: ServerTiming;
+      };
+      if (data._timing) logEventTiming(data, data._timing);
+      handlers.onEvent(data);
     } catch {
       /* ignore */
     }

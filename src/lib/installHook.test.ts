@@ -33,11 +33,13 @@ describe("isManagedCommand", () => {
 });
 
 describe("installHooks", () => {
-  it("creates Notification + Stop entries on empty settings", () => {
+  it("creates Notification + Stop + PermissionRequest entries on empty settings", () => {
     const next = installHooks({}, URL);
     expect(next.hooks.Notification).toHaveLength(1);
     expect(next.hooks.Stop).toHaveLength(1);
+    expect(next.hooks.PermissionRequest).toHaveLength(1);
     expect(next.hooks.Notification[0].hooks[0].command).toContain(URL);
+    expect(next.hooks.PermissionRequest[0].hooks[0].command).toContain(URL);
   });
 
   it("is idempotent — re-installing does not duplicate entries", () => {
@@ -45,6 +47,7 @@ describe("installHooks", () => {
     const twice = installHooks(once, URL);
     expect(twice.hooks.Notification).toHaveLength(1);
     expect(twice.hooks.Stop).toHaveLength(1);
+    expect(twice.hooks.PermissionRequest).toHaveLength(1);
   });
 
   it("preserves unrelated keys and unrelated hooks", () => {

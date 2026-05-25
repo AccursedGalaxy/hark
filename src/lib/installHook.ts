@@ -3,7 +3,10 @@ export type HookGroup = { matcher?: string; hooks: HookCommand[] };
 export type HooksMap = Record<string, HookGroup[]>;
 export type Settings = { hooks?: HooksMap; [k: string]: unknown };
 
-const MANAGED_EVENTS = ["Notification", "Stop"] as const;
+// Notification + Stop signal "needs attention"; PermissionRequest carries
+// the tool name + input so hark can render "Allow `npm test`?" instead of
+// a generic "needs you". See docs/interactions.md.
+const MANAGED_EVENTS = ["Notification", "Stop", "PermissionRequest"] as const;
 
 export function buildHookCommand(url: string): string {
   return `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}' >/dev/null 2>&1 || true`;

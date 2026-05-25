@@ -8,6 +8,12 @@
 export type SessionStatus = "busy" | "idle" | string;
 export type SessionKind = "interactive" | "bg" | string;
 
+export interface PendingPermission {
+  toolName: string;
+  toolInput: unknown;
+  requestedAt: number;
+}
+
 export interface RawSession {
   pid: number;
   sessionId: string;
@@ -23,6 +29,8 @@ export interface RawSession {
   lastEvent?: string;
   lastEventAt?: number;
   lastEventMessage?: string;
+  notificationType?: string;
+  pendingPermission?: PendingPermission;
 }
 
 // Derived UI state. The backend's raw `status` plus the hook attention layer
@@ -70,10 +78,49 @@ export interface AttentionInfo {
   lastEvent?: string;
   lastEventAt?: number;
   message?: string;
+  notificationType?: string;
+  pendingPermission?: PendingPermission;
 }
 
 export interface HookBroadcast extends AttentionInfo {
   sessionId: string;
+}
+
+// What kind of input Claude Code is waiting for. Drives Composer UI:
+// "permission" shows Approve/Deny; "elicitation" shows just the keypad;
+// "idle" lets the user type freely; null means not waiting on the user.
+// Map per docs/interactions.md — informational types collapse to null.
+export type PromptKind = "permission" | "elicitation" | "idle" | null;
+
+export function derivePromptKind(
+  att: AttentionInfo | undefined,
+  resolvedAt: number,
+): PromptKind {
+  if (!att) return null;
+  // PermissionRequest always wins — even if a later Notification of a
+  // different kind arrived, the tool decision is the user's actual gate.
+  if (att.pendingPermission && att.pendingPermission.requestedAt > resolvedAt) {
+    return "permission";
+  }
+  if (att.lastEvent !== "Notification") return null;
+  const last = att.lastEventAt ?? 0;
+  if (last <= resolvedAt) return null;
+  switch (att.notificationType) {
+    case "permission_prompt":
+      return "permission";
+    case "elicitation_dialog":
+      return "elicitation";
+    case "idle_prompt":
+      return "idle";
+    case "auth_success":
+    case "elicitation_complete":
+    case "elicitation_response":
+      return null;
+    default:
+      // Missing or unknown — older Claude Code or a future type. Assume
+      // permission so the user still gets Approve/Deny.
+      return "permission";
+  }
 }
 
 // ---- Send-key payloads (POST /api/sessions/:id/send) ----

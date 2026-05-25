@@ -757,6 +757,177 @@ button {
   color: var(--muted);
   font-size: 11px;
 }
+.composer-hint-prompt {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+.composer-hint-prompt.prompt-permission {
+  color: var(--attn);
+  background: var(--attn-bg);
+}
+.composer-hint-prompt.prompt-elicitation {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+.composer-hint-prompt.prompt-idle {
+  color: var(--idle);
+  background: var(--idle-bg);
+}
+
+/* ---- Permission card ----
+ * Rendered above the textarea when the PermissionRequest hook has surfaced a
+ * pending tool decision. The whole card pulses subtly so the user notices
+ * mid-typing; the plan variant gets a scrollable body for ExitPlanMode.
+ */
+.perm-card {
+  background: var(--attn-bg);
+  border: 1px solid var(--attn);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.perm-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.perm-card-label {
+  color: var(--attn);
+  font-weight: 700;
+}
+.perm-card-badge {
+  color: var(--text);
+  background: var(--bg);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.perm-card-body {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+.perm-command .perm-card-body::before {
+  content: "$ ";
+  color: var(--muted);
+}
+.perm-path .perm-card-body,
+.perm-url .perm-card-body {
+  color: var(--accent);
+  word-break: break-all;
+}
+.perm-plan {
+  /* Elevate plan mode — the body is the artifact, not a label */
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+.perm-plan .perm-card-label {
+  color: var(--accent);
+}
+.perm-card-detail {
+  font-size: 11px;
+  color: var(--muted);
+}
+.perm-card-more {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  padding: 0;
+  font-size: 11px;
+  cursor: pointer;
+}
+.perm-card-more:hover {
+  text-decoration: underline;
+}
+
+/* Soft variant of approve, used for plan "Accept (review)" so it visually
+ * sits between the bold "Accept (auto)" and the destructive "Keep planning". */
+.composer-actions .btn-approve.btn-approve-soft {
+  background: transparent;
+  color: var(--idle);
+  border-color: var(--idle);
+  font-weight: 500;
+}
+.composer-actions .btn-approve.btn-approve-soft:hover:not(:disabled) {
+  background: var(--idle-bg);
+  color: var(--idle);
+}
+
+/* ---- Raw key pad ----
+ * Shown when Claude is awaiting input or when the user toggles "Keys".
+ * Covers prompts the high-level Approve/Deny buttons can't reach:
+ * list pickers (↑↓←→), plan-mode options (digits 3-5), y/n confirms,
+ * Tab cycles, and Ctrl+C interrupts. Each chip sends a single key —
+ * sequences are user-composed. See docs/interactions.md.
+ */
+.composer-keypad {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-soft);
+}
+.keypad-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.key-chip {
+  flex: 0 0 auto;
+  min-width: 36px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.08s ease;
+}
+.key-chip:hover:not(:disabled) {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+.key-chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn-keypad-toggle {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+@media (max-width: 480px) {
+  /* Bigger tap targets on mobile — the keypad is the main reason to be on
+   * a phone (driving a session from the couch). */
+  .key-chip {
+    min-width: 42px;
+    padding: 9px 12px;
+    font-size: 13px;
+  }
+}
 
 /* iOS specifically: bump font on the textarea to avoid auto-zoom */
 @supports (-webkit-touch-callout: none) {

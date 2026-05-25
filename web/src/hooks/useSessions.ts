@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AttentionInfo,
+  PendingPermission,
+  PromptKind,
   RawSession,
   SendBody,
   SessionState,
   TranscriptEvent,
 } from "../lib/protocol";
-import { deriveState } from "../lib/protocol";
+import { derivePromptKind, deriveState } from "../lib/protocol";
 import {
   clearAttention as clearAttentionApi,
   fetchSessions,
@@ -34,9 +36,13 @@ export interface SessionsApi {
   transcriptError: string | null;
   send: (body: SendBody) => Promise<void>;
   sendError: string | null;
-  // True when the current session has an unresolved Claude Code Notification
-  // hook (permission prompt or idle waiting). Cleared when the user sends.
-  currentRequestingInput: boolean;
+  // What Claude Code is waiting for on the current session, or null if it
+  // isn't. Derived from the Notification hook's notification_type field;
+  // see derivePromptKind in protocol.ts.
+  currentPromptKind: PromptKind;
+  // Tool detail for the pending permission on the current session, if any
+  // (from the PermissionRequest hook). Drives the rich permission card.
+  currentPendingPermission: PendingPermission | null;
   clearAttention: (id: string) => void;
   refresh: () => void;
 }
@@ -69,6 +75,8 @@ function applyAttention(
         lastEvent: att.lastEvent ?? s.lastEvent,
         lastEventAt: att.lastEventAt ?? s.lastEventAt,
         lastEventMessage: att.message ?? s.lastEventMessage,
+        notificationType: att.notificationType ?? s.notificationType,
+        pendingPermission: att.pendingPermission ?? s.pendingPermission,
       }
     : s;
   return { ...merged, state: deriveState(merged) };
@@ -119,6 +127,8 @@ export function useSessions(): SessionsApi {
             lastEvent: v.lastEvent,
             lastEventAt: v.lastEventAt,
             message: v.message,
+            notificationType: v.notificationType,
+            pendingPermission: v.pendingPermission,
           };
         }
         setAttention(next);
@@ -132,6 +142,8 @@ export function useSessions(): SessionsApi {
             lastEvent: ev.lastEvent,
             lastEventAt: ev.lastEventAt,
             message: ev.message,
+            notificationType: ev.notificationType,
+            pendingPermission: ev.pendingPermission,
           },
         }));
       },
@@ -154,13 +166,18 @@ export function useSessions(): SessionsApi {
     [sessions, current],
   );
 
-  const currentRequestingInput = useMemo(() => {
-    if (!current) return false;
+  const currentPromptKind = useMemo<PromptKind>(() => {
+    if (!current) return null;
+    return derivePromptKind(attention[current], resolvedAt[current] ?? 0);
+  }, [current, attention, resolvedAt]);
+
+  const currentPendingPermission = useMemo<PendingPermission | null>(() => {
+    if (!current) return null;
     const att = attention[current];
-    if (!att || att.lastEvent !== "Notification") return false;
-    const last = att.lastEventAt ?? 0;
-    const resolved = resolvedAt[current] ?? 0;
-    return last > resolved;
+    const pp = att?.pendingPermission;
+    if (!pp) return null;
+    if (pp.requestedAt <= (resolvedAt[current] ?? 0)) return null;
+    return pp;
   }, [current, attention, resolvedAt]);
 
   const setCurrent = useCallback((id: string | null) => {
@@ -193,11 +210,18 @@ export function useSessions(): SessionsApi {
     setTranscriptError(null);
     setEvents([]);
 
+    const tStart = performance.now();
     fetchTranscript(sessionId)
       .then(({ events: initial }) => {
         if (cancelled) return;
+        const tFetched = performance.now();
         setEvents(initial);
         setTranscriptLoading(false);
+        // eslint-disable-next-line no-console
+        console.log(
+          `[timing] session-switch sid=${sessionId.slice(0, 8)} ` +
+            `events=${initial.length} fetch=${(tFetched - tStart).toFixed(0)}ms`,
+        );
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -208,6 +232,15 @@ export function useSessions(): SessionsApi {
       });
 
     const close = openTranscriptStream(sessionId, {
+      onReady: () => {
+        if (cancelled) return;
+        const tReady = performance.now();
+        // eslint-disable-next-line no-console
+        console.log(
+          `[timing] stream-ready sid=${sessionId.slice(0, 8)} ` +
+            `open=${(tReady - tStart).toFixed(0)}ms`,
+        );
+      },
       onEvent: (ev) => {
         if (cancelled) return;
         setEvents((prev) => [...prev, ev]);
@@ -259,7 +292,8 @@ export function useSessions(): SessionsApi {
     transcriptError,
     send,
     sendError,
-    currentRequestingInput,
+    currentPromptKind,
+    currentPendingPermission,
     clearAttention,
     refresh,
   };

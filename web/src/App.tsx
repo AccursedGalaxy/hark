@@ -36,7 +36,8 @@ export default function App() {
     transcriptError,
     send,
     sendError,
-    currentRequestingInput,
+    currentPromptKind,
+    currentPendingPermission,
     refresh,
   } = useSessions();
 
@@ -114,7 +115,8 @@ export default function App() {
                     : undefined
                 }
                 errorMessage={sendError}
-                requestingInput={currentRequestingInput}
+                promptKind={currentPromptKind}
+                pendingPermission={currentPendingPermission}
                 onSend={send}
               />
             </>

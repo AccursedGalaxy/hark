@@ -32,8 +32,9 @@ function parseArgs(argv: string[]): { mode: Mode; url: string } {
 function printHelp(): void {
   console.log(`Usage: install-hooks [--uninstall] [--url=URL]
 
-Idempotently merges Notification + Stop hook entries into
-~/.claude/settings.json that POST to URL (default http://localhost:3000/api/hook).
+Idempotently merges Notification + Stop + PermissionRequest hook entries
+into ~/.claude/settings.json that POST to URL (default
+http://localhost:3000/api/hook).
 
   --uninstall    Remove the managed entries.
   --url=URL      Hook endpoint URL (default localhost:3000/api/hook).
@@ -78,7 +79,7 @@ async function main(): Promise<void> {
   await writeSettings(settingsPath, after);
   console.log(
     mode === "install"
-      ? `Installed Notification + Stop hooks → ${url}\n  ${buildHookCommand(url)}\n  ${settingsPath}`
+      ? `Installed Notification + Stop + PermissionRequest hooks → ${url}\n  ${buildHookCommand(url)}\n  ${settingsPath}`
       : `Removed managed hooks for ${url}\n  ${settingsPath}`,
   );
 }

@@ -18,6 +18,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = Number(process.env.PORT) || 3000;
 
+// Diagnostic instrumentation. When HARK_TIMING=1, attach per-stage timestamps
+// to each SSE event so the client can log end-to-end latency. Off by default.
+const TIMING = process.env.HARK_TIMING === "1";
+
 const sessionsDir = path.join(os.homedir(), ".claude", "sessions");
 const projectsDir = path.join(os.homedir(), ".claude", "projects");
 
@@ -120,6 +124,8 @@ app.get("/api/sessions", async (_req, res) => {
         lastEvent: att?.lastEvent,
         lastEventAt: att?.lastEventAt,
         lastEventMessage: att?.message,
+        notificationType: att?.notificationType,
+        pendingPermission: att?.pendingPermission,
       };
     }),
   );
@@ -180,17 +186,38 @@ app.get("/api/sessions/:id/stream", async (req, res) => {
   res.write(`event: ready\ndata: ${JSON.stringify({ offset })}\n\n`);
 
   let inFlight = false;
+  // First watch-fire time per pending batch; reset when drain consumes it.
+  let pendingWatchTs: number | null = null;
   const drain = async () => {
     if (inFlight) return;
     inFlight = true;
+    const tWatch = pendingWatchTs ?? Date.now();
+    pendingWatchTs = null;
     try {
       const { events, offset: newOffset } = await readFromOffset(
         filePath,
         offset,
       );
+      const tParsed = Date.now();
       offset = newOffset;
       for (const ev of events) {
-        writeEvent(res, "event", ev);
+        const tSse = Date.now();
+        const payload = TIMING
+          ? { ...ev, _timing: { tWatch, tParsed, tSse } }
+          : ev;
+        writeEvent(res, "event", payload);
+        if (TIMING) {
+          const parsedTs = ev.ts ? Date.parse(ev.ts) : NaN;
+          const tJsonl = Number.isFinite(parsedTs) ? parsedTs : tWatch;
+          const sid = req.params.id.slice(0, 8);
+          const uuid = ev.uuid ? ev.uuid.slice(0, 8) : "-";
+          console.log(
+            `[timing] sid=${sid} kind=${ev.kind} uuid=${uuid} ` +
+              `jsonl→watch=${tWatch - tJsonl}ms ` +
+              `watch→parse=${tParsed - tWatch}ms ` +
+              `parse→sse=${tSse - tParsed}ms`,
+          );
+        }
       }
     } catch (err) {
       writeEvent(res, "error", { message: String(err) });
@@ -200,6 +227,7 @@ app.get("/api/sessions/:id/stream", async (req, res) => {
   };
 
   const watcher = watch(filePath, () => {
+    if (pendingWatchTs === null) pendingWatchTs = Date.now();
     void drain();
   });
   const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);

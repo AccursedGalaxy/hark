@@ -73,4 +73,114 @@ describe("HookState", () => {
       state.snapshot().s1.lastEventAt,
     );
   });
+
+  it("passes through notification_type as notificationType", () => {
+    const ev = state.record({
+      session_id: "s1",
+      hook_event_name: "Notification",
+      notification_type: "permission_prompt",
+      message: "Claude needs your permission to use Bash",
+    });
+    expect(ev.notificationType).toBe("permission_prompt");
+    expect(ev.needsAttention).toBe(true);
+    expect(state.snapshot().s1.notificationType).toBe("permission_prompt");
+  });
+
+  it.each([
+    "auth_success",
+    "elicitation_complete",
+    "elicitation_response",
+  ])(
+    "treats %s as informational — recorded but not needs-attention",
+    (type) => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "Notification",
+        notification_type: type,
+      });
+      expect(ev.needsAttention).toBe(false);
+      expect(ev.notificationType).toBe(type);
+      expect(state.snapshot().s1.needsAttention).toBe(false);
+    },
+  );
+
+  it("treats unknown notification_type as needs-attention (back-compat)", () => {
+    const ev = state.record({
+      session_id: "s1",
+      hook_event_name: "Notification",
+      notification_type: "some_future_type",
+    });
+    expect(ev.needsAttention).toBe(true);
+    expect(ev.notificationType).toBe("some_future_type");
+  });
+
+  describe("PermissionRequest", () => {
+    it("captures tool_name + tool_input as pendingPermission", () => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "npm test" },
+      });
+      expect(ev.needsAttention).toBe(true);
+      expect(ev.lastEvent).toBe("PermissionRequest");
+      expect(ev.pendingPermission).toMatchObject({
+        toolName: "Bash",
+        toolInput: { command: "npm test" },
+      });
+      expect(ev.pendingPermission?.requestedAt).toBeGreaterThan(0);
+    });
+
+    it("preserves pendingPermission when Notification arrives after", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Edit",
+        tool_input: { file_path: "/x.ts" },
+      });
+      state.record({
+        session_id: "s1",
+        hook_event_name: "Notification",
+        notification_type: "permission_prompt",
+        message: "Claude needs your permission to use Edit",
+      });
+      const snap = state.snapshot().s1;
+      expect(snap.pendingPermission?.toolName).toBe("Edit");
+      expect(snap.notificationType).toBe("permission_prompt");
+      expect(snap.lastEvent).toBe("Notification");
+    });
+
+    it("replaces pendingPermission on a new PermissionRequest", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "WebFetch",
+        tool_input: { url: "https://example.com" },
+      });
+      const snap = state.snapshot().s1;
+      expect(snap.pendingPermission?.toolName).toBe("WebFetch");
+      expect(snap.pendingPermission?.toolInput).toEqual({
+        url: "https://example.com",
+      });
+    });
+
+    it("clear() drops pendingPermission alongside needsAttention", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf /" },
+      });
+      state.clear("s1");
+      const snap = state.snapshot().s1;
+      expect(snap.needsAttention).toBe(false);
+      expect(snap.pendingPermission).toBeUndefined();
+    });
+  });
 });
