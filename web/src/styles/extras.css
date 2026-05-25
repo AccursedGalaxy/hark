@@ -1250,6 +1250,118 @@
   display: none;
 }
 
+/* QuestionCard on narrow.
+
+   The desktop design uses generous padding (20/22px) and a 26px serif
+   title, intended for a 880px-wide dock with plenty of vertical room.
+   On a phone — especially with the soft keyboard up — a 4-option card
+   easily exceeds the visible area and the Send/Cancel buttons fall
+   off the bottom edge, leaving the user unable to submit.
+
+   Two complementary moves:
+     1. Tighten paddings + fonts so the card simply takes less space.
+     2. Cap height with overflow-y: auto on the card and make .q-actions
+        position: sticky bottom so the buttons stay reachable even when
+        the options list is long. */
+.app.is-narrow .question {
+  padding: 14px 14px 12px;
+  border-radius: 14px;
+  max-height: 60dvh;
+  overflow-y: auto;
+}
+.app.is-narrow .q-tag {
+  font-size: 9.5px;
+  padding: 3px 9px 3px 7px;
+}
+.app.is-narrow .q-title {
+  margin: 8px 0 2px;
+  font-size: 18px;
+  line-height: 1.2;
+}
+.app.is-narrow .q-options {
+  margin-top: 10px;
+  gap: 6px;
+}
+.app.is-narrow .q-opt {
+  padding: 9px 11px;
+  border-radius: 10px;
+  column-gap: 10px;
+  grid-template-columns: 22px 1fr;
+}
+.app.is-narrow .q-opt .key {
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+}
+.app.is-narrow .q-opt .head { font-size: 13px; }
+.app.is-narrow .q-opt .body { font-size: 12px; line-height: 1.45; }
+.app.is-narrow .q-actions {
+  margin-top: 10px;
+  gap: 6px;
+  position: sticky;
+  bottom: -12px;
+  padding: 8px 0 4px;
+  background: linear-gradient(180deg, transparent, var(--ink-2) 30%);
+}
+.app.is-narrow .q-actions .hint { display: none; }
+.app.is-narrow .q-actions .btn { padding: 8px 12px; font-size: 13px; }
+.app.is-narrow .q-actions .btn-custom { font-size: 12px; padding: 7px 10px; }
+
+/* PromptPanel cards (tool_permission, exit_plan_mode, elicitation,
+   oauth, error) on narrow. Same idea as QuestionCard: tighten and
+   make the action row sticky so the user can always reach Approve /
+   Deny / Cancel. */
+.app.is-narrow .prompt-panel {
+  padding: 10px 10px 0;
+  gap: 8px;
+}
+.app.is-narrow .pp-card {
+  border-radius: 12px;
+  max-height: 55dvh;
+  display: flex;
+  flex-direction: column;
+}
+.app.is-narrow .pp-card-head {
+  padding: 8px 12px;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.app.is-narrow .pp-card-eyebrow { font-size: 9.5px; }
+.app.is-narrow .pp-card-badge { font-size: 10.5px; padding: 2px 7px; }
+.app.is-narrow .pp-card-detail,
+.app.is-narrow .pp-card-hint { font-size: 10px; }
+.app.is-narrow .pp-card-body {
+  padding: 10px 12px;
+  gap: 8px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+.app.is-narrow .pp-questions { gap: 10px; }
+.app.is-narrow .pp-question-text { font-size: 16px; line-height: 1.25; }
+.app.is-narrow .pp-options { gap: 5px; }
+.app.is-narrow .pp-option { padding: 8px 10px; border-radius: 9px; }
+.app.is-narrow .pp-option-label { font-size: 13px; }
+.app.is-narrow .pp-option-desc { font-size: 11.5px; }
+.app.is-narrow .pp-plan-scroll { max-height: none; }
+/* Actions row stays glued to the bottom of the card on narrow. It
+   appears in two structural positions across PromptPanel variants:
+   sometimes as a sibling of pp-card-body (PlanModeView, ErrorChip),
+   sometimes nested inside it (AskUserQuestionForm, ElicitationForm).
+   `position: sticky` + `bottom: 0` works in both cases — relative to
+   the nearest scrolling ancestor, which is either the .pp-card body
+   or the .pp-card itself. */
+.app.is-narrow .pp-actions {
+  padding: 8px 12px;
+  gap: 6px;
+  flex: 0 0 auto;
+  position: sticky;
+  bottom: 0;
+  background: var(--ink-0);
+  z-index: 1;
+}
+.app.is-narrow .pp-actions .btn { padding: 7px 12px; font-size: 12.5px; }
+
 /* Drop-overlay margins inherit the composer side padding — keep them in
    step so the dashed border lines up with the textarea. */
 .app.is-narrow .composer-drop {
