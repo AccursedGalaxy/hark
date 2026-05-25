@@ -42,7 +42,8 @@
 
   /* Layout. */
   --rail-width: 280px;
-  --content-max: 760px;
+  --content-max: 920px;
+  --chat-measure: 720px;
   --header-height: 52px; /* rail-head + session-head must match */
 
   /* Focus ring width — colour comes from the theme. */

@@ -1,7 +1,6 @@
 import type { SessionView } from "../hooks/useSessions";
-import { STATE_LABEL } from "../lib/protocol";
 import { sessionLabel, shortId, tildeify } from "../lib/format";
-import { Dot } from "./Dot";
+import { StatusOrb } from "./StatusOrb";
 
 export function SessionHeader({
   session,
@@ -22,11 +21,8 @@ export function SessionHeader({
           ←
         </button>
       )}
-      <Dot state={session.state} />
       <span className="session-head-title">{sessionLabel(session)}</span>
-      <span className={`session-head-state state-${session.state}`}>
-        {STATE_LABEL[session.state]}
-      </span>
+      <StatusOrb state={session.state} />
       <span className="session-head-meta">
         <span className="session-head-dir" title={session.cwd}>
           {tildeify(session.cwd)}

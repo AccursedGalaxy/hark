@@ -6,10 +6,10 @@
   flex: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding: var(--space-4) var(--space-4);
+  padding: var(--space-4) clamp(var(--space-3), 3vw, var(--space-8));
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-3);
   font-size: var(--font-md);
   line-height: 1.55;
 }
@@ -17,9 +17,11 @@
   width: 100%;
   max-width: var(--content-max);
   margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
+  display: grid;
+  grid-template-columns: minmax(88px, 0.22fr) minmax(0, var(--chat-measure));
+  column-gap: var(--space-4);
+  row-gap: var(--space-3);
+  align-items: start;
 }
 .transcript-empty {
   display: flex;
@@ -30,34 +32,38 @@
 }
 
 .ev {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
   max-width: 100%;
   min-width: 0;
 }
 .ev .who {
+  grid-column: 1;
+  justify-self: end;
+  padding-top: 2px;
   font-size: var(--font-xs);
   text-transform: uppercase;
   letter-spacing: 0.10em;
   color: var(--muted);
-  margin-bottom: var(--space-1);
   font-weight: 600;
 }
 
 /* ---- User bubble (right-aligned) ---- */
 
 .ev-user {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  justify-items: end;
 }
 .ev-user .who {
-  align-self: flex-end;
+  grid-column: 1;
 }
 .bubble-user {
+  grid-column: 2;
   background: var(--user-bubble);
   border: 1px solid var(--user-bubble-border);
-  padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-4) var(--radius-4) var(--radius-1) var(--radius-4);
-  max-width: min(85%, 640px);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-3);
+  max-width: min(70%, 560px);
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-wrap: anywhere;
@@ -70,6 +76,7 @@
  * child handles its own typography) or, if we ever fall back, a plain string.
  * Keep it minimal so it doesn't conflict with markdown.css. */
 .ev-assistant .assistant-text {
+  grid-column: 2;
   min-width: 0;
   word-wrap: break-word;
   overflow-wrap: anywhere;
@@ -81,7 +88,7 @@
    above (the JSONL splits turns into multiple lines). Pull them in tighter
    so they read as one block of speech, not two. */
 .ev-assistant.is-cont {
-  margin-top: calc(var(--space-3) * -1 + 2px);
+  margin-top: calc(var(--space-2) * -1);
 }
 /* Spacing between assistant prose and tool capsules. The capsule owns its
    own visual chrome; we just give it breathing room. */
@@ -90,13 +97,19 @@
 .ev-assistant .tc + .tc {
   margin-top: var(--space-3);
 }
+.ev-assistant .tc {
+  grid-column: 2;
+}
 .ev-assistant .block-thinking {
+  grid-column: 2;
   color: var(--text-dim);
-  font-style: italic;
-  border-left: 2px solid var(--border);
+  border-left: 2px solid var(--busy);
+  background: color-mix(in srgb, var(--busy-bg) 55%, transparent);
   padding-left: var(--space-3);
-  margin: var(--space-2) 0;
-  font-size: var(--font-md);
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+  margin: 0;
+  font-size: var(--font-sm);
   white-space: pre-wrap;
   word-wrap: break-word;
 }
@@ -104,7 +117,8 @@
 /* ---- System row (centered, low-key) ---- */
 
 .ev-system {
-  align-self: center;
+  grid-column: 1 / -1;
+  justify-self: center;
   max-width: 90%;
   font-size: var(--font-sm);
   color: var(--muted);
@@ -123,9 +137,24 @@
   font-weight: 600;
 }
 
-@media (max-width: 480px) {
+@media (max-width: 700px) {
   .transcript {
     padding: var(--space-3);
     gap: var(--space-3);
+  }
+  .transcript-inner,
+  .ev {
+    display: flex;
+    flex-direction: column;
+  }
+  .ev .who {
+    align-self: flex-start;
+    padding-top: 0;
+  }
+  .ev-user .who {
+    align-self: flex-end;
+  }
+  .bubble-user {
+    max-width: 88%;
   }
 }

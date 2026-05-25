@@ -3,10 +3,10 @@
 .composer-wrap {
   flex: 0 0 auto;
   border-top: 1px solid var(--border);
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  backdrop-filter: blur(14px) saturate(1.08);
+  -webkit-backdrop-filter: blur(14px) saturate(1.08);
   position: relative; /* anchors the drop overlay */
-  /* Sits above .session-presence-wrap so the status chip can hide *behind*
-     the composer's surface during its enter/exit slide. */
   z-index: 2;
 }
 .composer-wrap.is-disabled {
@@ -28,7 +28,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-3) clamp(var(--space-3), 3vw, var(--space-8));
   max-width: var(--content-max);
   margin: 0 auto;
   width: 100%;
@@ -76,7 +76,8 @@
 .composer-send {
   position: absolute;
   right: 8px;
-  bottom: 8px;
+  top: 50%;
+  transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -97,7 +98,7 @@
   border-color: var(--accent-strong);
 }
 .composer-send:active:not(:disabled) {
-  transform: translateY(1px);
+  transform: translateY(calc(-50% + 1px));
 }
 .composer-send:disabled {
   cursor: not-allowed;
@@ -349,7 +350,8 @@
 .composer-attach {
   position: absolute;
   left: 6px;
-  bottom: 6px;
+  top: 50%;
+  transform: translateY(-50%);
 }
 .composer-attach-btn {
   display: inline-flex;
