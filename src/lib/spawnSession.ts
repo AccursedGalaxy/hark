@@ -26,10 +26,18 @@ export function buildLoginShellCommand(
   return `exec ${shell} -ilc 'exec ${escaped}'`;
 }
 
+// -P -F '#{pane_pid}' makes tmux print the PID of the new pane's process,
+// which is the shell that immediately exec's into claude — same PID
+// throughout the exec chain (sh → user shell → claude). The client uses
+// this to find and focus the corresponding pending session row as soon as
+// it appears in the rail.
 export function buildNewWindowArgs(input: SpawnInput): string[] {
   return [
     "new-window",
     "-d",
+    "-P",
+    "-F",
+    "#{pane_pid}",
     "-t",
     input.sessionName,
     "-c",
@@ -42,12 +50,22 @@ export function buildNewSessionArgs(input: SpawnInput): string[] {
   return [
     "new-session",
     "-d",
+    "-P",
+    "-F",
+    "#{pane_pid}",
     "-s",
     input.sessionName,
     "-c",
     input.cwd,
     input.command,
   ];
+}
+
+export function parsePanePid(stdout: string): number | null {
+  const line = stdout.split("\n").map((s) => s.trim()).find((s) => s.length > 0);
+  if (!line) return null;
+  const n = Number(line);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 // One row from `tmux list-sessions -F '#{session_attached} #{session_activity} #{session_name}'`.
@@ -92,15 +110,6 @@ export function pickSpawnTarget(
 
 // ---- runtime ----
 
-function run(args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile("tmux", args, (err) => {
-      if (err) reject(err);
-      else resolve();
-    });
-  });
-}
-
 function runWithStdout(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile("tmux", args, (err, stdout) => {
@@ -126,6 +135,10 @@ async function listSessions(): Promise<TmuxSessionRow[]> {
 export interface SpawnResult {
   sessionName: string;
   createdSession: boolean;
+  // PID of the new pane's process. Stays the same across the exec chain
+  // (sh → user shell → claude), so the client can match it against
+  // pending/registered session rows to focus the new session.
+  pid: number | null;
 }
 
 // Spawn a new Claude window. Prefers the user's current tmux focus: pick the
@@ -142,22 +155,30 @@ export async function spawnClaudeSession(opts: {
   const target = pickSpawnTarget(sessions);
 
   if (target) {
-    await run(
+    const stdout = await runWithStdout(
       buildNewWindowArgs({
         sessionName: target.name,
         cwd: opts.cwd,
         command,
       }),
     );
-    return { sessionName: target.name, createdSession: false };
+    return {
+      sessionName: target.name,
+      createdSession: false,
+      pid: parsePanePid(stdout),
+    };
   }
 
-  await run(
+  const stdout = await runWithStdout(
     buildNewSessionArgs({
       sessionName: "claude",
       cwd: opts.cwd,
       command,
     }),
   );
-  return { sessionName: "claude", createdSession: true };
+  return {
+    sessionName: "claude",
+    createdSession: true,
+    pid: parsePanePid(stdout),
+  };
 }

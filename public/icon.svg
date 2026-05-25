@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="hark">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="38%" r="55%">
+      <stop offset="0%" stop-color="#3a2b13" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#0a0a0a" stop-opacity="1"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="#0a0a0a"/>
+  <rect width="512" height="512" rx="96" fill="url(#glow)"/>
+  <text x="256" y="362" font-family="Georgia, 'Times New Roman', serif"
+        font-size="320" font-style="italic" font-weight="400"
+        text-anchor="middle" fill="#e6e6e6"
+        letter-spacing="-8">h</text>
+  <circle cx="380" cy="180" r="22" fill="#e6a23c"/>
+  <circle cx="380" cy="180" r="34" fill="none" stroke="#e6a23c" stroke-opacity="0.35" stroke-width="6"/>
+</svg>

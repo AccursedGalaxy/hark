@@ -28,16 +28,29 @@
 }
 
 /* ───── mobile session switcher (narrow only) ─────── */
+/* Outer container holds the chrome (background, divider, safe-area
+   padding) and has `overflow: visible` so pill borders are never
+   clipped vertically. Horizontal scrolling lives on .switcher-track. */
 .switcher {
+  position: relative;
+  background: var(--ink-0);
+  border-bottom: 1px solid var(--line);
+  /* Raise the strip above the topbar so any stacking conflict resolves
+     in favour of the badges (topbar has z-index: 5). */
+  z-index: 6;
+}
+.switcher-track {
   display: flex;
   gap: 6px;
   padding: 10px 14px;
   overflow-x: auto;
-  border-bottom: 1px solid var(--line);
-  background: var(--ink-0);
+  overflow-y: visible;
+  /* Hide the horizontal scrollbar — it would otherwise eat vertical
+     space and re-introduce the bottom-clip we just removed. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
-.switcher::-webkit-scrollbar { height: 4px; }
-.switcher::-webkit-scrollbar-thumb { background: var(--line); border-radius: 2px; }
+.switcher-track::-webkit-scrollbar { display: none; }
 .switcher-empty {
   padding: 10px 14px;
   color: var(--fg-3);
@@ -1010,7 +1023,223 @@
   padding: 14px 14px 0;
 }
 .app.is-narrow .transcript {
-  padding: 24px 16px 32px;
+  padding: 24px 14px 32px;
+}
+
+/* ───── narrow — within-session layout ────────────────
+   The session view (topbar + tasklist + transcript + composer) is the
+   piece that suffers most on phones: the topbar gets cramped by a long
+   path + status text + meta + four icon-buttons; the tasklist progress
+   bar eats horizontal space; the composer side-padding is way too
+   generous. These overrides are scoped to .app.is-narrow so the desktop
+   layout is untouched. */
+
+.app.is-narrow .topbar {
+  flex: 0 0 auto;
+  height: auto;
+  min-height: 52px;
+  padding: 8px 12px;
+  gap: 8px;
+  flex-wrap: nowrap;
+  /* Standalone-mode (iOS PWA) status bar overlays the top of the page;
+     push the topbar below it with the safe-area inset. */
+  padding-top: max(8px, env(safe-area-inset-top));
+}
+.app.is-narrow .topbar .crumbs {
+  flex: 1 1 auto;
+  font-size: 12.5px;
+  gap: 6px;
+  /* Critical: lets the row shrink and the `here` segment ellipsis-truncate
+     instead of pushing the status chip off-screen. */
+  min-width: 0;
+  overflow: hidden;
+}
+/* On phones the parent path is noise — keep just the last directory
+   segment + branch chip so the bar can breathe. */
+.app.is-narrow .topbar .crumbs > span:not(.here):not(.branch):not(.sep),
+.app.is-narrow .topbar .crumbs > .sep {
+  display: none;
+}
+.app.is-narrow .topbar .crumbs .here {
+  font-size: 13px;
+}
+.app.is-narrow .topbar .crumbs .branch {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  margin-left: 4px;
+}
+/* Inline session metadata (`#abc · interactive · v2`) and the
+   history/fork/share buttons aren't useful on a phone — they only show
+   when there's room to spare. We keep the close button accessible via
+   the long-press session-close in the sidebar list. */
+.app.is-narrow .topbar .topbar-meta,
+.app.is-narrow .topbar .spacer {
+  display: none;
+}
+.app.is-narrow .topbar > div:last-child {
+  /* The trailing icon-button group: keep only one (the danger/close) to
+     avoid eating horizontal space; the rest are no-op placeholders for
+     now anyway. */
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.app.is-narrow .topbar > div:last-child > button:not(.danger) {
+  display: none;
+}
+.app.is-narrow .topbar .status-chip {
+  padding: 4px 9px 4px 7px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+.app.is-narrow .back-btn {
+  width: 30px;
+  height: 30px;
+  margin-right: 0;
+  flex: none;
+}
+
+/* TaskList strip — tighten the row so the progress bar and label both
+   fit on a phone width without overlapping the chevron. */
+.app.is-narrow .tasklist-head {
+  padding: 8px 12px;
+  gap: 8px;
+  grid-template-columns: 22px minmax(0, 1fr) auto 16px;
+}
+.app.is-narrow .tasklist-cur .label {
+  font-size: 9.5px;
+}
+.app.is-narrow .tasklist-cur .now {
+  font-size: 12.5px;
+}
+.app.is-narrow .tasklist-progress {
+  gap: 6px;
+  font-size: 10.5px;
+}
+.app.is-narrow .tasklist-progress .bar {
+  width: 56px;
+  height: 4px;
+}
+.app.is-narrow .tasklist-body {
+  padding: 4px 14px 12px;
+}
+
+/* Mobile session switcher (tabs at the top of the session view).
+
+   Vertical breathing room matters: the switcher sits between the iOS
+   status bar and the topbar with no other separation, so the track
+   needs real top + bottom padding (not just safe-area) or the pills
+   look glued to both edges.
+
+   Padding goes on .switcher-track (the scroll container) so the safe
+   area lands inside the scroll surface but the outer .switcher stays
+   `overflow: visible` and can never clip pill borders. */
+.app.is-narrow .switcher-track {
+  padding: 10px 14px 12px;
+  padding-top: max(10px, calc(env(safe-area-inset-top) + 6px));
+  gap: 10px;
+}
+.app.is-narrow .switcher .pill {
+  padding: 7px 12px;
+  font-size: 12.5px;
+  gap: 7px;
+}
+.app.is-narrow .switcher .pill .dot {
+  width: 8px;
+  height: 8px;
+}
+.app.is-narrow .switcher .pill .mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+/* When the switcher is present, the topbar no longer needs the notch
+   padding — the switcher above it absorbed it. */
+.app.is-narrow .switcher + .topbar {
+  padding-top: 8px;
+}
+
+/* Composer — pull the side padding flush so the textarea + send button
+   line up with everything else and the chips don't wrap into three rows
+   on a phone. */
+.app.is-narrow .composer-wrap {
+  padding: 10px 10px 12px;
+  /* Home-indicator safe area sits underneath the composer — the
+     useKeyboardInset hook adds keyboard height on top of this. */
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+.app.is-narrow .composer {
+  border-radius: 14px;
+}
+.app.is-narrow .composer-top {
+  padding: 6px 8px;
+  gap: 4px;
+}
+.app.is-narrow .composer-top .chip {
+  padding: 4px 8px;
+  font-size: 10.5px;
+}
+.app.is-narrow .composer-input {
+  padding: 8px 8px 8px 12px;
+}
+.app.is-narrow .composer-input textarea {
+  /* Override the 14.5px desktop size so iOS Safari does not zoom in
+     when the field receives focus. The visual diff is small enough
+     that it doesn't crowd the design. */
+  font-size: 16px;
+  line-height: 1.45;
+}
+.app.is-narrow .composer-foot {
+  padding: 4px 12px 8px;
+  font-size: 10px;
+}
+.app.is-narrow .composer-foot > span:nth-child(3) {
+  /* The keyboard-shortcut legend (`↵ send · ⇧↵ newline · / commands`) is
+     irrelevant on a touch device — drop it so the footer is a single
+     line. */
+  display: none;
+}
+
+/* Drop-overlay margins inherit the composer side padding — keep them in
+   step so the dashed border lines up with the textarea. */
+.app.is-narrow .composer-drop {
+  margin: 10px 10px 12px;
+}
+/* Error chip should align with the now-tighter composer */
+.app.is-narrow .composer-error {
+  margin-left: 10px;
+  margin-right: 10px;
+}
+
+/* Tweaks FAB — keep it clear of the home indicator in standalone mode */
+.app.is-narrow .tweaks-fab {
+  bottom: max(20px, calc(env(safe-area-inset-bottom) + 8px));
+  right: max(16px, calc(env(safe-area-inset-right) + 8px));
+}
+.app.is-narrow .tweaks-panel {
+  right: max(16px, calc(env(safe-area-inset-right) + 8px));
+  bottom: max(70px, calc(env(safe-area-inset-bottom) + 58px));
+}
+
+/* Conn banner — push under the notch when in standalone mode */
+.app.is-narrow .conn-banner {
+  top: max(8px, calc(env(safe-area-inset-top) + 4px));
+}
+
+/* Sidebar on narrow: the list takes the full screen until a session is
+   picked, so respect the top safe area inside the rail head instead of
+   the topbar. */
+.app.is-narrow .rail-head {
+  padding-top: max(18px, calc(env(safe-area-inset-top) + 10px));
+}
+
+/* Use the dynamic viewport units on mobile browsers that support them.
+   100vh on iOS Safari includes the URL bar area, which leaves the
+   composer cut off when the bar is visible — 100dvh tracks the actual
+   visible viewport so the layout stays right. */
+@supports (height: 100dvh) {
+  .app {
+    height: 100dvh;
+  }
 }
 
 /* small adjustments for assistant-text */

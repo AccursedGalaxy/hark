@@ -26,7 +26,7 @@ export function Sidebar({
   current: string | null;
   onPick: (id: string) => void;
   attentionCount: number;
-  onSpawned: () => void;
+  onSpawned: (pid: number | null) => void;
   onClose: (id: string) => Promise<void>;
 }) {
   const [filter, setFilter] = useState("");
@@ -126,9 +126,9 @@ export function Sidebar({
         <NewSessionButton
           inline
           onCancel={() => setSpawnOpen(false)}
-          onSpawned={() => {
+          onSpawned={(pid) => {
             setSpawnOpen(false);
-            onSpawned();
+            onSpawned(pid);
           }}
         />
       ) : (

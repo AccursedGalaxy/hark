@@ -70,12 +70,19 @@ export default function App() {
     if (!sessions.some((s) => s.sessionId === current)) setCurrent(null);
   }, [current, sessions, setCurrent]);
 
+  // Used by two flows that both need "focus the session with this pid as
+  // soon as it appears in the rail":
+  //   1. spawning a new session — we want to land on the pending row so
+  //      the TrustPrompt is visible immediately, without the user having
+  //      to find and click it.
+  //   2. confirming trust on an existing pending session — focus the real
+  //      session once Claude registers under a UUID. (The pending→real
+  //      handoff in useSessions promotes us automatically once we're on
+  //      pending-<pid>, so matching either kind is fine here.)
   const [awaitingPid, setAwaitingPid] = useState<number | null>(null);
   useEffect(() => {
     if (awaitingPid === null) return;
-    const match = sessions.find(
-      (s) => s.pid === awaitingPid && s.kind !== "pending",
-    );
+    const match = sessions.find((s) => s.pid === awaitingPid);
     if (match) {
       setCurrent(match.sessionId);
       setAwaitingPid(null);
@@ -102,7 +109,10 @@ export default function App() {
           current={current}
           onPick={setCurrent}
           attentionCount={attentionCount}
-          onSpawned={refresh}
+          onSpawned={(pid) => {
+            if (pid !== null) setAwaitingPid(pid);
+            refresh();
+          }}
           onClose={closeSession}
         />
       )}
@@ -113,7 +123,10 @@ export default function App() {
           current={current}
           onPick={setCurrent}
           attentionCount={attentionCount}
-          onSpawned={refresh}
+          onSpawned={(pid) => {
+            if (pid !== null) setAwaitingPid(pid);
+            refresh();
+          }}
           onClose={closeSession}
         />
       )}

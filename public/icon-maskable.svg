@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="hark">
+  <defs>
+    <radialGradient id="glow2" cx="50%" cy="38%" r="55%">
+      <stop offset="0%" stop-color="#3a2b13" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#0a0a0a" stop-opacity="1"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" fill="#0a0a0a"/>
+  <rect width="512" height="512" fill="url(#glow2)"/>
+  <!-- Maskable: keep important content inside the inner 80% safe zone (52..460) -->
+  <text x="256" y="332" font-family="Georgia, 'Times New Roman', serif"
+        font-size="240" font-style="italic" font-weight="400"
+        text-anchor="middle" fill="#e6e6e6"
+        letter-spacing="-6">h</text>
+  <circle cx="348" cy="200" r="18" fill="#e6a23c"/>
+  <circle cx="348" cy="200" r="28" fill="none" stroke="#e6a23c" stroke-opacity="0.35" stroke-width="5"/>
+</svg>

@@ -7,7 +7,10 @@ export function NewSessionButton({
   onCancel,
 }: {
   inline?: boolean;
-  onSpawned: () => void;
+  // Receives the new pane's PID so the caller can auto-focus the matching
+  // pending/registered session row once it appears. null when tmux didn't
+  // print a parseable pid (shouldn't happen with -P -F, but degrade safely).
+  onSpawned: (pid: number | null) => void;
   onCancel?: () => void;
 }) {
   const [open, setOpen] = useState(!!inline);
@@ -40,8 +43,8 @@ export function NewSessionButton({
     setBusy(true);
     setErr(null);
     try {
-      await spawnSession(trimmed);
-      onSpawned();
+      const res = await spawnSession(trimmed);
+      onSpawned(res.pid ?? null);
       if (!inline) setOpen(false);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "spawn failed");

@@ -114,6 +114,9 @@ export interface SpawnResponse {
   ok: true;
   sessionName: string;
   createdSession: boolean;
+  // PID of the new pane's process. The client uses this to auto-focus the
+  // matching pending session row as soon as it appears in the rail.
+  pid: number | null;
 }
 
 export async function fetchSlashCommands(cwd: string): Promise<SlashCommand[]> {

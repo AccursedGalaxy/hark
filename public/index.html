@@ -2,18 +2,41 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      maximum-scale=1 + user-scalable=no prevents iOS Safari from zooming in
+      when an input/textarea is focused, and disables the pinch-to-zoom that
+      otherwise interferes with our own scroll containers. The composer
+      textarea also uses 16px font-size on coarse-pointer devices as a
+      second layer of zoom-prevention.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
     <meta name="theme-color" content="#0a0a0a" />
+    <meta name="color-scheme" content="dark light" />
+
+    <!-- iOS PWA / "Add to Home Screen" -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="hark" />
+    <meta name="format-detection" content="telephone=no" />
+
     <title>hark</title>
+
     <link
       id="favicon"
       rel="icon"
       type="image/svg+xml"
       href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%230a0a0a"/><text x="16" y="22" font-family="ui-sans-serif,system-ui" font-size="18" font-weight="700" text-anchor="middle" fill="%23e6e6e6">h</text></svg>'
     />
-    <script type="module" crossorigin src="/assets/index-CUjIYL3X.js"></script>
-    <link rel="modulepreload" crossorigin href="/assets/index-Bu-UBJdJ.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-CHO-1udM.css">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <script type="module" crossorigin src="/assets/index-Bwz2f8tx.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/index-Oj5l9nSC.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-D5wtmhCr.css">
   </head>
   <body>
     <div id="root"></div>

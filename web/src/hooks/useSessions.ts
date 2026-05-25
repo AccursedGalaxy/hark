@@ -280,17 +280,31 @@ export function useSessions(): SessionsApi {
     setTranscriptError(null);
     setEvents([]);
 
+    // Buffer SSE events that arrive before fetchTranscript resolves. Without
+    // this, a `setEvents(initial)` from the fetch can wipe events that the
+    // live stream had already appended. Mobile (and any slow fetch) was
+    // losing the user's first prompt this way — the first transcript event
+    // would arrive over SSE during the fetch window, get appended to events,
+    // then get overwritten when the bulk initial result landed.
+    let initialDone = false;
+    const buffered: TranscriptEvent[] = [];
+
     const tStart = performance.now();
     fetchTranscript(sessionId)
       .then(({ events: initial }) => {
         if (cancelled) return;
         const tFetched = performance.now();
-        setEvents(initial);
+        const seen = new Set(initial.map((e) => e.uuid));
+        const tail = buffered.filter((e) => !seen.has(e.uuid));
+        buffered.length = 0;
+        initialDone = true;
+        setEvents([...initial, ...tail]);
         setTranscriptLoading(false);
         // eslint-disable-next-line no-console
         console.log(
           `[timing] session-switch sid=${sessionId.slice(0, 8)} ` +
-            `events=${initial.length} fetch=${(tFetched - tStart).toFixed(0)}ms`,
+            `events=${initial.length} fetch=${(tFetched - tStart).toFixed(0)}ms` +
+            (tail.length ? ` buffered=${tail.length}` : ""),
         );
       })
       .catch((err: unknown) => {
@@ -313,7 +327,13 @@ export function useSessions(): SessionsApi {
       },
       onEvent: (ev) => {
         if (cancelled) return;
-        setEvents((prev) => [...prev, ev]);
+        if (!initialDone) {
+          buffered.push(ev);
+        } else {
+          setEvents((prev) =>
+            prev.some((p) => p.uuid === ev.uuid) ? prev : [...prev, ev],
+          );
+        }
         // External resolution: any new transcript event newer than the
         // pending state means the user already answered the prompt
         // somewhere else (e.g., typing 1 in the CLI). Clear the local

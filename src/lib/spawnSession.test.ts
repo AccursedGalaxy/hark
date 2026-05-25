@@ -3,12 +3,13 @@ import {
   buildLoginShellCommand,
   buildNewSessionArgs,
   buildNewWindowArgs,
+  parsePanePid,
   parseSessionRows,
   pickSpawnTarget,
 } from "./spawnSession.js";
 
 describe("buildNewWindowArgs", () => {
-  it("targets an existing tmux server and starts claude in cwd", () => {
+  it("targets an existing tmux server and starts claude in cwd, printing pane pid", () => {
     const args = buildNewWindowArgs({
       sessionName: "claude",
       cwd: "/home/aki/Projects/hark",
@@ -17,6 +18,9 @@ describe("buildNewWindowArgs", () => {
     expect(args).toEqual([
       "new-window",
       "-d",
+      "-P",
+      "-F",
+      "#{pane_pid}",
       "-t",
       "claude",
       "-c",
@@ -32,6 +36,24 @@ describe("buildNewWindowArgs", () => {
       command: "claude --resume",
     });
     expect(args[args.length - 1]).toBe("claude --resume");
+  });
+});
+
+describe("parsePanePid", () => {
+  it("parses a single trailing-newline pid line", () => {
+    expect(parsePanePid("12345\n")).toBe(12345);
+  });
+
+  it("ignores leading blank lines and trims whitespace", () => {
+    expect(parsePanePid("\n  6789  \n")).toBe(6789);
+  });
+
+  it("returns null on empty or malformed output", () => {
+    expect(parsePanePid("")).toBeNull();
+    expect(parsePanePid("\n\n")).toBeNull();
+    expect(parsePanePid("not-a-number\n")).toBeNull();
+    expect(parsePanePid("0\n")).toBeNull();
+    expect(parsePanePid("-5\n")).toBeNull();
   });
 });
 
@@ -109,7 +131,7 @@ describe("pickSpawnTarget", () => {
 });
 
 describe("buildNewSessionArgs", () => {
-  it("starts a detached named session in cwd running claude", () => {
+  it("starts a detached named session in cwd running claude, printing pane pid", () => {
     const args = buildNewSessionArgs({
       sessionName: "claude",
       cwd: "/home/aki",
@@ -118,6 +140,9 @@ describe("buildNewSessionArgs", () => {
     expect(args).toEqual([
       "new-session",
       "-d",
+      "-P",
+      "-F",
+      "#{pane_pid}",
       "-s",
       "claude",
       "-c",
