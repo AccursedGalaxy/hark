@@ -16,15 +16,12 @@ export function getStoredTheme(): Theme | null {
   return v === "dark" || v === "light" ? v : null;
 }
 
-export function getSystemTheme(): Theme {
-  if (typeof window === "undefined") return "dark";
-  return window.matchMedia("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
-}
-
+// Dark by default — the app's primary aesthetic. Users opt into light
+// explicitly via the toggle (persisted in localStorage). We intentionally
+// don't fall back to system preference here; the original implementation
+// did and surprised users with mismatched themes between devices.
 export function getActiveTheme(): Theme {
-  return getStoredTheme() ?? getSystemTheme();
+  return getStoredTheme() ?? "dark";
 }
 
 // Mobile browser chrome (PWA shell, iOS Safari notch) uses this colour.
