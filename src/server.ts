@@ -23,6 +23,7 @@ import {
   recordSpawnedDir,
 } from "./lib/recentDirs.js";
 import { sendKey, sendLiteral, sendText } from "./lib/sendKeys.js";
+import { discoverCommands } from "./lib/slashCommands.js";
 import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
 import {
@@ -528,6 +529,16 @@ app.post("/api/sessions/:id/close", async (req, res) => {
     );
     hookState.clear(resolved.sessionId);
     res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/commands", async (req, res) => {
+  const cwd = typeof req.query.cwd === "string" ? req.query.cwd : undefined;
+  try {
+    const commands = await discoverCommands({ projectCwd: cwd });
+    res.json({ commands });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

@@ -233,3 +233,17 @@ export interface UploadedFile {
 export interface UploadResponse {
   files: UploadedFile[];
 }
+
+// ---- Slash commands (GET /api/commands?cwd=) ----
+
+// Source matches the server's `CommandSource` union: "project" | "user" |
+// `plugin:${name}`. We use a plain string here because the plugin name is
+// open-ended.
+export type SlashCommandSource = "project" | "user" | string;
+
+export interface SlashCommand {
+  name: string;
+  source: SlashCommandSource;
+  description: string;
+  argumentHint: string;
+}

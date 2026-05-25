@@ -24,6 +24,7 @@
 @import "./components/transcript.css";
 @import "./components/tool-call.css";
 @import "./components/composer.css";
+@import "./components/slash-menu.css";
 @import "./components/perm-card.css";
 @import "./components/trust-prompt.css";
 @import "./components/theme-toggle.css";

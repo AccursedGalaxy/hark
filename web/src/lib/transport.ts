@@ -2,6 +2,7 @@ import type {
   HookBroadcast,
   RawSession,
   SendBody,
+  SlashCommand,
   TranscriptEvent,
   UploadResponse,
 } from "./protocol";
@@ -113,6 +114,13 @@ export interface SpawnResponse {
   ok: true;
   sessionName: string;
   createdSession: boolean;
+}
+
+export async function fetchSlashCommands(cwd: string): Promise<SlashCommand[]> {
+  const r = await fetch(`/api/commands?cwd=${encodeURIComponent(cwd)}`);
+  if (!r.ok) return [];
+  const data = (await r.json()) as { commands?: SlashCommand[] };
+  return Array.isArray(data.commands) ? data.commands : [];
 }
 
 export async function fetchRecentSpawnDirs(): Promise<string[]> {

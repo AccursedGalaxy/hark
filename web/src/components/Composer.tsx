@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -10,9 +11,13 @@ import type {
   PendingPermission,
   PromptKind,
   SendBody,
+  SlashCommand,
   UploadedFile,
 } from "../lib/protocol";
+import { filterCommands, parseSlashTrigger } from "../lib/slashTrigger";
+import { fetchSlashCommands } from "../lib/transport";
 import { Markdown } from "./Markdown";
+import { SlashCommandMenu } from "./SlashCommandMenu";
 
 const PROMPT_LABEL: Record<Exclude<PromptKind, null>, string> = {
   permission: "permission requested",
@@ -78,6 +83,7 @@ export function Composer({
   errorMessage,
   promptKind,
   pendingPermission,
+  cwd,
   onSend,
   onUpload,
 }: {
@@ -86,6 +92,7 @@ export function Composer({
   errorMessage: string | null;
   promptKind: PromptKind;
   pendingPermission: PendingPermission | null;
+  cwd?: string;
   onSend: (body: SendBody) => Promise<void>;
   onUpload: (
     files: File[],
@@ -93,6 +100,7 @@ export function Composer({
   ) => Promise<UploadedFile[]>;
 }) {
   const [text, setText] = useState("");
+  const [caret, setCaret] = useState(0);
   const [busy, setBusy] = useState(false);
   const [keypadOpen, setKeypadOpen] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
@@ -102,6 +110,8 @@ export function Composer({
   const [dragging, setDragging] = useState(false);
   const [pasteFilePrompt, setPasteFilePrompt] = useState<string | null>(null);
   const [pasteAsFileOpen, setPasteAsFileOpen] = useState(false);
+  const [slashCommands, setSlashCommands] = useState<SlashCommand[] | null>(null);
+  const [slashHighlight, setSlashHighlight] = useState(0);
 
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -155,6 +165,77 @@ export function Composer({
     ta.style.height = "0px";
     ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
   }, [text]);
+
+  // ---- Slash-command popover -------------------------------------------
+
+  const slashTrigger = useMemo(
+    () => parseSlashTrigger(text, caret),
+    [text, caret],
+  );
+  const slashOpen = !!slashTrigger && !disabled;
+
+  // Lazy-fetch commands the first time the user opens the slash menu for
+  // this session. Cached for the composer's lifetime; if Claude pushes a new
+  // command file, the user can hit refresh or re-select the session.
+  useEffect(() => {
+    if (!slashOpen) return;
+    if (slashCommands !== null) return;
+    if (!cwd) {
+      setSlashCommands([]);
+      return;
+    }
+    let cancelled = false;
+    fetchSlashCommands(cwd)
+      .then((cmds) => {
+        if (!cancelled) setSlashCommands(cmds);
+      })
+      .catch(() => {
+        if (!cancelled) setSlashCommands([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slashOpen, slashCommands, cwd]);
+
+  const filteredCommands = useMemo(() => {
+    if (!slashCommands) return [];
+    return filterCommands(slashCommands, slashTrigger?.query ?? "");
+  }, [slashCommands, slashTrigger]);
+
+  // Keep the highlight pinned to a valid index as the filter narrows.
+  useEffect(() => {
+    setSlashHighlight((h) => {
+      if (filteredCommands.length === 0) return 0;
+      if (h >= filteredCommands.length) return filteredCommands.length - 1;
+      return h;
+    });
+  }, [filteredCommands]);
+
+  const insertCommand = useCallback(
+    (cmd: SlashCommand) => {
+      if (!slashTrigger) return;
+      const before = text.slice(0, slashTrigger.slashStart);
+      const after = text.slice(slashTrigger.queryEnd);
+      const insertion = `/${cmd.name}${cmd.argumentHint ? " " : ""}`;
+      const next = `${before}${insertion}${after}`;
+      const nextCaret = before.length + insertion.length;
+      setText(next);
+      // Defer caret update so React's value commit doesn't race us.
+      requestAnimationFrame(() => {
+        const ta = taRef.current;
+        if (!ta) return;
+        ta.focus();
+        ta.setSelectionRange(nextCaret, nextCaret);
+        setCaret(nextCaret);
+      });
+    },
+    [slashTrigger, text],
+  );
+
+  const updateCaret = useCallback(() => {
+    const ta = taRef.current;
+    if (ta) setCaret(ta.selectionStart);
+  }, []);
 
   // ---- Uploads ----------------------------------------------------------
 
@@ -339,6 +420,52 @@ export function Composer({
   const sendKey = (k: string) => sendKeySequence([k]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // Slash-menu keyboard handling takes precedence — only when something
+    // matched the filter, so an empty result lets Enter fall through to
+    // sending the literal "/foo" text.
+    if (slashOpen && filteredCommands.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashHighlight((h) => (h + 1) % filteredCommands.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashHighlight(
+          (h) => (h - 1 + filteredCommands.length) % filteredCommands.length,
+        );
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+        const chosen = filteredCommands[slashHighlight];
+        if (chosen) {
+          e.preventDefault();
+          insertCommand(chosen);
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Move caret back so the trigger no longer matches — simplest way
+        // to close without giving up the typed text.
+        const ta = taRef.current;
+        if (ta) {
+          const pos = ta.selectionStart;
+          ta.setSelectionRange(pos, pos);
+        }
+        setSlashCommands((c) => c); // no-op, but keep menu hidden via caret move
+        // Force-close by clearing trigger: we drop the leading slash so
+        // parseSlashTrigger returns null on next render.
+        if (slashTrigger) {
+          const next =
+            text.slice(0, slashTrigger.slashStart) +
+            text.slice(slashTrigger.slashStart + 1);
+          setText(next);
+          setCaret(slashTrigger.slashStart);
+        }
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey && !isTouch()) {
       e.preventDefault();
       void submitText();
@@ -513,6 +640,14 @@ export function Composer({
             )}
           </div>
 
+          {slashOpen && slashCommands !== null && (
+            <SlashCommandMenu
+              commands={filteredCommands}
+              highlight={slashHighlight}
+              onSelect={insertCommand}
+              onHover={setSlashHighlight}
+            />
+          )}
           <textarea
             ref={taRef}
             rows={1}
@@ -521,7 +656,13 @@ export function Composer({
               disabled ? (disabledReason ?? "Disabled") : "Send a message…"
             }
             disabled={disabled}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              setCaret(e.target.selectionStart);
+            }}
+            onKeyUp={updateCaret}
+            onClick={updateCaret}
+            onSelect={updateCaret}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             aria-label="Message"

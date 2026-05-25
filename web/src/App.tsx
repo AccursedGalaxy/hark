@@ -155,6 +155,7 @@ export default function App() {
                     errorMessage={sendError}
                     promptKind={currentPromptKind}
                     pendingPermission={currentPendingPermission}
+                    cwd={currentSession.cwd}
                     onSend={send}
                     onUpload={upload}
                   />

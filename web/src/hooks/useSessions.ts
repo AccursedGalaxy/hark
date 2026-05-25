@@ -23,6 +23,15 @@ import {
 
 const POLL_MS = 3000;
 
+// Mirror of `parseSyntheticSessionId` from src/lib/pendingSessions.ts.
+// Duplicated rather than imported so the web bundle stays decoupled from
+// the server package.
+function parsePendingPid(id: string): number | null {
+  if (!id.startsWith("pending-")) return null;
+  const pid = Number(id.slice("pending-".length));
+  return Number.isFinite(pid) && pid > 0 ? pid : null;
+}
+
 export interface SessionView extends RawSession {
   state: SessionState;
 }
@@ -213,6 +222,23 @@ export function useSessions(): SessionsApi {
   const setCurrent = useCallback((id: string | null) => {
     setCurrentState(id);
   }, []);
+
+  // Pending → real handoff. The rail shows a "pending-<pid>" row for a
+  // freshly-spawned Claude process before it has registered a UUID; the
+  // user can click it and start typing right away (send-keys works on the
+  // pane). The moment Claude finishes booting, the pending row vanishes
+  // and a real session with the same pid appears — without this effect,
+  // `current` would dangle on the synthetic id and the UI would lose the
+  // session until the user manually reopens it from the rail.
+  useEffect(() => {
+    if (!current) return;
+    const pendingPid = parsePendingPid(current);
+    if (pendingPid === null) return;
+    const real = rawSessions.find(
+      (s) => s.pid === pendingPid && !s.sessionId.startsWith("pending-"),
+    );
+    if (real) setCurrentState(real.sessionId);
+  }, [current, rawSessions]);
 
   // Auto-clear attention on the session the user is viewing (matches old UX).
   useEffect(() => {
