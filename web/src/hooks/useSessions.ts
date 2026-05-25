@@ -7,6 +7,7 @@ import type {
   SendBody,
   SessionState,
   TranscriptEvent,
+  UploadedFile,
 } from "../lib/protocol";
 import { derivePromptKind, deriveState } from "../lib/protocol";
 import {
@@ -16,6 +17,7 @@ import {
   openHookStream,
   openTranscriptStream,
   sendToSession,
+  uploadFiles,
 } from "../lib/transport";
 
 const POLL_MS = 3000;
@@ -36,6 +38,10 @@ export interface SessionsApi {
   transcriptError: string | null;
   send: (body: SendBody) => Promise<void>;
   sendError: string | null;
+  upload: (
+    files: File[],
+    onProgress?: (loaded: number, total: number) => void,
+  ) => Promise<UploadedFile[]>;
   // What Claude Code is waiting for on the current session, or null if it
   // isn't. Derived from the Notification hook's notification_type field;
   // see derivePromptKind in protocol.ts.
@@ -271,6 +277,19 @@ export function useSessions(): SessionsApi {
     [current],
   );
 
+  const upload = useCallback(
+    async (
+      files: File[],
+      onProgress?: (loaded: number, total: number) => void,
+    ): Promise<UploadedFile[]> => {
+      if (!current) throw new Error("no session selected");
+      if (files.length === 0) return [];
+      const { files: uploaded } = await uploadFiles(current, files, onProgress);
+      return uploaded;
+    },
+    [current],
+  );
+
   const clearAttention = useCallback((id: string) => {
     setAttention((prev) => {
       const cur = prev[id];
@@ -292,6 +311,7 @@ export function useSessions(): SessionsApi {
     transcriptError,
     send,
     sendError,
+    upload,
     currentPromptKind,
     currentPendingPermission,
     clearAttention,

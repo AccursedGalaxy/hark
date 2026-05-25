@@ -4,9 +4,13 @@
   flex: 0 0 auto;
   border-top: 1px solid var(--border);
   background: var(--panel);
+  position: relative; /* anchors the drop overlay */
 }
 .composer-wrap.is-disabled {
   opacity: 0.7;
+}
+.composer-wrap.is-dragover .composer {
+  opacity: 0.25;
 }
 
 .composer-error {
@@ -27,9 +31,9 @@
   width: 100%;
 }
 
-/* Input cluster: textarea grows naturally; send button floats inside
- * its bottom-right corner. Padding-right on the textarea (set inline below)
- * reserves the space so typed text never collides with the button. */
+/* Input cluster: textarea grows naturally; paperclip floats in the bottom-
+ * left, send button in the bottom-right. Horizontal padding on the textarea
+ * reserves space for both so typed text never slides underneath them. */
 .composer-input {
   position: relative;
   display: flex;
@@ -39,7 +43,7 @@
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-3);
-  padding: var(--space-3) 52px var(--space-3) var(--space-4);
+  padding: var(--space-3) 52px var(--space-3) 48px;
   font-family: var(--font-sans);
   font-size: var(--font-lg);
   line-height: 1.45;
@@ -217,5 +221,341 @@
 @supports (-webkit-touch-callout: none) {
   .composer textarea {
     font-size: 16px;
+  }
+  .paste-dialog-name,
+  .paste-dialog-body {
+    font-size: 16px;
+  }
+}
+
+/* ---- Attachments ---------------------------------------------------------
+ *
+ * Chips live above the textarea. Each chip has a square thumbnail (image
+ * preview for images, file glyph otherwise), name + size, and a remove
+ * button. While uploading, the chip shows a progress bar and the remove
+ * button is suppressed.
+ */
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+}
+
+.attach-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 30px 6px 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-3);
+  max-width: 100%;
+  min-width: 0;
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    background var(--duration-fast) var(--ease);
+}
+.attach-chip:hover {
+  border-color: var(--border-strong);
+}
+
+.attach-chip-thumb {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-2);
+  background: var(--surface-3);
+  border: 1px solid var(--border-soft);
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+}
+.attach-chip-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.attach-chip-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 180px;
+}
+.attach-chip-name {
+  color: var(--text);
+  font-size: var(--font-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.attach-chip-size {
+  color: var(--muted);
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.attach-chip-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: var(--radius-1);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+.attach-chip-remove:hover {
+  background: var(--attn-bg);
+  color: var(--attn);
+}
+
+.attach-chip-uploading {
+  padding-right: 12px;
+}
+.attach-chip-progress {
+  margin-top: 4px;
+  height: 3px;
+  width: 100%;
+  background: var(--surface-3);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+.attach-chip-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width var(--duration-med) var(--ease);
+}
+
+/* ---- Paperclip + menu ---------------------------------------------------- */
+
+.composer-attach {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+}
+.composer-attach-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease),
+    border-color var(--duration-fast) var(--ease);
+}
+.composer-attach-btn:hover:not(:disabled) {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.composer-attach-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.composer-attach-btn[aria-expanded="true"] {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.composer-attach-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 200px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-3);
+  padding: 4px;
+  box-shadow: var(--shadow-2);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+}
+.composer-attach-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 8px var(--space-3);
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: var(--font-md);
+  text-align: left;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease);
+}
+.composer-attach-item:hover {
+  background: var(--surface-3);
+}
+.composer-attach-item svg {
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+/* ---- Drop overlay -------------------------------------------------------- */
+
+.composer-drop {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  background: var(--accent-bg-strong, var(--accent-bg));
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-3);
+  color: var(--accent);
+  font-weight: 600;
+  pointer-events: none;
+  z-index: 40;
+  margin: var(--space-2);
+}
+
+/* ---- Long-paste prompt --------------------------------------------------- */
+
+.composer-paste-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 8px var(--space-3);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: var(--radius-2);
+  font-size: var(--font-md);
+  flex-wrap: wrap;
+}
+.composer-paste-prompt-actions {
+  display: inline-flex;
+  gap: var(--space-2);
+}
+
+/* ---- Paste-as-file dialog ------------------------------------------------ */
+
+.paste-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+.paste-dialog {
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-4);
+  box-shadow: var(--shadow-2);
+  width: 100%;
+  max-width: 560px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+}
+.paste-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.paste-dialog-head h3 {
+  margin: 0;
+  font-size: var(--font-lg);
+  color: var(--text);
+  font-weight: 600;
+}
+.paste-dialog-close {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: var(--radius-2);
+  cursor: pointer;
+}
+.paste-dialog-close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.paste-dialog-name {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  padding: 8px var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-md);
+}
+.paste-dialog-name:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 var(--focus-ring) var(--focus);
+}
+.paste-dialog-body {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  padding: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-md);
+  resize: vertical;
+  min-height: 220px;
+  max-height: 50vh;
+}
+.paste-dialog-body:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 var(--focus-ring) var(--focus);
+}
+.paste-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+}
+
+@media (max-width: 480px) {
+  .composer-attach-menu {
+    min-width: 220px;
+  }
+  .composer-attach-item {
+    padding: 12px var(--space-3); /* taller targets on touch */
+    font-size: var(--font-lg);
+  }
+  .paste-dialog {
+    padding: var(--space-3);
+    max-height: 90vh;
+  }
+  .paste-dialog-body {
+    min-height: 180px;
   }
 }

@@ -3,6 +3,7 @@ import type {
   RawSession,
   SendBody,
   TranscriptEvent,
+  UploadResponse,
 } from "./protocol";
 
 // Thin REST + SSE client that mirrors the Express endpoints in src/server.ts.
@@ -43,6 +44,45 @@ export async function sendToSession(
     }
     throw new Error(msg);
   }
+}
+
+export async function uploadFiles(
+  sessionId: string,
+  files: File[],
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<UploadResponse> {
+  // XMLHttpRequest gives us progress events; fetch's body stream-progress
+  // API isn't universally supported on iOS Safari yet.
+  const url = `/api/sessions/${encodeURIComponent(sessionId)}/upload`;
+  const form = new FormData();
+  for (const f of files) form.append("file", f, f.name);
+  return await new Promise<UploadResponse>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable && onProgress) onProgress(ev.loaded, ev.total);
+    };
+    xhr.onerror = () => reject(new Error("upload failed"));
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as UploadResponse);
+        } catch (e) {
+          reject(e);
+        }
+      } else {
+        let msg = `upload failed (${xhr.status})`;
+        try {
+          const j = JSON.parse(xhr.responseText) as { error?: string };
+          if (j.error) msg = j.error;
+        } catch {
+          /* keep default */
+        }
+        reject(new Error(msg));
+      }
+    };
+    xhr.send(form);
+  });
 }
 
 export async function clearAttention(sessionId: string): Promise<void> {

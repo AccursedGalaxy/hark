@@ -6,13 +6,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HookState, type HookBroadcast } from "./lib/hookState.js";
 import { resolveTmuxPaneForPid } from "./lib/pane.js";
-import { sendKey, sendText } from "./lib/sendKeys.js";
+import { parseMultipart } from "./lib/parseMultipart.js";
+import { sendKey, sendLiteral, sendText } from "./lib/sendKeys.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
 import {
   readFromOffset,
   readTranscriptFile,
   type TranscriptEvent,
 } from "./lib/transcript.js";
+import { storeUpload } from "./lib/uploads.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -24,6 +26,22 @@ const TIMING = process.env.HARK_TIMING === "1";
 
 const sessionsDir = path.join(os.homedir(), ".claude", "sessions");
 const projectsDir = path.join(os.homedir(), ".claude", "projects");
+
+// Where uploaded files (photos, attachments, long-text-as-files) live.
+// Per-session subdirs keep things tidy and let us garbage-collect later.
+const uploadsRoot =
+  process.env.HARK_UPLOAD_DIR ||
+  path.join(
+    process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"),
+    "hark",
+    "uploads",
+  );
+
+// Caps on what we'll accept per request. 50 MB per file is plenty for a
+// high-res phone photo; 200 MB total leaves headroom for a small batch.
+const MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024;
+const MAX_UPLOAD_FILES = 10;
 
 type SessionFile = {
   pid: number;
@@ -263,12 +281,23 @@ app.post("/api/sessions/:id/send", async (req, res) => {
     text?: string;
     key?: string;
     submit?: boolean;
+    // Absolute paths to upload artifacts. Each is sent as a literal
+    // `@<path> ` keystroke run so Claude Code's TUI picks them up as
+    // attachment chips (it scans for `@` per-keystroke, not in pastes).
+    attachments?: string[];
   };
 
   try {
-    if (typeof body.text === "string") {
-      if (body.text.length > 0) {
-        await sendText(pane.socket, pane.paneId, body.text);
+    if (typeof body.text === "string" || Array.isArray(body.attachments)) {
+      const atts = (body.attachments ?? []).filter(
+        (p): p is string => typeof p === "string" && p.length > 0,
+      );
+      for (const p of atts) {
+        await sendLiteral(pane.socket, pane.paneId, `@${p} `);
+      }
+      const text = typeof body.text === "string" ? body.text : "";
+      if (text.length > 0) {
+        await sendText(pane.socket, pane.paneId, text);
       }
       if (body.submit !== false) {
         await sendKey(pane.socket, pane.paneId, "Enter");
@@ -276,13 +305,46 @@ app.post("/api/sessions/:id/send", async (req, res) => {
     } else if (typeof body.key === "string") {
       await sendKey(pane.socket, pane.paneId, body.key);
     } else {
-      res.status(400).json({ error: "expected text or key" });
+      res.status(400).json({ error: "expected text, key, or attachments" });
       return;
     }
     clearAttention(session.sessionId);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post("/api/sessions/:id/upload", async (req, res) => {
+  const session = await findSession(req.params.id);
+  if (!session) {
+    res.status(404).json({ error: "session not found" });
+    return;
+  }
+  try {
+    const parsed = await parseMultipart(req, {
+      maxFileBytes: MAX_UPLOAD_FILE_BYTES,
+      maxTotalBytes: MAX_UPLOAD_TOTAL_BYTES,
+      maxFiles: MAX_UPLOAD_FILES,
+    });
+    if (parsed.files.length === 0) {
+      res.status(400).json({ error: "no files in upload" });
+      return;
+    }
+    const stored = await Promise.all(
+      parsed.files.map((f) =>
+        storeUpload({
+          cacheRoot: uploadsRoot,
+          sessionId: session.sessionId,
+          originalName: f.filename,
+          mime: f.mime,
+          data: f.data,
+        }),
+      ),
+    );
+    res.json({ files: stored });
+  } catch (err) {
+    res.status(400).json({ error: String(err) });
   }
 });
 

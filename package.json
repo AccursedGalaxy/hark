@@ -3,7 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "workspaces": ["web"],
+  "workspaces": [
+    "web"
+  ],
   "scripts": {
     "dev": "concurrently --names server,web -c blue,magenta \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "tsx watch src/server.ts",
@@ -18,9 +20,11 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "busboy": "^1.6.0",
     "express": "^4.21.2"
   },
   "devDependencies": {
+    "@types/busboy": "^1.5.4",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.5",
     "concurrently": "^9.1.0",

@@ -126,5 +126,22 @@ export function derivePromptKind(
 // ---- Send-key payloads (POST /api/sessions/:id/send) ----
 
 export type SendBody =
-  | { text: string; submit?: boolean }
-  | { key: string };
+  | { text: string; submit?: boolean; attachments?: string[] }
+  | { key: string }
+  | { attachments: string[]; text?: string; submit?: boolean };
+
+// ---- Uploads (POST /api/sessions/:id/upload) ----
+
+export interface UploadedFile {
+  // Original filename as provided by the browser.
+  name: string;
+  // Absolute path on the host where the server saved it. Sent back to the
+  // server in the `attachments` field of a subsequent send.
+  path: string;
+  size: number;
+  mime: string;
+}
+
+export interface UploadResponse {
+  files: UploadedFile[];
+}

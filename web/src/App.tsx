@@ -36,6 +36,7 @@ export default function App() {
     transcriptError,
     send,
     sendError,
+    upload,
     currentPromptKind,
     currentPendingPermission,
     refresh,
@@ -118,6 +119,7 @@ export default function App() {
                 promptKind={currentPromptKind}
                 pendingPermission={currentPendingPermission}
                 onSend={send}
+                onUpload={upload}
               />
             </>
           ) : (

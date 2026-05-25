@@ -58,3 +58,16 @@ export async function sendText(
   await run(loadBuffer, text);
   await run(pasteBuffer);
 }
+
+// Send a string as literal keystrokes (one char at a time, no bracketed
+// paste). Used for attachment-path tokens like "@/abs/path file.png " —
+// Claude Code's TUI scans for the `@` prefix per-keystroke, so paths sent
+// inside a bracketed paste don't get converted to attachment chips.
+export async function sendLiteral(
+  socket: string,
+  paneId: string,
+  text: string,
+): Promise<void> {
+  // `send-keys -l` sends raw bytes without trying to parse named keys.
+  await run(["-S", socket, "send-keys", "-t", paneId, "-l", text]);
+}
