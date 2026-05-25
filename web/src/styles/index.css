@@ -184,6 +184,79 @@ button {
   text-align: center;
 }
 
+.rail-toolbar {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+.rail-new {
+  width: 100%;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.08s ease,
+    color 0.08s ease;
+}
+.rail-new:hover {
+  background: var(--accent-bg);
+  color: var(--text);
+  border-color: var(--accent);
+  border-style: solid;
+}
+.rail-new-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rail-new-form input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+}
+.rail-new-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+.rail-new-actions {
+  display: flex;
+  gap: 6px;
+}
+.rail-new-actions button {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.rail-new-actions .btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.rail-new-actions .btn-primary:disabled,
+.rail-new-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rail-new-err {
+  font-size: 11px;
+  color: var(--attn);
+}
+
 .rail-list {
   flex: 1;
   overflow-y: auto;
@@ -656,6 +729,28 @@ button {
 }
 .composer-actions .btn-ghost {
   background: transparent;
+}
+/* Approve/Deny only render when Claude is awaiting input — make them stand out
+ * so the user can act at a glance. */
+.composer-actions .btn-approve {
+  background: var(--idle-bg);
+  border-color: var(--idle);
+  color: var(--idle);
+  font-weight: 600;
+}
+.composer-actions .btn-approve:hover:not(:disabled) {
+  background: var(--idle);
+  color: #fff;
+}
+.composer-actions .btn-deny {
+  background: var(--attn-bg);
+  border-color: var(--attn);
+  color: var(--attn);
+  font-weight: 600;
+}
+.composer-actions .btn-deny:hover:not(:disabled) {
+  background: var(--attn);
+  color: #fff;
 }
 .composer-hint {
   margin-left: auto;

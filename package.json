@@ -1,5 +1,5 @@
 {
-  "name": "idea",
+  "name": "hark",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -12,6 +12,8 @@
     "start": "node dist/server.js",
     "install-hooks": "tsx src/bin/install-hooks.ts",
     "uninstall-hooks": "tsx src/bin/install-hooks.ts --uninstall",
+    "install-service": "tsx src/bin/install-service.ts",
+    "uninstall-service": "tsx src/bin/install-service.ts --uninstall",
     "test": "vitest run",
     "test:watch": "vitest"
   },

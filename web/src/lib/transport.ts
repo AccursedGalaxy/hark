@@ -52,6 +52,31 @@ export async function clearAttention(sessionId: string): Promise<void> {
   ).catch(() => {});
 }
 
+export interface SpawnResponse {
+  ok: true;
+  sessionName: string;
+  createdSession: boolean;
+}
+
+export async function spawnSession(cwd: string): Promise<SpawnResponse> {
+  const r = await fetch("/api/sessions/new", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd }),
+  });
+  if (!r.ok) {
+    let msg = `spawn failed (${r.status})`;
+    try {
+      const j = (await r.json()) as { error?: string };
+      if (j.error) msg = j.error;
+    } catch {
+      /* keep default */
+    }
+    throw new Error(msg);
+  }
+  return (await r.json()) as SpawnResponse;
+}
+
 // ---- SSE wrappers. EventSource auto-reconnects on its own; we only need
 // to manage subscription lifecycle.
 

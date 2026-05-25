@@ -34,6 +34,9 @@ export interface SessionsApi {
   transcriptError: string | null;
   send: (body: SendBody) => Promise<void>;
   sendError: string | null;
+  // True when the current session has an unresolved Claude Code Notification
+  // hook (permission prompt or idle waiting). Cleared when the user sends.
+  currentRequestingInput: boolean;
   clearAttention: (id: string) => void;
   refresh: () => void;
 }
@@ -80,6 +83,10 @@ export function useSessions(): SessionsApi {
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
+  // Per-session timestamp marking when the user resolved the latest pending
+  // Notification (by sending text or keys). A Notification is considered live
+  // when lastEventAt > resolvedAt[sessionId].
+  const [resolvedAt, setResolvedAt] = useState<Record<string, number>>({});
 
   const sessionsRef = useRef<RawSession[]>([]);
   sessionsRef.current = rawSessions;
@@ -147,6 +154,15 @@ export function useSessions(): SessionsApi {
     [sessions, current],
   );
 
+  const currentRequestingInput = useMemo(() => {
+    if (!current) return false;
+    const att = attention[current];
+    if (!att || att.lastEvent !== "Notification") return false;
+    const last = att.lastEventAt ?? 0;
+    const resolved = resolvedAt[current] ?? 0;
+    return last > resolved;
+  }, [current, attention, resolvedAt]);
+
   const setCurrent = useCallback((id: string | null) => {
     setCurrentState(id);
   }, []);
@@ -210,6 +226,7 @@ export function useSessions(): SessionsApi {
       setSendError(null);
       try {
         await sendToSession(current, body);
+        setResolvedAt((prev) => ({ ...prev, [current]: Date.now() }));
       } catch (err) {
         const msg = err instanceof Error ? err.message : "send failed";
         setSendError(msg);
@@ -242,6 +259,7 @@ export function useSessions(): SessionsApi {
     transcriptError,
     send,
     sendError,
+    currentRequestingInput,
     clearAttention,
     refresh,
   };

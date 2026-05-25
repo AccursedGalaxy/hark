@@ -8,7 +8,7 @@ import { useMediaQuery } from "./hooks/useMediaQuery";
 import { useSessions } from "./hooks/useSessions";
 
 const WIDE_QUERY = "(min-width: 760px)";
-const BASE_TITLE = "idea";
+const BASE_TITLE = "hark";
 
 function setFavicon(attentionCount: number) {
   if (typeof document === "undefined") return;
@@ -16,8 +16,8 @@ function setFavicon(attentionCount: number) {
   if (!link) return;
   const svg =
     attentionCount > 0
-      ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0a0a0a"/><text x="14" y="22" font-family="ui-sans-serif,system-ui" font-size="18" font-weight="700" text-anchor="middle" fill="#e6e6e6">i</text><circle cx="24" cy="9" r="7" fill="#ef4444"/></svg>`
-      : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0a0a0a"/><text x="16" y="22" font-family="ui-sans-serif,system-ui" font-size="18" font-weight="700" text-anchor="middle" fill="#e6e6e6">i</text></svg>`;
+      ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0a0a0a"/><text x="14" y="22" font-family="ui-sans-serif,system-ui" font-size="18" font-weight="700" text-anchor="middle" fill="#e6e6e6">h</text><circle cx="24" cy="9" r="7" fill="#ef4444"/></svg>`
+      : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0a0a0a"/><text x="16" y="22" font-family="ui-sans-serif,system-ui" font-size="18" font-weight="700" text-anchor="middle" fill="#e6e6e6">h</text></svg>`;
   const href = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
   if (link.href !== href) link.href = href;
 }
@@ -36,6 +36,8 @@ export default function App() {
     transcriptError,
     send,
     sendError,
+    currentRequestingInput,
+    refresh,
   } = useSessions();
 
   // Sync title + favicon with attention count.
@@ -70,6 +72,7 @@ export default function App() {
           current={current}
           onPick={setCurrent}
           attentionCount={attentionCount}
+          onSpawned={refresh}
         />
       )}
 
@@ -78,6 +81,7 @@ export default function App() {
           sessions={sessions}
           attentionCount={attentionCount}
           onPick={setCurrent}
+          onSpawned={refresh}
         />
       )}
 
@@ -110,6 +114,7 @@ export default function App() {
                     : undefined
                 }
                 errorMessage={sendError}
+                requestingInput={currentRequestingInput}
                 onSend={send}
               />
             </>
@@ -130,10 +135,12 @@ function MobileSessionList({
   sessions,
   attentionCount,
   onPick,
+  onSpawned,
 }: {
   sessions: ReturnType<typeof useSessions>["sessions"];
   attentionCount: number;
   onPick: (id: string) => void;
+  onSpawned: () => void;
 }) {
   return (
     <SessionRail
@@ -141,6 +148,7 @@ function MobileSessionList({
       current={null}
       onPick={onPick}
       attentionCount={attentionCount}
+      onSpawned={onSpawned}
     />
   );
 }

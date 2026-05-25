@@ -2,17 +2,20 @@ import type { SessionView } from "../hooks/useSessions";
 import { STATE_LABEL } from "../lib/protocol";
 import { sessionLabel, tildeify } from "../lib/format";
 import { Dot } from "./Dot";
+import { NewSessionButton } from "./NewSessionButton";
 
 export function SessionRail({
   sessions,
   current,
   onPick,
   attentionCount,
+  onSpawned,
 }: {
   sessions: SessionView[];
   current: string | null;
   onPick: (id: string) => void;
   attentionCount: number;
+  onSpawned: () => void;
 }) {
   return (
     <aside className="rail" aria-label="Sessions">
@@ -23,6 +26,9 @@ export function SessionRail({
             ? `${attentionCount} / ${sessions.length}`
             : sessions.length}
         </span>
+      </div>
+      <div className="rail-toolbar">
+        <NewSessionButton onSpawned={onSpawned} />
       </div>
       <div className="rail-list">
         {sessions.length === 0 ? (

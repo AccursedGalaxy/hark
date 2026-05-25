@@ -70,7 +70,7 @@ Build one session end-to-end before adding breadth.
 - **Hooks installation** — drop `Notification` + `Stop` into `~/.claude/settings.json` pointing at `http://localhost:3000/api/hook`.
 - **Attention-sorted sidebar** — wire hook events to per-session `needsAttention` flag; bump session to top.
 - **Spawn new session** — `+ New session` button → `tmux new-window -d 'cd <dir> && claude'`.
-- **systemd user service** — ship a `idea.service` unit file; one-time `systemctl --user enable`.
+- **systemd user service** — ship a `hark.service` unit file; one-time `systemctl --user enable`.
 - **In-app alerts** — favicon badge, document title, optional sound on `Notification`.
 - **Web Push** — service worker + VAPID; closed-app notifications on mobile.
 

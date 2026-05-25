@@ -1,0 +1,15 @@
+[Unit]
+Description=hark — Claude Code session manager
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@INSTALL_DIR@@
+ExecStart=@@NODE@@ @@INSTALL_DIR@@/dist/server.js
+Restart=on-failure
+RestartSec=2
+Environment=NODE_ENV=production
+Environment=PORT=3000
+
+[Install]
+WantedBy=default.target

@@ -53,7 +53,7 @@ export async function sendText(
   paneId: string,
   text: string,
 ): Promise<void> {
-  const bufferId = `idea-${randomBytes(4).toString("hex")}`;
+  const bufferId = `hark-${randomBytes(4).toString("hex")}`;
   const { loadBuffer, pasteBuffer } = buildPasteArgs(socket, paneId, bufferId);
   await run(loadBuffer, text);
   await run(pasteBuffer);

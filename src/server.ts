@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { HookState, type HookBroadcast } from "./lib/hookState.js";
 import { resolveTmuxPaneForPid } from "./lib/pane.js";
 import { sendKey, sendText } from "./lib/sendKeys.js";
+import { spawnClaudeSession } from "./lib/spawnSession.js";
 import {
   readFromOffset,
   readTranscriptFile,
@@ -261,6 +262,39 @@ app.post("/api/sessions/:id/attention/clear", (req, res) => {
   clearAttention(req.params.id);
   res.json({ ok: true });
 });
+
+app.post("/api/sessions/new", async (req, res) => {
+  const body = (req.body ?? {}) as { cwd?: string; command?: string };
+  const raw = typeof body.cwd === "string" && body.cwd ? body.cwd : "~";
+  const cwd = expandHome(raw);
+  // Reject paths that don't resolve to an existing directory — better error
+  // than letting tmux fail with an obscure message.
+  try {
+    const stat = await fs.stat(cwd);
+    if (!stat.isDirectory()) {
+      res.status(400).json({ error: `not a directory: ${cwd}` });
+      return;
+    }
+  } catch {
+    res.status(400).json({ error: `cwd does not exist: ${cwd}` });
+    return;
+  }
+  try {
+    const result = await spawnClaudeSession({
+      cwd,
+      command: body.command,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+function expandHome(p: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
 
 function clearAttention(sessionId: string): void {
   const prev = hookState.get(sessionId);

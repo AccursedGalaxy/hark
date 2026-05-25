@@ -6,11 +6,13 @@ export function Composer({
   disabled,
   disabledReason,
   errorMessage,
+  requestingInput,
   onSend,
 }: {
   disabled: boolean;
   disabledReason?: string;
   errorMessage: string | null;
+  requestingInput: boolean;
   onSend: (body: SendBody) => Promise<void>;
 }) {
   const [text, setText] = useState("");
@@ -96,24 +98,28 @@ export function Composer({
           >
             Send
           </button>
-          <button
-            type="button"
-            className="btn-ghost"
-            title="Send '1' then Enter (approve a permission prompt)"
-            onClick={() => void sendKeySequence(["1", "Enter"])}
-            disabled={disabled || busy}
-          >
-            Approve
-          </button>
-          <button
-            type="button"
-            className="btn-ghost"
-            title="Send '2' then Enter (deny a permission prompt)"
-            onClick={() => void sendKeySequence(["2", "Enter"])}
-            disabled={disabled || busy}
-          >
-            Deny
-          </button>
+          {requestingInput && (
+            <>
+              <button
+                type="button"
+                className="btn-approve"
+                title="Send '1' then Enter (approve a permission prompt)"
+                onClick={() => void sendKeySequence(["1", "Enter"])}
+                disabled={disabled || busy}
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                className="btn-deny"
+                title="Send '2' then Enter (deny a permission prompt)"
+                onClick={() => void sendKeySequence(["2", "Enter"])}
+                disabled={disabled || busy}
+              >
+                Deny
+              </button>
+            </>
+          )}
           <button
             type="button"
             className="btn-ghost"
