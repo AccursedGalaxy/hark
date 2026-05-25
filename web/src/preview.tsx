@@ -7,10 +7,65 @@
 
 import { createRoot } from "react-dom/client";
 import { PromptPanel } from "./components/PromptPanel";
-import type { Pending, SendBody, SessionError } from "./lib/protocol";
+import { QuestionCard } from "./components/QuestionCard";
+import type {
+  AskQuestion,
+  Pending,
+  SendBody,
+  SessionError,
+} from "./lib/protocol";
 import "./styles/index.css";
 
 const noop = async (_body: SendBody) => {};
+
+// Standalone QuestionCard samples — this is the dock component the live
+// composer actually renders for AskUserQuestion. Keeping a preview sample
+// catches multi-select regressions without spinning up a real session.
+const askCardSamples: Array<{ title: string; questions: AskQuestion[] }> = [
+  {
+    title: "QuestionCard — single-select",
+    questions: [
+      {
+        question: "Pick the next branch to ship",
+        header: "Branch",
+        options: [
+          { label: "main", description: "stable" },
+          { label: "next", description: "release candidate" },
+          { label: "experimental" },
+        ],
+        multiSelect: false,
+      },
+    ],
+  },
+  {
+    title: "QuestionCard — multi-select (issue #10)",
+    questions: [
+      {
+        question: "Confirm which gitignored clutter to remove from the repo root?",
+        header: "Cleanup scope",
+        options: [
+          {
+            label: "21 loose *.png screenshots (~3.5 MB)",
+            description: "hark-*.png, rail-*.png, tasklist-*.png — dev session screenshots",
+          },
+          {
+            label: ".playwright-mcp/ (2.8 MB)",
+            description: "Playwright MCP cache: console logs, page yml dumps",
+          },
+          {
+            label: "dist/ (160 KB)",
+            description: "Compiled server output from `tsc`",
+          },
+          {
+            label: "public/assets/ (Vite build output)",
+            description: "index-*.js / index-*.css produced by `npm run build`",
+          },
+        ],
+        multiSelect: true,
+      },
+    ],
+  },
+];
 
 const samples: Array<{
   title: string;
@@ -265,6 +320,23 @@ function Preview() {
   return (
     <div style={{ maxWidth: 720, margin: "32px auto", padding: "0 16px" }}>
       <h1 style={{ marginBottom: 24 }}>PromptPanel preview</h1>
+      {askCardSamples.map((sample, i) => (
+        <section key={`ask-${i}`} style={{ marginBottom: 32 }}>
+          <h2
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: "var(--fg-3)",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              marginBottom: 8,
+            }}
+          >
+            {sample.title}
+          </h2>
+          <QuestionCard questions={sample.questions} busy={false} onSend={noop} />
+        </section>
+      ))}
       {samples.map((sample, i) => (
         <section key={i} style={{ marginBottom: 32 }}>
           <h2

@@ -632,6 +632,12 @@
   gap: 14px;
 }
 .pp-question { display: flex; flex-direction: column; gap: 8px; }
+.pp-question-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .pp-question-chip {
   align-self: flex-start;
   font-family: var(--mono);
@@ -643,6 +649,13 @@
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid oklch(from var(--accent) l c h / 0.35);
+}
+/* Muted variant for the "select all that apply" hint — keeps the
+   primary accent chip (the question header) visually dominant. */
+.pp-question-chip-multi {
+  background: var(--ink-0);
+  color: var(--fg-2);
+  border-color: var(--line);
 }
 .pp-question-text {
   margin: 0;

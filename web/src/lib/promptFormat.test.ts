@@ -138,19 +138,32 @@ describe("formatAskKeySequence", () => {
     expect(keys).toEqual(["Up", "Up", "Up", "Down", "Enter"]);
   });
 
-  it("multi-select picks each option with Space then confirms with Enter", () => {
-    // sectionsQ has 3 options. Picking Introduction (0) and Conclusion (2)
-    // → reset+Space, reset+Down+Down+Space, Enter.
+  it("multi-select toggles each pick with Enter then commits via Submit row", () => {
+    // sectionsQ has 3 declared options. With the Other + Submit rows the
+    // widget exposes 5 rows total; Submit lives at index 4 (0-indexed).
+    // Picking Introduction (0) and Conclusion (2):
+    //   reset(5×Up) + 0 Downs + Enter   ← toggle Introduction
+    //   reset(5×Up) + 2 Downs + Enter   ← toggle Conclusion
+    //   reset(5×Up) + 4 Downs + Enter   ← step to Submit and commit
     const keys = formatAskKeySequence(
       [sectionsQ],
       [["Introduction", "Conclusion"]],
       [""],
     );
-    // total = 3 + Other = 4 Ups per reset.
     expect(keys).toEqual([
-      "Up", "Up", "Up", "Up", "Space",
-      "Up", "Up", "Up", "Up", "Down", "Down", "Space",
-      "Enter",
+      "Up", "Up", "Up", "Up", "Up", "Enter",
+      "Up", "Up", "Up", "Up", "Up", "Down", "Down", "Enter",
+      "Up", "Up", "Up", "Up", "Up", "Down", "Down", "Down", "Down", "Enter",
+    ]);
+  });
+
+  it("multi-select with a single pick still requires the Submit step", () => {
+    // Multi-select never auto-advances on Enter — every commit goes through
+    // the Submit row at the bottom of the row list.
+    const keys = formatAskKeySequence([sectionsQ], [["Body"]], [""]);
+    expect(keys).toEqual([
+      "Up", "Up", "Up", "Up", "Up", "Down", "Enter",
+      "Up", "Up", "Up", "Up", "Up", "Down", "Down", "Down", "Down", "Enter",
     ]);
   });
 
@@ -161,10 +174,13 @@ describe("formatAskKeySequence", () => {
       ["", ""],
     );
     expect(keys).toEqual([
-      // Q1 (single): reset + 1 Down + Enter.
+      // Q1 single-select (2 opts + Other = 3 rows): reset + 1 Down + Enter.
       "Up", "Up", "Up", "Down", "Enter",
-      // Q2 (multi): reset + 1 Down + Space + Enter.
-      "Up", "Up", "Up", "Up", "Down", "Space", "Enter",
+      // Q2 multi-select (3 opts + Other + Submit = 5 rows):
+      //   reset + 1 Down + Enter   ← toggle Body
+      //   reset + 4 Down + Enter   ← step to Submit and commit
+      "Up", "Up", "Up", "Up", "Up", "Down", "Enter",
+      "Up", "Up", "Up", "Up", "Up", "Down", "Down", "Down", "Down", "Enter",
     ]);
   });
 

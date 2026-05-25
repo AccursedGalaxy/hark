@@ -1064,6 +1064,25 @@ a { color: var(--accent); }
 }
 .q-tag .pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
 
+/* "Select all that apply" pill — small, muted, sits next to the header
+   chip so the user knows a question is multi-select before clicking. */
+.q-multi-tag {
+  display: inline-flex; align-items: center;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--fg-2);
+  padding: 2px 8px;
+  background: var(--ink-0);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+/* Multi-select option grid: selected key cell shows a checkmark instead of
+   the numeric shortcut. Keep the same square cell so layout doesn't jump
+   between selected/unselected states. */
+.q-opt[role="checkbox"][aria-checked="true"] .key {
+  font-size: 14px; font-weight: 700;
+}
+
 .q-title {
   margin: 10px 0 4px;
   font-family: var(--serif);

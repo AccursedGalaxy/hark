@@ -137,24 +137,45 @@ export function QuestionCard({
 
       {questions.map((q, qi) => (
         <div key={qi} style={{ marginTop: qi === 0 ? 0 : 18 }}>
-          {q.header && (
-            <span
+          {(q.header || q.multiSelect) && (
+            <div
               style={{
-                display: "inline-block",
-                fontFamily: "var(--mono)",
-                fontSize: 10,
-                letterSpacing: "0.1em",
-                textTransform: "uppercase",
-                color: "var(--accent)",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                flexWrap: "wrap",
                 marginTop: 8,
               }}
             >
-              {q.header}
-            </span>
+              {q.header && (
+                <span
+                  style={{
+                    fontFamily: "var(--mono)",
+                    fontSize: 10,
+                    letterSpacing: "0.1em",
+                    textTransform: "uppercase",
+                    color: "var(--accent)",
+                  }}
+                >
+                  {q.header}
+                </span>
+              )}
+              {q.multiSelect && (
+                <span
+                  className="q-multi-tag"
+                  title="Pick one or more — submit commits all picks"
+                >
+                  Select all that apply
+                </span>
+              )}
+            </div>
           )}
           <div className="q-title">{q.question}</div>
 
-          <div className="q-options" role={q.multiSelect ? "group" : "radiogroup"}>
+          <div
+            className={`q-options${q.multiSelect ? " is-multi" : ""}`}
+            role={q.multiSelect ? "group" : "radiogroup"}
+          >
             {q.options.map((opt, oi) => {
               const selected = (selections[qi] ?? []).includes(opt.label);
               return (
@@ -167,7 +188,9 @@ export function QuestionCard({
                   onClick={() => toggle(qi, opt.label, !!q.multiSelect)}
                   onDoubleClick={() => void submit()}
                 >
-                  <span className="key">{oi + 1}</span>
+                  <span className="key" aria-hidden="true">
+                    {q.multiSelect && selected ? "✓" : oi + 1}
+                  </span>
                   <span className="head">{opt.label}</span>
                   <span className="body">{opt.description ?? ""}</span>
                 </button>
@@ -194,7 +217,8 @@ export function QuestionCard({
         {primary && (
           <>
             <span className="hint">
-              <kbd>1</kbd>–<kbd>{Math.min(4, primary.options.length)}</kbd> to pick
+              <kbd>1</kbd>–<kbd>{Math.min(4, primary.options.length)}</kbd>{" "}
+              {primary.multiSelect ? "to toggle" : "to pick"}
             </span>
             <span className="hint">
               <kbd>⌘</kbd>

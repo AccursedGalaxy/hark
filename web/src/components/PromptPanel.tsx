@@ -258,9 +258,11 @@ function AskUserQuestionForm({
 
   // Two delivery paths:
   //   1. **Native key sequence** (preferred) — drive the TUI widget directly
-  //      with Up/Down/Space/Enter. The TUI accepts the answer as a proper
-  //      AskUserQuestion response, which is what Claude expects. Works for
-  //      single- and multi-select with literal labels.
+  //      with Up/Down/Enter. The TUI accepts the answer as a proper
+  //      AskUserQuestion response, which is what Claude expects. Single-
+  //      select uses Enter to pick-and-advance; multi-select toggles each
+  //      pick with Enter then steps down to the Submit row before final
+  //      Enter. See `formatAskKeySequence` for the row layout.
   //   2. **Escape + text fallback** — used only when key delivery isn't
   //      viable (an "Other" pick whose free text must enter the widget's
   //      text-input mode). Claude sees this as "user declined and typed a
@@ -307,11 +309,26 @@ function AskUserQuestionForm({
         <ol className="pp-questions">
           {questions.map((q, qi) => (
             <li className="pp-question" key={qi}>
-              {q.header && (
-                <span className="pp-question-chip">{q.header}</span>
+              {(q.header || q.multiSelect) && (
+                <div className="pp-question-chips">
+                  {q.header && (
+                    <span className="pp-question-chip">{q.header}</span>
+                  )}
+                  {q.multiSelect && (
+                    <span
+                      className="pp-question-chip pp-question-chip-multi"
+                      title="Pick one or more — submit commits all picks"
+                    >
+                      Select all that apply
+                    </span>
+                  )}
+                </div>
               )}
               <p className="pp-question-text">{q.question}</p>
-              <ul className="pp-options" role={q.multiSelect ? "group" : "radiogroup"}>
+              <ul
+                className={`pp-options${q.multiSelect ? " is-multi" : ""}`}
+                role={q.multiSelect ? "group" : "radiogroup"}
+              >
                 {q.options.map((opt, oi) => (
                   <OptionRow
                     key={oi}

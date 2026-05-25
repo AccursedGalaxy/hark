@@ -33,24 +33,46 @@ export function isAskAnswerComplete(
 /**
  * Build the deterministic tmux key sequence that drives the AskUserQuestion
  * TUI widget to the user's selection. Returns null when the answer can't be
- * delivered via keys alone — that happens whenever any question selects
- * "Other" (free text), because that path requires text-mode entry which
- * couples to the widget's text-input state machine and is more fragile.
+ * delivered via keys alone — in which case the caller falls back to the
+ * Escape + free-text path. The only such case today is "Other" picks, where
+ * the free-text input needs the widget's text-input mode.
  *
- * For each question we emit:
- *   1. N×Up      — idempotent reset to option 0 (option 0 is highlighted
- *                  when the question first appears, but a human pressing
- *                  arrows in the desktop TUI may have moved focus already.
- *                  Up past the top is a no-op, so over-sending is safe).
- *   2. K×Down    — step to the target option index.
- *   3. Per-pick  — single-select: nothing here, Enter handles it next.
- *                  multi-select: Space to toggle this option, then for any
- *                  additional picks reset to top and step again.
- *   4. Enter     — confirm the question (also advances to the next one).
+ * The TUI widget layout (per the multi-select screenshot in issue #10):
  *
- * `optionCount` for the reset must include the auto-injected Other row, so
- * pass `q.options.length + 1`. The caller knows the layout; this helper
- * doesn't need to introspect it.
+ *   Single-select question rows (top to bottom):
+ *     [0..n-1] declared options
+ *     [n]     "Type something" (auto-injected Other)
+ *   Total rows: n + 1. Enter on an option auto-submits and advances.
+ *
+ *   Multi-select question rows (top to bottom):
+ *     [0..n-1] declared options
+ *     [n]     "Type something" (auto-injected Other)
+ *     [n+1]   "Submit"
+ *   Total rows: n + 2. Enter on an option TOGGLES it (per the widget hint
+ *   "Enter to select · ↑/↓ to navigate"). Commit requires stepping to the
+ *   Submit row and pressing Enter.
+ *
+ * Single-select per question we emit:
+ *   1. N×Up   — idempotent reset to row 0 (option 0 is highlighted when the
+ *               question first appears, but a human in the desktop TUI may
+ *               have moved focus already. Up past the top is a no-op, so
+ *               over-sending is safe).
+ *   2. K×Down — step to the target option index.
+ *   3. Enter  — confirm the question (also advances to the next one).
+ *
+ * Multi-select per question:
+ *   For each pick:
+ *     1. N×Up — reset to row 0.
+ *     2. K×Down — step to the option index.
+ *     3. Enter — toggle this option.
+ *   After all picks:
+ *     4. N×Up — reset to row 0.
+ *     5. (n+1)×Down — step to the Submit row.
+ *     6. Enter — commit and advance to next question (or close the form).
+ *
+ * See GitHub issue #10 — the prior implementation used Space to toggle and a
+ * single trailing Enter, which silently submitted only the focused option
+ * because the TUI ignores Space in this widget.
  */
 export function formatAskKeySequence(
   questions: AskQuestion[],
@@ -68,9 +90,6 @@ export function formatAskKeySequence(
       void other;
       return null;
     }
-    // Option list seen by the TUI: declared options plus the auto-injected
-    // Other row at the bottom. Reset overshoot covers the worst case.
-    const total = q.options.length + 1;
     const indices = sel
       .map((label) => q.options.findIndex((o) => o.label === label))
       .filter((i) => i >= 0);
@@ -78,21 +97,29 @@ export function formatAskKeySequence(
     // result here means the form let through a label we don't know about —
     // bail rather than send keys to an unknown row.
     if (indices.length === 0) return null;
+
     if (!q.multiSelect) {
-      // Single-select: reset to top, descend to the target, hit Enter.
+      // Single-select: declared options + Other ("Type something") row.
+      // Enter on an option both selects it and advances.
+      const total = q.options.length + 1;
       pushRepeated(keys, "Up", total);
       pushRepeated(keys, "Down", indices[0]);
       keys.push("Enter");
       continue;
     }
-    // Multi-select: toggle each pick with Space, resetting to top between
-    // picks so absolute indices stay accurate regardless of order.
+
+    // Multi-select: declared options + Other + Submit row.
+    // Toggling and commit are separate keystrokes; commit lives at the
+    // bottom of the row list.
+    const total = q.options.length + 2;
+    const submitIdx = q.options.length + 1;
     for (let i = 0; i < indices.length; i++) {
       pushRepeated(keys, "Up", total);
       pushRepeated(keys, "Down", indices[i]);
-      keys.push("Space");
+      keys.push("Enter");
     }
-    // Confirm the whole question and advance.
+    pushRepeated(keys, "Up", total);
+    pushRepeated(keys, "Down", submitIdx);
     keys.push("Enter");
   }
   return keys;
