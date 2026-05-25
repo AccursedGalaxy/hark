@@ -318,10 +318,15 @@ a { color: var(--accent); }
 .session-top {
   display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
   padding-right: 28px;
+  min-width: 0;
 }
-.session-name { font-weight: 600; color: var(--fg-0); font-size: 14px; letter-spacing: -0.005em; }
+.session-name {
+  font-weight: 600; color: var(--fg-0); font-size: 14px; letter-spacing: -0.005em;
+  min-width: 0; flex: 1 1 auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .session-status {
-  margin-left: auto;
+  flex-shrink: 0;
   font-family: var(--mono);
   font-size: 9.5px; letter-spacing: 0.1em;
   color: var(--fg-3);

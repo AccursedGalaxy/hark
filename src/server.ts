@@ -30,7 +30,11 @@ import {
   listPaneLocations,
   type PaneLocation,
 } from "./lib/tmuxLocations.js";
-import { readTranscriptFile, type TranscriptEvent } from "./lib/transcript.js";
+import {
+  readSessionTitle,
+  readTranscriptFile,
+  type TranscriptEvent,
+} from "./lib/transcript.js";
 import {
   openEmptyStream,
   openLazyTranscriptStream,
@@ -205,11 +209,22 @@ app.get("/api/sessions", async (_req, res) => {
   const augmented = await Promise.all(
     sessions.map(async (s) => {
       const att = attention[s.sessionId];
-      const pane = await resolveTmuxPaneForPid(s.pid);
+      const [pane, transcriptPath] = await Promise.all([
+        resolveTmuxPaneForPid(s.pid),
+        findTranscriptPath(s.sessionId),
+      ]);
       const loc: PaneLocation | undefined =
         pane ? paneLocations.get(pane.paneId) : undefined;
+      // Claude Code writes an `ai-title` row into the transcript as it
+      // refines a name for the session. Surfacing it as `name` lets the
+      // sidebar label become meaningful instead of just the cwd basename.
+      // SessionFile.name (if Claude Code ever writes one) wins.
+      const aiTitle = transcriptPath
+        ? await readSessionTitle(transcriptPath)
+        : null;
       return {
         ...s,
+        name: s.name ?? aiTitle ?? undefined,
         hasTmuxPane: pane !== null,
         tmuxLocation: loc ? formatLocation(loc) : null,
         tmuxWindowName: loc?.windowName ?? null,

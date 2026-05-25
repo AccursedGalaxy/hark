@@ -472,6 +472,47 @@ export async function readTranscriptFile(
   return { events: parseTranscript(buf.toString("utf8")), offset: buf.length };
 }
 
+// Claude Code rewrites the title repeatedly as it refines, so the last
+// occurrence wins. Scanning only the tail keeps this cheap on multi-MB files.
+const TITLE_TAIL_BYTES = 32 * 1024;
+
+export async function readSessionTitle(
+  filePath: string,
+): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(filePath, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const stat = await handle.stat();
+    const length = Math.min(stat.size, TITLE_TAIL_BYTES);
+    const offset = stat.size - length;
+    const buf = Buffer.alloc(length);
+    await handle.read(buf, 0, length, offset);
+    const lines = buf.toString("utf8").split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      if (!line.includes('"ai-title"')) continue;
+      try {
+        const entry = JSON.parse(line) as {
+          type?: string;
+          aiTitle?: string;
+        };
+        if (entry.type === "ai-title" && typeof entry.aiTitle === "string") {
+          return entry.aiTitle;
+        }
+      } catch {
+        /* truncated head-line at the tail-read boundary — keep walking */
+      }
+    }
+    return null;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function readFromOffset(
   filePath: string,
   offset: number,

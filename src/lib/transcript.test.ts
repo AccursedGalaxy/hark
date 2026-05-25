@@ -1,9 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   extractToolMeta,
   indexToolResults,
   parseLine,
   parseTranscript,
+  readSessionTitle,
   ToolNameIndex,
 } from "./transcript.js";
 
@@ -744,6 +748,51 @@ describe("ToolNameIndex", () => {
       totalLines: 1,
       startLine: 1,
     });
+  });
+});
+
+describe("readSessionTitle", () => {
+  let dir: string;
+  let filePath: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "hark-title-"));
+    filePath = path.join(dir, "session.jsonl");
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("returns the latest aiTitle when refined multiple times", async () => {
+    const lines = [
+      JSON.stringify({ type: "ai-title", aiTitle: "first", sessionId: "s" }),
+      JSON.stringify({ type: "user", message: { content: "hi" } }),
+      JSON.stringify({ type: "ai-title", aiTitle: "final", sessionId: "s" }),
+    ].join("\n");
+    await fs.writeFile(filePath, lines);
+    expect(await readSessionTitle(filePath)).toBe("final");
+  });
+
+  it("returns null when no ai-title row exists", async () => {
+    await fs.writeFile(filePath, JSON.stringify({ type: "user" }));
+    expect(await readSessionTitle(filePath)).toBeNull();
+  });
+
+  it("returns null when the file is missing", async () => {
+    expect(await readSessionTitle(path.join(dir, "absent.jsonl"))).toBeNull();
+  });
+
+  it("survives a truncated head line inside the tail window", async () => {
+    // Pad the file so the tail-read window starts mid-line; the partial
+    // first line in the buffer must be skipped, not crash parsing.
+    const pad = "x".repeat(40_000);
+    const lines = [
+      JSON.stringify({ type: "user", message: { content: pad } }),
+      JSON.stringify({ type: "ai-title", aiTitle: "kept", sessionId: "s" }),
+    ].join("\n");
+    await fs.writeFile(filePath, lines);
+    expect(await readSessionTitle(filePath)).toBe("kept");
   });
 });
 
