@@ -170,7 +170,7 @@ a { color: var(--accent); }
 }
 
 .app.is-narrow {
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 /* ───── sidebar ──────────────────────────── */
