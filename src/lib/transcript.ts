@@ -21,6 +21,15 @@ type RawEntry = {
   // Code records alongside each tool_result. Type is `unknown` because the
   // shape varies per tool — see `extractToolMeta` for the dispatch.
   toolUseResult?: unknown;
+  // Present on `type:"attachment"` rows. The inner `type` discriminates
+  // between bookkeeping (`deferred_tools_delta`) and user-facing payloads
+  // like `queued_command` (a prompt the user typed while the model was
+  // busy — Claude Code never writes a `type:"user"` row for these).
+  attachment?: {
+    type?: string;
+    prompt?: string;
+    commandMode?: string;
+  };
 };
 
 const SYSTEM_REMINDER_RE = /^<system-reminder>([\s\S]*)<\/system-reminder>$/;
@@ -408,6 +417,24 @@ export function parseLine(line: string): TranscriptEvent | null {
       ts: entry.timestamp ?? "",
       blocks: parseAssistantBlocks(entry.message?.content),
     };
+  }
+  // Queued user prompts: when the user types into the composer while the
+  // model is busy, Claude Code writes a `type:"attachment"` row with
+  // `attachment.type === "queued_command"` instead of a `type:"user"` row.
+  // This is the only record carrying the prompt text — without this branch
+  // the queued message never appears in the transcript, even after the
+  // model eventually processes it.
+  if (entry.type === "attachment") {
+    const att = entry.attachment;
+    if (att?.type === "queued_command" && typeof att.prompt === "string") {
+      return {
+        kind: "user",
+        uuid: entry.uuid ?? "",
+        ts: entry.timestamp ?? "",
+        text: att.prompt,
+      };
+    }
+    return null;
   }
   return null;
 }

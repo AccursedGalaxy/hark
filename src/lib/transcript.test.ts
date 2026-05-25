@@ -68,6 +68,24 @@ const attachment = JSON.stringify({
   attachment: { type: "deferred_tools_delta", addedNames: ["Foo"] },
 });
 
+// Real shape Claude Code writes when the user queues a prompt by typing
+// into the composer while the model is still working. There is NO matching
+// `type:"user"` row — this attachment is the only carrier of the text, so
+// it must surface as a user bubble or the message vanishes from the UI.
+const queuedCommand = JSON.stringify({
+  parentUuid: "9f47032d-356a-4ac4-b83e-af526db8cbf5",
+  isSidechain: false,
+  attachment: {
+    type: "queued_command",
+    prompt: "steer: stop after the next file",
+    commandMode: "prompt",
+  },
+  type: "attachment",
+  uuid: "qc1",
+  timestamp: "2026-05-25T16:21:17.805Z",
+  sessionId: "79e59c7a",
+});
+
 const stopHookFeedback = JSON.stringify({
   type: "user",
   uuid: "sys1",
@@ -228,8 +246,31 @@ describe("parseLine", () => {
     expect((ev as { meta?: unknown }).meta).toBeUndefined();
   });
 
-  it("returns null for attachment events", () => {
+  it("returns null for bookkeeping attachment events (deferred_tools_delta)", () => {
     expect(parseLine(attachment)).toBeNull();
+  });
+
+  it("renders a queued_command attachment as a user event", () => {
+    // Bug repro: when the user types into the composer while the model is
+    // busy, Claude Code writes only this attachment row — no `type:"user"`
+    // record ever follows. Without this branch the queued message vanishes
+    // from the transcript even after the model processes it.
+    const ev = parseLine(queuedCommand);
+    expect(ev).toEqual({
+      kind: "user",
+      uuid: "qc1",
+      ts: "2026-05-25T16:21:17.805Z",
+      text: "steer: stop after the next file",
+    });
+  });
+
+  it("returns null for queued_command without a prompt string", () => {
+    const bad = JSON.stringify({
+      type: "attachment",
+      uuid: "qc-bad",
+      attachment: { type: "queued_command" },
+    });
+    expect(parseLine(bad)).toBeNull();
   });
 
   it("returns null for meta events like permission-mode", () => {
@@ -407,6 +448,15 @@ describe("parseTranscript", () => {
       "assistant",
       "tool_result",
     ]);
+  });
+
+  it("surfaces a queued_command attachment alongside regular user/assistant events", () => {
+    const blob = [userString, assistantText, queuedCommand].join("\n");
+    const events = parseTranscript(blob);
+    expect(events.map((e) => e.kind)).toEqual(["user", "assistant", "user"]);
+    const queued = events[2];
+    if (queued.kind !== "user") throw new Error("expected user");
+    expect(queued.text).toBe("steer: stop after the next file");
   });
 
   it("returns an empty array for empty input", () => {
