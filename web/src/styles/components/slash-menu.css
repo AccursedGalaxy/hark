@@ -49,8 +49,22 @@
   font-family: var(--font-mono, var(--font-sans));
   font-size: var(--font-sm);
 }
-.slash-menu-source {
+.slash-menu-kind {
   margin-left: auto;
+  font-size: var(--font-xs);
+  padding: 1px 6px;
+  border-radius: var(--radius-1, 4px);
+  border: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+.slash-menu-kind-skill {
+  color: var(--accent);
+  border-color: var(--accent-bg);
+  background: var(--accent-bg);
+}
+.slash-menu-source {
   color: var(--muted);
   font-size: var(--font-xs);
   text-transform: lowercase;

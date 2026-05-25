@@ -9,7 +9,11 @@ import type {
   TranscriptEvent,
   UploadedFile,
 } from "../lib/protocol";
-import { derivePromptKind, deriveState } from "../lib/protocol";
+import {
+  derivePromptKind,
+  deriveState,
+  parseSyntheticSessionId,
+} from "../lib/protocol";
 import {
   clearAttention as clearAttentionApi,
   closeSession as closeSessionApi,
@@ -22,15 +26,6 @@ import {
 } from "../lib/transport";
 
 const POLL_MS = 3000;
-
-// Mirror of `parseSyntheticSessionId` from src/lib/pendingSessions.ts.
-// Duplicated rather than imported so the web bundle stays decoupled from
-// the server package.
-function parsePendingPid(id: string): number | null {
-  if (!id.startsWith("pending-")) return null;
-  const pid = Number(id.slice("pending-".length));
-  return Number.isFinite(pid) && pid > 0 ? pid : null;
-}
 
 export interface SessionView extends RawSession {
   state: SessionState;
@@ -232,7 +227,7 @@ export function useSessions(): SessionsApi {
   // session until the user manually reopens it from the rail.
   useEffect(() => {
     if (!current) return;
-    const pendingPid = parsePendingPid(current);
+    const pendingPid = parseSyntheticSessionId(current);
     if (pendingPid === null) return;
     const real = rawSessions.find(
       (s) => s.pid === pendingPid && !s.sessionId.startsWith("pending-"),

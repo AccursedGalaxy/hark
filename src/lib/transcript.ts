@@ -1,95 +1,12 @@
 import fs from "node:fs/promises";
+import type {
+  ContentBlock,
+  ToolResultEvent,
+  ToolResultMeta,
+  TranscriptEvent,
+} from "../shared/protocol.js";
 
-export type ContentBlock =
-  | { type: "text"; text: string }
-  | { type: "thinking"; text: string }
-  | { type: "tool_use"; id: string; name: string; input: unknown };
-
-// Typed view of the raw `toolUseResult` field Claude Code writes alongside
-// each tool_result entry. Only tools whose structure pays off in rendering get
-// a dedicated shape; everything else falls through as `raw` so nothing is
-// silently dropped. Add new kinds as they become useful — the consumer is
-// expected to handle `raw` as a graceful default.
-export type ToolResultMeta =
-  | {
-      kind: "read";
-      filePath: string;
-      numLines: number;
-      totalLines: number;
-      startLine: number;
-    }
-  | {
-      kind: "bash";
-      stderr: string;
-      interrupted: boolean;
-      backgroundTaskId?: string;
-      returnCodeInterpretation?: string;
-    }
-  | {
-      kind: "edit";
-      filePath: string;
-      replaceAll: boolean;
-      userModified: boolean;
-      structuredPatch?: unknown;
-    }
-  | {
-      kind: "write";
-      filePath: string;
-      // "create" for new files, "update" for overwrites. Other values pass
-      // through as-is; this is what Claude Code actually emits.
-      type: string;
-      userModified: boolean;
-      structuredPatch?: unknown;
-    }
-  | {
-      kind: "glob";
-      numFiles: number;
-      truncated: boolean;
-      durationMs: number;
-      // First N filenames — Claude Code already truncates server-side when
-      // there are too many. Treat as a preview list, not authoritative.
-      filenames: string[];
-    }
-  | {
-      kind: "webfetch";
-      url: string;
-      code: number;
-      codeText: string;
-      bytes: number;
-      durationMs: number;
-    }
-  | {
-      kind: "websearch";
-      query: string;
-      searchCount: number;
-      durationSeconds: number;
-      resultCount: number;
-    }
-  // Fallback for tools we haven't typed (MCP tools, Agent, Task*, Skill, etc.)
-  // and for the string error shapes most tools degrade to on failure.
-  | { kind: "raw"; data: unknown };
-
-export type TranscriptEvent =
-  | { kind: "user"; uuid: string; ts: string; text: string }
-  | { kind: "assistant"; uuid: string; ts: string; blocks: ContentBlock[] }
-  | {
-      kind: "tool_result";
-      uuid: string;
-      ts: string;
-      toolUseId: string;
-      // Resolved by walking the stream and matching `toolUseId` against a
-      // prior assistant `tool_use` block. Undefined when the matching
-      // tool_use isn't in scope (e.g. an SSE consumer that started watching
-      // after the use was written) — renderers should degrade gracefully.
-      toolName?: string;
-      output: string;
-      isError: boolean;
-      // Typed view of the raw `toolUseResult` field. Undefined when the
-      // raw entry didn't have one (older Claude Code, errors that don't
-      // produce structured output). See `extractToolMeta` for the mapping.
-      meta?: ToolResultMeta;
-    }
-  | { kind: "system"; uuid: string; ts: string; text: string };
+export type { ContentBlock, ToolResultEvent, ToolResultMeta, TranscriptEvent };
 
 type RawEntry = {
   type?: string;
@@ -414,10 +331,7 @@ export class ToolNameIndex {
    * event's existing `meta`; otherwise we re-extract from the existing
    * `meta.data` when it's a `raw` carry-over.
    */
-  enrich(ev: Extract<TranscriptEvent, { kind: "tool_result" }>): Extract<
-    TranscriptEvent,
-    { kind: "tool_result" }
-  > {
+  enrich(ev: ToolResultEvent): ToolResultEvent {
     const toolName = this.resolve(ev.toolUseId);
     if (!toolName) return ev;
     // If meta is still `raw` (parsed without name context), re-extract now
@@ -522,26 +436,7 @@ export function parseTranscript(blob: string): TranscriptEvent[] {
   return out;
 }
 
-/**
- * Build a lookup `tool_use_id → tool_result` over a stream of events. Used by
- * the renderer to fuse each tool_use block with its result inline, rather
- * than rendering them as two unrelated rows. Tool_results that have no
- * matching tool_use (e.g. the assistant entry was pruned, or the stream
- * starts mid-conversation) are not included — the renderer can still walk
- * `events` directly to surface orphans.
- */
-export function indexToolResults(
-  events: TranscriptEvent[],
-): Map<string, Extract<TranscriptEvent, { kind: "tool_result" }>> {
-  const out = new Map<
-    string,
-    Extract<TranscriptEvent, { kind: "tool_result" }>
-  >();
-  for (const ev of events) {
-    if (ev.kind === "tool_result") out.set(ev.toolUseId, ev);
-  }
-  return out;
-}
+export { indexToolResults } from "../shared/protocol.js";
 
 export async function readTranscriptFile(
   filePath: string,

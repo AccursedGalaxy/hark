@@ -1,15 +1,19 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type {
+  SlashCommand,
+  SlashCommandKind,
+  SlashCommandSource,
+} from "../shared/protocol.js";
 
-export type CommandSource = "project" | "user" | `plugin:${string}`;
-
-export interface SlashCommand {
-  name: string;
-  source: CommandSource;
-  description: string;
-  argumentHint: string;
-}
+// Local aliases keep the existing in-file vocabulary (CommandSource,
+// CommandKind) while the canonical types live in src/shared/protocol.ts —
+// the same file web imports from. Re-exported for callers that import these
+// names from `./slashCommands.js`.
+export type CommandSource = SlashCommandSource;
+export type CommandKind = SlashCommandKind;
+export type { SlashCommand };
 
 export interface CommandFileFrontmatter {
   description: string;
@@ -60,14 +64,17 @@ function sourcePriority(s: CommandSource): number {
 }
 
 export function mergeCommandLists(all: SlashCommand[]): SlashCommand[] {
-  const byName = new Map<string, SlashCommand>();
+  // Key by name+kind: a command and a skill that share a name are distinct
+  // surfaces in the TUI, so the popover should expose both.
+  const byKey = new Map<string, SlashCommand>();
   for (const cmd of all) {
-    const existing = byName.get(cmd.name);
+    const key = `${cmd.kind}:${cmd.name}`;
+    const existing = byKey.get(key);
     if (!existing || sourcePriority(cmd.source) < sourcePriority(existing.source)) {
-      byName.set(cmd.name, cmd);
+      byKey.set(key, cmd);
     }
   }
-  return [...byName.values()].sort((a, b) => {
+  return [...byKey.values()].sort((a, b) => {
     const pa = sourcePriority(a.source);
     const pb = sourcePriority(b.source);
     if (pa !== pb) return pa - pb;
@@ -77,12 +84,17 @@ export function mergeCommandLists(all: SlashCommand[]): SlashCommand[] {
 
 export interface DiscoverOptions {
   userCommandsDir?: string;
+  userSkillsDir?: string;
   projectCwd?: string;
   pluginsRoot?: string;
 }
 
 function defaultUserCommandsDir(): string {
   return path.join(os.homedir(), ".claude", "commands");
+}
+
+function defaultUserSkillsDir(): string {
+  return path.join(os.homedir(), ".claude", "skills");
 }
 
 function defaultPluginsRoot(): string {
@@ -92,21 +104,34 @@ function defaultPluginsRoot(): string {
 export async function discoverCommands(
   opts: DiscoverOptions = {},
 ): Promise<SlashCommand[]> {
-  const userDir = opts.userCommandsDir ?? defaultUserCommandsDir();
+  const userCommandsDir = opts.userCommandsDir ?? defaultUserCommandsDir();
+  const userSkillsDir = opts.userSkillsDir ?? defaultUserSkillsDir();
   const pluginsRoot = opts.pluginsRoot ?? defaultPluginsRoot();
-  const projectDir = opts.projectCwd
+  const projectCommandsDir = opts.projectCwd
     ? path.join(opts.projectCwd, ".claude", "commands")
+    : null;
+  const projectSkillsDir = opts.projectCwd
+    ? path.join(opts.projectCwd, ".claude", "skills")
     : null;
 
   const all: SlashCommand[] = [];
-  const collect = async (dir: string, source: CommandSource) => {
+  const collectCmds = async (dir: string, source: CommandSource) => {
     for (const cmd of await readCommandsDir(dir, source)) all.push(cmd);
+  };
+  const collectSkills = async (
+    dir: string,
+    source: CommandSource,
+    namePrefix = "",
+  ) => {
+    for (const cmd of await readSkillsDir(dir, source, namePrefix)) all.push(cmd);
   };
 
   await Promise.all([
-    collect(userDir, "user"),
-    projectDir ? collect(projectDir, "project") : Promise.resolve(),
-    collectPluginCommands(pluginsRoot, all),
+    collectCmds(userCommandsDir, "user"),
+    collectSkills(userSkillsDir, "user"),
+    projectCommandsDir ? collectCmds(projectCommandsDir, "project") : Promise.resolve(),
+    projectSkillsDir ? collectSkills(projectSkillsDir, "project") : Promise.resolve(),
+    collectPluginContent(pluginsRoot, all),
   ]);
 
   return mergeCommandLists(all);
@@ -132,6 +157,7 @@ async function readCommandsDir(
       out.push({
         name: entry.slice(0, -3),
         source,
+        kind: "command",
         description: fm.description,
         argumentHint: fm.argumentHint,
       });
@@ -142,10 +168,46 @@ async function readCommandsDir(
   return out;
 }
 
+// Skills live one level deeper: <skillsDir>/<name>/SKILL.md. The SKILL.md
+// frontmatter shape is the same flat key:value YAML; we only care about
+// description (name comes from the directory). `namePrefix` lets plugin
+// skills carry the "<plugin>:" prefix Claude's TUI uses for invocation.
+async function readSkillsDir(
+  dir: string,
+  source: CommandSource,
+  namePrefix: string,
+): Promise<SlashCommand[]> {
+  let entries: { name: string; isDirectory: () => boolean }[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: SlashCommand[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const skillFile = path.join(dir, entry.name, "SKILL.md");
+    try {
+      const text = await fs.readFile(skillFile, "utf8");
+      const fm = parseCommandFile(text);
+      out.push({
+        name: `${namePrefix}${entry.name}`,
+        source,
+        kind: "skill",
+        description: fm.description,
+        argumentHint: fm.argumentHint,
+      });
+    } catch {
+      // No SKILL.md — directory isn't a skill, skip silently.
+    }
+  }
+  return out;
+}
+
 // Walk only plugins listed in installed_plugins.json — the catalog under
 // marketplaces/ holds every available plugin, including ones the user hasn't
 // installed and which the TUI therefore wouldn't expose as a slash command.
-async function collectPluginCommands(
+async function collectPluginContent(
   pluginsRoot: string,
   out: SlashCommand[],
 ): Promise<void> {
@@ -164,14 +226,21 @@ async function collectPluginCommands(
     // Key shape is "<plugin-name>@<marketplace>"; strip the marketplace.
     const pluginName = key.split("@")[0] ?? key;
     if (!Array.isArray(entries)) continue;
+    const source: CommandSource = `plugin:${pluginName}`;
     for (const entry of entries) {
       const installPath = (entry as { installPath?: unknown })?.installPath;
       if (typeof installPath !== "string") continue;
       const cmds = await readCommandsDir(
         path.join(installPath, "commands"),
-        `plugin:${pluginName}` as CommandSource,
+        source,
       );
       for (const cmd of cmds) out.push(cmd);
+      const skills = await readSkillsDir(
+        path.join(installPath, "skills"),
+        source,
+        `${pluginName}:`,
+      );
+      for (const skill of skills) out.push(skill);
     }
   }
 }

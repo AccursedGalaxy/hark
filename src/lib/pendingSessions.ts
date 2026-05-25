@@ -1,6 +1,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  parseSyntheticSessionId,
+  syntheticSessionId,
+} from "../shared/protocol.js";
 import { resolveTmuxPaneForPid, type TmuxPane } from "./pane.js";
 
 // A "pending" session is a `claude` process that's alive in a tmux pane but
@@ -10,7 +14,9 @@ import { resolveTmuxPaneForPid, type TmuxPane } from "./pane.js";
 // the user spawns a session from the web, sees nothing new in the rail, and
 // concludes the spawn failed when really it's just waiting for `1\r`.
 
-const SYNTHETIC_ID_PREFIX = "pending-";
+// Re-export so existing callers (server.ts) keep their import shape; the
+// canonical home for both helpers is src/shared/protocol.ts (used by web too).
+export { parseSyntheticSessionId, syntheticSessionId };
 
 export interface PendingSession {
   // Synthetic identifier so the web layer can treat this like any other row.
@@ -23,16 +29,6 @@ export interface PendingSession {
   // have no way to drive it, so we don't surface it.
   paneId: string;
   socket: string;
-}
-
-export function syntheticSessionId(pid: number): string {
-  return `${SYNTHETIC_ID_PREFIX}${pid}`;
-}
-
-export function parseSyntheticSessionId(id: string): number | null {
-  if (!id.startsWith(SYNTHETIC_ID_PREFIX)) return null;
-  const pid = Number(id.slice(SYNTHETIC_ID_PREFIX.length));
-  return Number.isFinite(pid) && pid > 0 ? pid : null;
 }
 
 // ---- runtime ----

@@ -1,3 +1,11 @@
+import type {
+  AttentionInfo,
+  HookBroadcast,
+  PendingPermission,
+} from "../shared/protocol.js";
+
+export type { HookBroadcast, PendingPermission };
+
 export type HookEventInput = {
   session_id: string;
   hook_event_name: string;
@@ -13,12 +21,6 @@ export type HookEventInput = {
   cwd?: string;
 };
 
-export type PendingPermission = {
-  toolName: string;
-  toolInput: unknown;
-  requestedAt: number;
-};
-
 // Server-only metadata tied to a session's pending permission. Kept off the
 // wire because the absolute transcript path is filesystem detail the web
 // client never needs — its only consumer is the periodic resolver that
@@ -27,18 +29,10 @@ export type PendingMeta = {
   transcriptPath?: string;
 };
 
-export type SessionAttention = {
-  needsAttention: boolean;
-  lastEvent: string;
-  lastEventAt: number;
-  message?: string;
-  notificationType?: string;
-  pendingPermission?: PendingPermission;
-};
-
-export type HookBroadcast = {
-  sessionId: string;
-} & SessionAttention;
+// Server-internal alias for the on-the-wire AttentionInfo shape. Same fields
+// either way; the alias keeps existing call sites in hookState.ts readable
+// without inventing a second type.
+export type SessionAttention = AttentionInfo;
 
 // Notification types that report status rather than asking the user
 // anything. Still recorded so the UI can flash "auth succeeded", but they

@@ -53,6 +53,12 @@ export function SlashCommandMenu({
               {cmd.argumentHint && (
                 <span className="slash-menu-hint">{cmd.argumentHint}</span>
               )}
+              <span
+                className={`slash-menu-kind slash-menu-kind-${cmd.kind}`}
+                title={cmd.kind}
+              >
+                {cmd.kind}
+              </span>
               <span className="slash-menu-source">{cmd.source}</span>
             </div>
             {cmd.description && (

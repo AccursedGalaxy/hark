@@ -9,6 +9,12 @@ import {
   type SlashCommand,
 } from "./slashCommands.js";
 
+type Mk = (
+  name: string,
+  source: SlashCommand["source"],
+  kind?: SlashCommand["kind"],
+) => SlashCommand;
+
 describe("parseCommandFile", () => {
   it("extracts description and argument-hint from YAML frontmatter", () => {
     const src = [
@@ -57,9 +63,10 @@ describe("parseCommandFile", () => {
 });
 
 describe("mergeCommandLists", () => {
-  const cmd = (name: string, source: SlashCommand["source"]): SlashCommand => ({
+  const cmd: Mk = (name, source, kind = "command") => ({
     name,
     source,
+    kind,
     description: source,
     argumentHint: "",
   });
@@ -77,7 +84,7 @@ describe("mergeCommandLists", () => {
     ]);
   });
 
-  it("deduplicates by name, keeping the highest-priority source", () => {
+  it("deduplicates by name+kind, keeping the highest-priority source", () => {
     const merged = mergeCommandLists([
       cmd("ship", "user"),
       cmd("ship", "project"),
@@ -85,6 +92,15 @@ describe("mergeCommandLists", () => {
     ]);
     expect(merged).toHaveLength(1);
     expect(merged[0]?.source).toBe("project");
+  });
+
+  it("keeps a command and a skill with the same name as separate entries", () => {
+    const merged = mergeCommandLists([
+      cmd("review", "user", "command"),
+      cmd("review", "user", "skill"),
+    ]);
+    expect(merged).toHaveLength(2);
+    expect(merged.map((m) => m.kind).sort()).toEqual(["command", "skill"]);
   });
 
   it("sorts alphabetically within a priority tier", () => {
@@ -135,9 +151,24 @@ describe("discoverCommands", () => {
     await fs.writeFile(path.join(dir, `${name}.md`), frontmatter, "utf8");
   }
 
-  it("returns an empty list when no command dirs exist", async () => {
+  async function writeSkill(
+    skillsDir: string,
+    name: string,
+    description: string,
+  ) {
+    const dir = path.join(skillsDir, name);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, "SKILL.md"),
+      ["---", `name: ${name}`, `description: ${description}`, "---", "", "body"].join("\n"),
+      "utf8",
+    );
+  }
+
+  it("returns an empty list when no command or skill dirs exist", async () => {
     const out = await discoverCommands({
       userCommandsDir: path.join(tmp, "missing"),
+      userSkillsDir: path.join(tmp, "missing-skills"),
       projectCwd: path.join(tmp, "no-project"),
       pluginsRoot: path.join(tmp, "no-plugins"),
     });
@@ -148,6 +179,7 @@ describe("discoverCommands", () => {
     await writeCmd(userDir, "ship", "Ship a release", "[level]");
     const out = await discoverCommands({
       userCommandsDir: userDir,
+      userSkillsDir: path.join(tmp, "missing-skills"),
       projectCwd: path.join(tmp, "no-project"),
       pluginsRoot,
     });
@@ -155,8 +187,78 @@ describe("discoverCommands", () => {
       {
         name: "ship",
         source: "user",
+        kind: "command",
         description: "Ship a release",
         argumentHint: "[level]",
+      },
+    ]);
+  });
+
+  it("discovers user-level skills", async () => {
+    const skillsDir = path.join(tmp, "user", "skills");
+    await writeSkill(skillsDir, "morning", "Morning vault review");
+    const out = await discoverCommands({
+      userCommandsDir: path.join(tmp, "missing"),
+      userSkillsDir: skillsDir,
+      projectCwd: path.join(tmp, "no-project"),
+      pluginsRoot,
+    });
+    expect(out).toEqual([
+      {
+        name: "morning",
+        source: "user",
+        kind: "skill",
+        description: "Morning vault review",
+        argumentHint: "",
+      },
+    ]);
+  });
+
+  it("discovers project-level skills under <cwd>/.claude/skills", async () => {
+    const projectSkillsDir = path.join(tmp, "project", ".claude", "skills");
+    await writeSkill(projectSkillsDir, "verify", "Project verify routine");
+    const out = await discoverCommands({
+      userCommandsDir: path.join(tmp, "missing"),
+      userSkillsDir: path.join(tmp, "missing-skills"),
+      projectCwd: path.join(tmp, "project"),
+      pluginsRoot,
+    });
+    expect(out).toEqual([
+      {
+        name: "verify",
+        source: "project",
+        kind: "skill",
+        description: "Project verify routine",
+        argumentHint: "",
+      },
+    ]);
+  });
+
+  it("prefixes plugin skills with the plugin name (plugin:skill form)", async () => {
+    const installPath = path.join(pluginsRoot, "cache", "mp", "obsidian", "1.0");
+    const pluginSkillsDir = path.join(installPath, "skills");
+    await writeSkill(pluginSkillsDir, "defuddle", "Extract clean markdown");
+    await fs.mkdir(pluginsRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(pluginsRoot, "installed_plugins.json"),
+      JSON.stringify({
+        version: 2,
+        plugins: { "obsidian@mp": [{ installPath }] },
+      }),
+    );
+    const out = await discoverCommands({
+      userCommandsDir: path.join(tmp, "missing"),
+      userSkillsDir: path.join(tmp, "missing-skills"),
+      projectCwd: path.join(tmp, "no-project"),
+      pluginsRoot,
+    });
+    expect(out).toEqual([
+      {
+        name: "obsidian:defuddle",
+        source: "plugin:obsidian",
+        kind: "skill",
+        description: "Extract clean markdown",
+        argumentHint: "",
       },
     ]);
   });
@@ -165,6 +267,7 @@ describe("discoverCommands", () => {
     await writeCmd(projectDir, "deploy", "Deploy this app");
     const out = await discoverCommands({
       userCommandsDir: path.join(tmp, "missing"),
+      userSkillsDir: path.join(tmp, "missing-skills"),
       projectCwd: path.join(tmp, "project"),
       pluginsRoot,
     });
@@ -172,6 +275,7 @@ describe("discoverCommands", () => {
       {
         name: "deploy",
         source: "project",
+        kind: "command",
         description: "Deploy this app",
         argumentHint: "",
       },
@@ -202,6 +306,7 @@ describe("discoverCommands", () => {
 
     const out = await discoverCommands({
       userCommandsDir: path.join(tmp, "missing"),
+      userSkillsDir: path.join(tmp, "missing-skills"),
       projectCwd: path.join(tmp, "no-project"),
       pluginsRoot,
     });
@@ -209,6 +314,7 @@ describe("discoverCommands", () => {
       {
         name: "review",
         source: "plugin:code-review",
+        kind: "command",
         description: "Review this PR",
         argumentHint: "",
       },
@@ -228,6 +334,7 @@ describe("discoverCommands", () => {
     );
     const out = await discoverCommands({
       userCommandsDir: path.join(tmp, "missing"),
+      userSkillsDir: path.join(tmp, "missing-skills"),
       projectCwd: path.join(tmp, "no-project"),
       pluginsRoot,
     });
@@ -269,6 +376,7 @@ describe("discoverCommands", () => {
     await fs.writeFile(path.join(userDir, "README.txt"), "not a command");
     const out = await discoverCommands({
       userCommandsDir: userDir,
+      userSkillsDir: path.join(tmp, "missing-skills"),
       projectCwd: path.join(tmp, "no-project"),
       pluginsRoot,
     });
