@@ -4,6 +4,7 @@ import {
   describeToolHeader,
   errorHint,
   formatAskAnswerText,
+  formatAskKeySequence,
   formatElicitationText,
   hostOf,
   isAskAnswerComplete,
@@ -120,6 +121,63 @@ describe("formatAskAnswerText", () => {
       ["", ""],
     );
     expect(out).toBe("What's the verdict?: Yes\nFormat: Summary");
+  });
+});
+
+// ---- AskUserQuestion native TUI key sequence -----------------------------
+
+describe("formatAskKeySequence", () => {
+  it("single-select first option: reset to top + Enter (no Downs needed)", () => {
+    const keys = formatAskKeySequence([formatQ], [["Summary"]], [""]);
+    // formatQ has 2 options → total rows = 2 + Other = 3 → three Up's reset.
+    expect(keys).toEqual(["Up", "Up", "Up", "Enter"]);
+  });
+
+  it("single-select second option: reset + 1 Down + Enter", () => {
+    const keys = formatAskKeySequence([formatQ], [["Detailed"]], [""]);
+    expect(keys).toEqual(["Up", "Up", "Up", "Down", "Enter"]);
+  });
+
+  it("multi-select picks each option with Space then confirms with Enter", () => {
+    // sectionsQ has 3 options. Picking Introduction (0) and Conclusion (2)
+    // → reset+Space, reset+Down+Down+Space, Enter.
+    const keys = formatAskKeySequence(
+      [sectionsQ],
+      [["Introduction", "Conclusion"]],
+      [""],
+    );
+    // total = 3 + Other = 4 Ups per reset.
+    expect(keys).toEqual([
+      "Up", "Up", "Up", "Up", "Space",
+      "Up", "Up", "Up", "Up", "Down", "Down", "Space",
+      "Enter",
+    ]);
+  });
+
+  it("multi-question forms chain sequences in declaration order", () => {
+    const keys = formatAskKeySequence(
+      [formatQ, sectionsQ],
+      [["Detailed"], ["Body"]],
+      ["", ""],
+    );
+    expect(keys).toEqual([
+      // Q1 (single): reset + 1 Down + Enter.
+      "Up", "Up", "Up", "Down", "Enter",
+      // Q2 (multi): reset + 1 Down + Space + Enter.
+      "Up", "Up", "Up", "Up", "Down", "Space", "Enter",
+    ]);
+  });
+
+  it("returns null when any question selects 'Other' (free text path)", () => {
+    expect(
+      formatAskKeySequence([formatQ], [[OTHER_SENTINEL]], ["custom"]),
+    ).toBeNull();
+  });
+
+  it("returns null when a label doesn't match any declared option", () => {
+    expect(
+      formatAskKeySequence([formatQ], [["Bogus"]], [""]),
+    ).toBeNull();
   });
 });
 

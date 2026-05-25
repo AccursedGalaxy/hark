@@ -74,7 +74,14 @@ type SessionFile = {
   updatedAt: number;
   version: string;
   kind: "interactive" | "bg" | string;
-  status?: "busy" | "idle" | string;
+  // Newer Claude Code emits "waiting" when the TUI is blocked on a prompt
+  // (permission, AskUserQuestion, ExitPlanMode, trust dialog). Older versions
+  // only set "busy" / "idle". Keep the union open with `string` so unknown
+  // values flow through rather than getting silently dropped.
+  status?: "busy" | "idle" | "waiting" | string;
+  // Free-text hint that accompanies status="waiting" (e.g. "permission
+  // prompt", "ask user question"). Surfaced for header chips.
+  waitingFor?: string;
   name?: string;
 };
 
@@ -212,6 +219,11 @@ app.get("/api/sessions", async (_req, res) => {
         lastEventMessage: att?.message,
         notificationType: att?.notificationType,
         pendingPermission: att?.pendingPermission,
+        // `pending` (discriminated union) is broadcast over SSE for live
+        // updates; include the current value here too so a fresh GET picks
+        // up an in-flight prompt without waiting for the next hook.
+        pending: att?.pending,
+        waitingFor: s.waitingFor,
       };
     }),
   );
@@ -340,6 +352,21 @@ app.get("/api/sessions/:id/stream", async (req, res) => {
 
   let handle;
   if (filePath) {
+    // Replay the historical transcript through PromptState before opening
+    // the watcher. `openTranscriptStream` only fires onEvents for content
+    // written after `offset`, so without this pass an AskUserQuestion /
+    // ExitPlanMode tool_use already on disk would never get promoted into
+    // pending state and the web form would stay invisible.
+    try {
+      const { events: historical } = await readTranscriptFile(filePath);
+      const broadcast = promptState.noteTranscriptEvents(
+        sessionId,
+        historical,
+      );
+      if (broadcast) broadcastHook(broadcast);
+    } catch {
+      /* transient read failure — stream will catch up live anyway */
+    }
     handle = await openTranscriptStream(filePath, writer, streamOpts);
   } else if (isPending) {
     handle = openEmptyStream(writer);
@@ -446,7 +473,9 @@ app.post("/api/sessions/:id/upload", async (req, res) => {
 });
 
 app.post("/api/sessions/:id/attention/clear", (req, res) => {
-  const next = promptState.clear(req.params.id);
+  // Soft dismiss: drop the red-dot signal but keep any pending prompt so the
+  // form stays on screen. Viewing != answering.
+  const next = promptState.dismissAttention(req.params.id);
   if (next) broadcastHook({ sessionId: req.params.id, ...next });
   res.json({ ok: true });
 });

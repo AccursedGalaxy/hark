@@ -1,5 +1,50 @@
 import { describe, expect, it } from "vitest";
-import { derivePromptKind } from "./protocol.js";
+import { derivePromptKind, deriveState, type RawSession } from "./protocol.js";
+
+function baseSession(overrides: Partial<RawSession> = {}): RawSession {
+  return {
+    pid: 1,
+    sessionId: "s1",
+    cwd: "/tmp",
+    startedAt: 0,
+    updatedAt: 0,
+    version: "0.0.0",
+    kind: "interactive",
+    hasTmuxPane: true,
+    ...overrides,
+  };
+}
+
+describe("deriveState", () => {
+  it("needsAttention always wins", () => {
+    expect(
+      deriveState(baseSession({ status: "busy", needsAttention: true })),
+    ).toBe("wait");
+  });
+
+  it("status='busy' → 'busy'", () => {
+    expect(deriveState(baseSession({ status: "busy" }))).toBe("busy");
+  });
+
+  it("status='idle' → 'idle'", () => {
+    expect(deriveState(baseSession({ status: "idle" }))).toBe("idle");
+  });
+
+  it("status='waiting' → 'wait' (Claude Code is blocked on a TUI prompt)", () => {
+    expect(deriveState(baseSession({ status: "waiting" }))).toBe("wait");
+  });
+
+  it("unknown status string → 'idle' (not 'dead')", () => {
+    // Forward-compat: a future Claude Code value must not flash OFFLINE.
+    expect(deriveState(baseSession({ status: "some_new_status" }))).toBe(
+      "idle",
+    );
+  });
+
+  it("missing status → 'dead' (legacy synthesized rows only)", () => {
+    expect(deriveState(baseSession({ status: undefined }))).toBe("dead");
+  });
+});
 
 describe("derivePromptKind", () => {
   it("returns null when nothing has happened yet", () => {

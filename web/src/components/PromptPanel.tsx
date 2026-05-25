@@ -11,6 +11,7 @@ import {
   describeToolHeader,
   errorHint,
   formatAskAnswerText,
+  formatAskKeySequence,
   formatElicitationText,
   isAskAnswerComplete,
   isElicitationComplete,
@@ -255,14 +256,31 @@ function AskUserQuestionForm({
     });
   };
 
-  // Format the answers for Claude. We send Escape first to dismiss the
-  // TUI widget, then a clean text message. Each question gets a leading
-  // header so Claude can map answer → question unambiguously. Multi-select
-  // joins with ", "; "Other" expands to the user's free text.
+  // Two delivery paths:
+  //   1. **Native key sequence** (preferred) — drive the TUI widget directly
+  //      with Up/Down/Space/Enter. The TUI accepts the answer as a proper
+  //      AskUserQuestion response, which is what Claude expects. Works for
+  //      single- and multi-select with literal labels.
+  //   2. **Escape + text fallback** — used only when key delivery isn't
+  //      viable (an "Other" pick whose free text must enter the widget's
+  //      text-input mode). Claude sees this as "user declined and typed a
+  //      new message", which is lossy but better than nothing.
   const submit = async () => {
     if (!complete || submitting || busy) return;
     setSubmitting(true);
     try {
+      const keys = formatAskKeySequence(
+        questions,
+        state.selections,
+        state.others,
+      );
+      if (keys) {
+        // Drive the widget one key at a time. Each call awaits, so the TUI
+        // sees a single ordered stream — no interleaving with other input.
+        for (const k of keys) await onSend({ key: k });
+        return;
+      }
+      // Fallback path — see comment above.
       await onSend({ key: "Escape" });
       const text = formatAskAnswerText(
         questions,

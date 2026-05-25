@@ -10,7 +10,13 @@
 
 // ---- Sessions ----
 
-export type SessionStatus = "busy" | "idle" | string;
+// Known values Claude Code writes into `~/.claude/sessions/<pid>.json`:
+//   - "busy"    — model is generating
+//   - "idle"    — turn over, awaiting user input
+//   - "waiting" — blocked on an in-TUI prompt (permission, AskUserQuestion,
+//                 ExitPlanMode, trust dialog). Newer than the busy/idle pair
+//                 and accompanied by a `waitingFor` string hint.
+export type SessionStatus = "busy" | "idle" | "waiting" | string;
 // "pending" = a `claude` process running in a tmux pane but not yet
 // registered with Claude Code (usually blocked on the trust dialog).
 // Synthesized by the server so the user can drive it from the rail.
@@ -164,6 +170,11 @@ export interface RawSession {
   lastError?: SessionError;
   // Live subagents on this session (populated by Subagent{Start,Stop} hooks).
   subagents?: SubagentInfo[];
+  // Free-text hint Claude Code writes alongside `status: "waiting"` (e.g.
+  // "permission prompt", "ask user question", "trust prompt"). Carried so the
+  // header can show *what* the session is blocked on even before the matching
+  // hook arrives.
+  waitingFor?: string;
 }
 
 // Derived UI state. The backend's raw `status` plus the hook attention layer
@@ -171,9 +182,16 @@ export interface RawSession {
 export type SessionState = "wait" | "busy" | "idle" | "dead";
 
 export function deriveState(s: RawSession): SessionState {
+  // The server only lists sessions whose PID is alive, so any session that
+  // reaches this derivation is by definition not dead. We still keep "dead"
+  // in the union for synthesized/legacy cases, but the live-status branches
+  // below must cover every known and unknown status value Claude Code writes,
+  // including the newer "waiting" (introduced around 2.1.x) — otherwise the
+  // header flashes OFFLINE while Claude is actively blocked on the user.
   if (s.needsAttention) return "wait";
   if (s.status === "busy") return "busy";
-  if (s.status === "idle") return "idle";
+  if (s.status === "waiting") return "wait";
+  if (typeof s.status === "string") return "idle";
   return "dead";
 }
 
@@ -355,13 +373,19 @@ export function derivePromptKind(
     | undefined,
 ): PromptKind {
   if (!att) return null;
-  if (!att.needsAttention) return null;
-  // The discriminated `pending` field is authoritative when present.
+  // The discriminated `pending` field is authoritative when present. We
+  // intentionally do NOT gate on `needsAttention` here: viewing a session
+  // soft-clears the red dot but keeps the form/prompt alive, and the
+  // composer needs `promptKind` to keep showing the right action surface.
   if (att.pending) {
     return att.pending.kind === "elicitation" ? "elicitation" : "permission";
   }
   // Legacy: PermissionRequest may have set only the back-compat field.
   if (att.pendingPermission) return "permission";
+  // Notification-only signals (no structured pending) still depend on the
+  // red dot — without it we have no way to distinguish a stale notification
+  // from a live one.
+  if (!att.needsAttention) return null;
   if (att.lastEvent !== "Notification") return null;
   switch (att.notificationType) {
     case "permission_prompt":

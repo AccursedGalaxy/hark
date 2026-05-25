@@ -23,6 +23,7 @@
 @import "./components/session.css";
 @import "./components/transcript.css";
 @import "./components/tool-call.css";
+@import "./components/tasklist.css";
 @import "./components/composer.css";
 @import "./components/slash-menu.css";
 @import "./components/perm-card.css";

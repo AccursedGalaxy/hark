@@ -3,6 +3,7 @@ import { Composer } from "./components/Composer";
 import { SessionHeader } from "./components/SessionHeader";
 import { SessionRail } from "./components/SessionRail";
 import { SessionSwitcher } from "./components/SessionSwitcher";
+import { TaskListPanel } from "./components/TaskListPanel";
 import { Transcript } from "./components/Transcript";
 import { TrustPrompt } from "./components/TrustPrompt";
 import { useMediaQuery } from "./hooks/useMediaQuery";
@@ -141,6 +142,10 @@ export default function App() {
                 />
               ) : (
                 <>
+                  <TaskListPanel
+                    events={events}
+                    sessionId={currentSession.sessionId}
+                  />
                   <Transcript
                     events={events}
                     loading={transcriptLoading}

@@ -280,12 +280,67 @@ export function summarizeToolUse({
         detail: typeof obj.args === "string" ? obj.args : undefined,
       };
     }
-    case "TaskCreate":
-    case "TaskUpdate":
+    case "TaskCreate": {
+      // Surface the actual task subject + description so the row carries
+      // meaning on its own. The aggregate TaskListPanel above the
+      // transcript shows the evolving list; these per-call capsules read
+      // as "what changed in this turn".
+      const subject = typeof obj.subject === "string" ? obj.subject : "";
+      const desc =
+        typeof obj.description === "string" ? obj.description : undefined;
+      const badges: ToolBadge[] = [{ text: "new task", tone: "info" }];
+      // Once the result lands we have the canonical id — show it so the
+      // capsule and the panel can be cross-referenced.
+      const id = readTaskIdFromMeta(meta);
+      if (id) badges.unshift({ text: `#${id}` });
+      return {
+        tone: "task",
+        label: subject ? `+ ${truncate(subject)}` : "New task",
+        detail: desc,
+        badges,
+      };
+    }
+    case "TaskUpdate": {
+      const taskId = typeof obj.taskId === "string" ? obj.taskId : "";
+      const change = readStatusChange(meta);
+      const updatedSubject =
+        typeof obj.subject === "string" ? obj.subject : undefined;
+      const label = updatedSubject
+        ? `#${taskId} → ${truncate(updatedSubject)}`
+        : taskId
+          ? `Task #${taskId}`
+          : "Task update";
+      const badges: ToolBadge[] = [];
+      if (change) {
+        const tone: BadgeTone =
+          change.to === "completed"
+            ? "good"
+            : change.to === "in_progress"
+              ? "info"
+              : change.to === "deleted"
+                ? "bad"
+                : "warn";
+        badges.push({ text: `${change.from} → ${change.to}`, tone });
+      } else if (typeof obj.status === "string") {
+        badges.push({ text: String(obj.status), tone: "info" });
+      }
+      return {
+        tone: "task",
+        label,
+        detail: updatedSubject
+          ? undefined
+          : typeof obj.description === "string"
+            ? obj.description
+            : undefined,
+        badges,
+      };
+    }
     case "TaskStop":
     case "TaskList":
     case "TaskGet":
     case "TaskOutput": {
+      // Background-task management (TaskStop/TaskOutput/etc.) — different
+      // system from the in-session todo list above. Keep the simple form.
       return {
         tone: "task",
         label: name.replace(/^Task/, "Task "),
@@ -324,6 +379,35 @@ export function summarizeToolUse({
   // Unreachable — every case returns. Kept for future linting safety.
   void hasResult;
   void isError;
+}
+
+// TaskCreate's tool_result is `{task:{id, subject}}`. When `meta` carries
+// the raw blob (we don't have a typed kind for Task* yet), pluck the id.
+function readTaskIdFromMeta(meta: ToolResultMeta | undefined): string | null {
+  if (!meta || meta.kind !== "raw") return null;
+  const data = meta.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const task = (data as Record<string, unknown>).task;
+  if (!task || typeof task !== "object") return null;
+  const id = (task as Record<string, unknown>).id;
+  if (typeof id === "string" && id.length > 0) return id;
+  if (typeof id === "number") return String(id);
+  return null;
+}
+
+// TaskUpdate emits `{success, taskId, updatedFields, statusChange:{from,to}}`.
+function readStatusChange(
+  meta: ToolResultMeta | undefined,
+): { from: string; to: string } | null {
+  if (!meta || meta.kind !== "raw") return null;
+  const data = meta.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const sc = (data as Record<string, unknown>).statusChange;
+  if (!sc || typeof sc !== "object") return null;
+  const from = (sc as Record<string, unknown>).from;
+  const to = (sc as Record<string, unknown>).to;
+  if (typeof from !== "string" || typeof to !== "string") return null;
+  return { from, to };
 }
 
 function formatBytes(n: number): string {

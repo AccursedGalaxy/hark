@@ -83,6 +83,41 @@ describe("PromptState", () => {
     expect(state.snapshot()).toEqual({});
   });
 
+  describe("dismissAttention", () => {
+    it("drops needsAttention but preserves the pending prompt", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "AskUserQuestion",
+        tool_input: {
+          questions: [{ question: "?", options: [{ label: "a" }] }],
+        },
+      });
+      const out = state.dismissAttention("s1");
+      expect(out).not.toBeNull();
+      expect(out!.needsAttention).toBe(false);
+      // The form data must survive — viewing != answering.
+      expect(out!.pending?.kind).toBe("ask_user_question");
+      // promptKind also survives because pending is intact.
+      expect(out!.promptKind).toBe("permission");
+    });
+
+    it("returns the existing snapshot unchanged when needsAttention is already false", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "Notification",
+        notification_type: "auth_success",
+      });
+      const before = state.snapshot().s1;
+      const out = state.dismissAttention("s1");
+      expect(out).toEqual(before);
+    });
+
+    it("returns null for an unknown session", () => {
+      expect(state.dismissAttention("nope")).toBeNull();
+    });
+  });
+
   it("informational notification types record without needs-attention and with null promptKind", () => {
     for (const type of ["auth_success", "elicitation_complete", "elicitation_response"]) {
       const fresh = new PromptState();
@@ -234,6 +269,210 @@ describe("PromptState", () => {
       ]);
       expect(broadcast).toBe(null);
       expect(state.snapshot().s1.pendingPermission).toBeDefined();
+    });
+
+    // ---- transcript-origin pending (AskUserQuestion / ExitPlanMode) -------
+    // Claude Code does not fire PermissionRequest hooks for these two tools
+    // (issue #33625); the only outside-the-TUI signal is the tool_use block
+    // landing in the JSONL.
+
+    it("promotes AskUserQuestion tool_use into pending(ask_user_question)", () => {
+      const questions = [
+        {
+          question: "Pick one",
+          header: "Choice",
+          options: [{ label: "A" }, { label: "B" }],
+          multiSelect: false,
+        },
+      ];
+      const broadcast = state.noteTranscriptEvents("s1", [
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: "2026-05-25T16:18:16.751Z",
+          blocks: [
+            {
+              type: "tool_use",
+              id: "use-ask-1",
+              name: "AskUserQuestion",
+              input: { questions },
+            },
+          ],
+        },
+      ]);
+      expect(broadcast).not.toBe(null);
+      expect(broadcast!.pending?.kind).toBe("ask_user_question");
+      if (broadcast!.pending?.kind !== "ask_user_question")
+        throw new Error("kind");
+      expect(broadcast!.pending.questions).toEqual(questions);
+      expect(broadcast!.pending.toolUseId).toBe("use-ask-1");
+      expect(broadcast!.needsAttention).toBe(true);
+      expect(broadcast!.promptKind).toBe("permission");
+    });
+
+    it("promotes ExitPlanMode tool_use into pending(exit_plan_mode)", () => {
+      const broadcast = state.noteTranscriptEvents("s1", [
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: "2026-05-25T16:18:16.751Z",
+          blocks: [
+            {
+              type: "tool_use",
+              id: "use-plan-1",
+              name: "ExitPlanMode",
+              input: { plan: "# Plan\n- step" },
+            },
+          ],
+        },
+      ]);
+      expect(broadcast).not.toBe(null);
+      expect(broadcast!.pending?.kind).toBe("exit_plan_mode");
+      if (broadcast!.pending?.kind !== "exit_plan_mode")
+        throw new Error("kind");
+      expect(broadcast!.pending.plan).toContain("step");
+      expect(broadcast!.pending.toolUseId).toBe("use-plan-1");
+    });
+
+    it("does not promote a second time when the same tool_use is replayed", () => {
+      const block = {
+        type: "tool_use" as const,
+        id: "use-ask-1",
+        name: "AskUserQuestion",
+        input: { questions: [] },
+      };
+      const ev: TranscriptEvent = {
+        kind: "assistant",
+        uuid: "a1",
+        ts: "2026-05-25T16:18:16.751Z",
+        blocks: [block],
+      };
+      const first = state.noteTranscriptEvents("s1", [ev]);
+      expect(first).not.toBe(null);
+      const requestedAt = state.snapshot().s1.pending!.requestedAt;
+      const second = state.noteTranscriptEvents("s1", [ev]);
+      // Idempotent — same toolUseId, no churn.
+      expect(second).toBe(null);
+      expect(state.snapshot().s1.pending!.requestedAt).toBe(requestedAt);
+    });
+
+    it("clears transcript-origin pending only on a matching tool_result", () => {
+      // Promote pending.
+      state.noteTranscriptEvents("s1", [
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: "2026-05-25T16:18:16.751Z",
+          blocks: [
+            {
+              type: "tool_use",
+              id: "use-ask-1",
+              name: "AskUserQuestion",
+              input: { questions: [] },
+            },
+          ],
+        },
+      ]);
+      // A *newer* unrelated transcript event must NOT clear it (the time-
+      // based heuristic only applies to hook-originated pendings).
+      const unrelated = state.noteTranscriptEvents("s1", [
+        userEvent("2026-05-25T16:19:00.000Z"),
+      ]);
+      expect(unrelated).toBe(null);
+      expect(state.snapshot().s1.pending).toBeDefined();
+      // A matching tool_result clears it.
+      const broadcast = state.noteTranscriptEvents("s1", [
+        {
+          kind: "tool_result",
+          uuid: "r1",
+          ts: "2026-05-25T16:20:00.000Z",
+          toolUseId: "use-ask-1",
+          output: "answered",
+          isError: false,
+        },
+      ]);
+      expect(broadcast).not.toBe(null);
+      expect(broadcast!.pending).toBeUndefined();
+      expect(broadcast!.needsAttention).toBe(false);
+    });
+
+    it("a non-matching tool_result leaves the transcript-origin pending in place", () => {
+      state.noteTranscriptEvents("s1", [
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: "2026-05-25T16:18:16.751Z",
+          blocks: [
+            {
+              type: "tool_use",
+              id: "use-ask-1",
+              name: "AskUserQuestion",
+              input: { questions: [] },
+            },
+          ],
+        },
+      ]);
+      const out = state.noteTranscriptEvents("s1", [
+        {
+          kind: "tool_result",
+          uuid: "r1",
+          ts: "2026-05-25T16:19:00.000Z",
+          toolUseId: "use-other",
+          output: "x",
+          isError: false,
+        },
+      ]);
+      expect(out).toBe(null);
+      expect(state.snapshot().s1.pending).toBeDefined();
+    });
+
+    it("promote+resolve in the same batch collapses to no pending", () => {
+      const out = state.noteTranscriptEvents("s1", [
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: "2026-05-25T16:18:16.751Z",
+          blocks: [
+            {
+              type: "tool_use",
+              id: "use-ask-1",
+              name: "AskUserQuestion",
+              input: { questions: [] },
+            },
+          ],
+        },
+        {
+          kind: "tool_result",
+          uuid: "r1",
+          ts: "2026-05-25T16:20:00.000Z",
+          toolUseId: "use-ask-1",
+          output: "answered",
+          isError: false,
+        },
+      ]);
+      expect(out).not.toBe(null);
+      expect(out!.pending).toBeUndefined();
+      expect(state.snapshot().s1.pending).toBeUndefined();
+    });
+
+    it("ignores tool_use for non-blocking tools", () => {
+      const out = state.noteTranscriptEvents("s1", [
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: "2026-05-25T16:18:16.751Z",
+          blocks: [
+            {
+              type: "tool_use",
+              id: "use-bash-1",
+              name: "Bash",
+              input: { command: "ls" },
+            },
+          ],
+        },
+      ]);
+      expect(out).toBe(null);
+      expect(state.snapshot().s1).toBeUndefined();
     });
   });
 

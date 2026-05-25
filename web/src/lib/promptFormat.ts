@@ -31,6 +31,78 @@ export function isAskAnswerComplete(
 }
 
 /**
+ * Build the deterministic tmux key sequence that drives the AskUserQuestion
+ * TUI widget to the user's selection. Returns null when the answer can't be
+ * delivered via keys alone — that happens whenever any question selects
+ * "Other" (free text), because that path requires text-mode entry which
+ * couples to the widget's text-input state machine and is more fragile.
+ *
+ * For each question we emit:
+ *   1. N×Up      — idempotent reset to option 0 (option 0 is highlighted
+ *                  when the question first appears, but a human pressing
+ *                  arrows in the desktop TUI may have moved focus already.
+ *                  Up past the top is a no-op, so over-sending is safe).
+ *   2. K×Down    — step to the target option index.
+ *   3. Per-pick  — single-select: nothing here, Enter handles it next.
+ *                  multi-select: Space to toggle this option, then for any
+ *                  additional picks reset to top and step again.
+ *   4. Enter     — confirm the question (also advances to the next one).
+ *
+ * `optionCount` for the reset must include the auto-injected Other row, so
+ * pass `q.options.length + 1`. The caller knows the layout; this helper
+ * doesn't need to introspect it.
+ */
+export function formatAskKeySequence(
+  questions: AskQuestion[],
+  selections: string[][],
+  others: string[],
+): string[] | null {
+  const keys: string[] = [];
+  for (let qi = 0; qi < questions.length; qi++) {
+    const q = questions[qi];
+    const sel = selections[qi] ?? [];
+    const other = (others[qi] ?? "").trim();
+    // Free-text "Other" can't be driven by arrow keys alone — bail and let
+    // the caller fall back to the Escape+text path.
+    if (sel.includes(OTHER_SENTINEL)) {
+      void other;
+      return null;
+    }
+    // Option list seen by the TUI: declared options plus the auto-injected
+    // Other row at the bottom. Reset overshoot covers the worst case.
+    const total = q.options.length + 1;
+    const indices = sel
+      .map((label) => q.options.findIndex((o) => o.label === label))
+      .filter((i) => i >= 0);
+    // Sanity: at least one selection mapped to a real option index. An empty
+    // result here means the form let through a label we don't know about —
+    // bail rather than send keys to an unknown row.
+    if (indices.length === 0) return null;
+    if (!q.multiSelect) {
+      // Single-select: reset to top, descend to the target, hit Enter.
+      pushRepeated(keys, "Up", total);
+      pushRepeated(keys, "Down", indices[0]);
+      keys.push("Enter");
+      continue;
+    }
+    // Multi-select: toggle each pick with Space, resetting to top between
+    // picks so absolute indices stay accurate regardless of order.
+    for (let i = 0; i < indices.length; i++) {
+      pushRepeated(keys, "Up", total);
+      pushRepeated(keys, "Down", indices[i]);
+      keys.push("Space");
+    }
+    // Confirm the whole question and advance.
+    keys.push("Enter");
+  }
+  return keys;
+}
+
+function pushRepeated(out: string[], key: string, n: number): void {
+  for (let i = 0; i < n; i++) out.push(key);
+}
+
+/**
  * Render selected answers as the text we send back to Claude after pressing
  * Escape. Single-question prompts get a terse one-liner; multi-question
  * prompts get "Header: value" lines so Claude can map answer → question

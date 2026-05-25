@@ -116,6 +116,21 @@ function pendingFromPermissionRequest(
   };
 }
 
+// Narrowing helper: only the tool-call-shaped variants of `Pending` carry a
+// `toolUseId`. Returns it or undefined so callers can match by id without
+// repeating the variant switch.
+function pendingToolUseId(p: Pending | undefined): string | undefined {
+  if (!p) return undefined;
+  if (
+    p.kind === "tool_permission" ||
+    p.kind === "ask_user_question" ||
+    p.kind === "exit_plan_mode"
+  ) {
+    return p.toolUseId;
+  }
+  return undefined;
+}
+
 // Lift form-field JSON the Elicitation hook delivers into our schema.
 function normalizeFormFields(raw: unknown): ElicitationField[] {
   if (!Array.isArray(raw)) return [];
@@ -389,9 +404,10 @@ export class PromptState {
 
   /**
    * Hard reset: drop needs-attention, pending permission, last error, and
-   * recompute promptKind. Called by the badge-dismiss endpoint, by
-   * close-session, and by `noteSendKeys` / `noteTranscriptEvents` /
-   * `resolveStaleFromTranscripts` when they detect a resolution.
+   * recompute promptKind. Called by close-session, by `noteSendKeys` /
+   * `noteTranscriptEvents` / `resolveStaleFromTranscripts` when they detect a
+   * resolution. NOT what the "user opened this session in the web UI" path
+   * should call — see `dismissAttention`.
    */
   clear(sessionId: string): SessionAttention | null {
     const cur = this.bySession.get(sessionId);
@@ -409,29 +425,127 @@ export class PromptState {
   }
 
   /**
-   * Tell the state machine that the transcript advanced. If any of the
-   * supplied events is newer than the pending permission's `requestedAt`,
-   * the permission is considered resolved (the user answered 1/2 in the
-   * CLI). Returns a broadcast iff a resolution actually happened.
+   * Soft reset for "user is looking at this session" — drops the red-dot
+   * signal (needsAttention) but PRESERVES the pending prompt so the form
+   * stays renderable. Viewing a session is not the same as answering it; if
+   * we also wiped `pending` here, an AskUserQuestion / ExitPlanMode form
+   * would vanish the instant the user clicked into the session.
+   */
+  dismissAttention(sessionId: string): SessionAttention | null {
+    const cur = this.bySession.get(sessionId);
+    if (!cur) return null;
+    if (!cur.needsAttention) return cur;
+    const next = finalize({ ...cur, needsAttention: false });
+    this.bySession.set(sessionId, next);
+    return next;
+  }
+
+  /**
+   * Tell the state machine that the transcript advanced. Two responsibilities:
+   *
+   *   1. **Promote pending from a tool_use** — Claude Code does NOT fire a
+   *      `PermissionRequest` hook for `AskUserQuestion` or `ExitPlanMode`
+   *      (see GitHub issue #33625 / docs/prompts.md §0.2). The only outside-
+   *      the-TUI signal is the tool_use block that lands in the JSONL the
+   *      moment the model calls the tool. We scan for it here and synthesize
+   *      the pending state ourselves so the web form actually renders.
+   *
+   *   2. **Resolve pending from a newer event** — for hook-originated tool
+   *      permissions (Bash/Edit/…), any transcript event newer than the
+   *      permission's `requestedAt` means the user already answered on the
+   *      desktop CLI; drop the pending state. Tool-use-originated pending
+   *      (Ask/Plan) only resolves when its matching `tool_result` lands,
+   *      because the prompt's own tool_use entry would otherwise self-resolve
+   *      on arrival.
+   *
+   * Returns at most one broadcast — the final attention snapshot if anything
+   * changed, null otherwise.
    */
   noteTranscriptEvents(
     sessionId: string,
     events: TranscriptEvent[],
   ): HookBroadcast | null {
     if (events.length === 0) return null;
-    const att = this.bySession.get(sessionId);
-    const pending = att?.pending;
-    const requestedAt =
-      pending?.requestedAt ?? att?.pendingPermission?.requestedAt;
-    if (requestedAt === undefined) return null;
+    let changed = false;
+
     for (const ev of events) {
-      const tsMs = Date.parse(ev.ts ?? "");
-      if (Number.isFinite(tsMs) && tsMs > requestedAt) {
-        const next = this.clear(sessionId);
-        return next ? { sessionId, ...next } : null;
+      // (1a) Resolve a tool-use-originated pending when its matching result
+      // arrives. This must run before the promote step so a promote+resolve
+      // pair in the same batch collapses to "no pending" cleanly.
+      if (ev.kind === "tool_result") {
+        const cur = this.bySession.get(sessionId);
+        const pendingId = pendingToolUseId(cur?.pending);
+        if (pendingId && pendingId === ev.toolUseId) {
+          this.clear(sessionId);
+          changed = true;
+          continue;
+        }
+      }
+
+      // (1b) Promote AskUserQuestion / ExitPlanMode tool_use to pending.
+      if (ev.kind === "assistant") {
+        for (const block of ev.blocks) {
+          if (block.type !== "tool_use") continue;
+          if (
+            block.name !== "AskUserQuestion" &&
+            block.name !== "ExitPlanMode"
+          )
+            continue;
+          const cur = this.bySession.get(sessionId);
+          // Already tracking this exact tool_use — nothing to do.
+          if (pendingToolUseId(cur?.pending) === block.id) continue;
+          const tsMs = Date.parse(ev.ts ?? "");
+          const requestedAt = Number.isFinite(tsMs) ? tsMs : Date.now();
+          const pending = pendingFromPermissionRequest(
+            block.name,
+            block.input,
+            block.id,
+            requestedAt,
+          );
+          const next = finalize({
+            needsAttention: true,
+            lastEvent: "PermissionRequest",
+            lastEventAt: Date.now(),
+            message: cur?.message,
+            notificationType: cur?.notificationType,
+            pending,
+            pendingPermission: cur?.pendingPermission,
+            subagents: cur?.subagents,
+            cwd: cur?.cwd,
+            lastError: cur?.lastError,
+          });
+          this.bySession.set(sessionId, next);
+          changed = true;
+        }
       }
     }
-    return null;
+
+    // (2) Time-based resolution for hook-originated pendings only. Skip when
+    // the live pending was set from a transcript tool_use (Ask/Plan) — its
+    // own tool_use timestamp would otherwise instantly clear it.
+    const att = this.bySession.get(sessionId);
+    const pending = att?.pending;
+    const isTranscriptOrigin =
+      pending?.kind === "ask_user_question" ||
+      pending?.kind === "exit_plan_mode";
+    const requestedAt = !isTranscriptOrigin
+      ? (pending?.requestedAt ?? att?.pendingPermission?.requestedAt)
+      : undefined;
+    if (requestedAt !== undefined) {
+      for (const ev of events) {
+        const tsMs = Date.parse(ev.ts ?? "");
+        if (Number.isFinite(tsMs) && tsMs > requestedAt) {
+          this.clear(sessionId);
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    if (!changed) return null;
+    const final = this.bySession.get(sessionId);
+    if (!final) return null;
+    return { sessionId, ...final };
   }
 
   /**
