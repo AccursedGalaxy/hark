@@ -2,6 +2,7 @@ node_modules
 dist
 .env
 .env.local
+.claude/
 
 # Vite build output — produced by `npm run build`, served by Express
 public/index.html
