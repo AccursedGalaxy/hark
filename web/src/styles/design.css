@@ -291,7 +291,7 @@ a { color: var(--accent); }
   font-size: 10px;
 }
 
-.sessions { overflow-y: auto; padding: 0 10px 80px; flex: 1; }
+.sessions { overflow-y: auto; overflow-x: hidden; padding: 0 12px 80px; flex: 1; }
 .sessions::-webkit-scrollbar { width: 8px; }
 .sessions::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
 
@@ -317,6 +317,7 @@ a { color: var(--accent); }
 
 .session-top {
   display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+  padding-right: 28px;
 }
 .session-name { font-weight: 600; color: var(--fg-0); font-size: 14px; letter-spacing: -0.005em; }
 .session-status {
