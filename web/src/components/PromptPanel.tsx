@@ -257,16 +257,16 @@ function AskUserQuestionForm({
   };
 
   // Two delivery paths:
-  //   1. **Native key sequence** (preferred) — drive the TUI widget directly
-  //      with Up/Down/Enter. The TUI accepts the answer as a proper
-  //      AskUserQuestion response, which is what Claude expects. Single-
-  //      select uses Enter to pick-and-advance; multi-select toggles each
-  //      pick with Enter then steps down to the Submit row before final
-  //      Enter. See `formatAskKeySequence` for the row layout.
-  //   2. **Escape + text fallback** — used only when key delivery isn't
-  //      viable (an "Other" pick whose free text must enter the widget's
-  //      text-input mode). Claude sees this as "user declined and typed a
-  //      new message", which is lossy but better than nothing.
+  //   1. **Native key sequence** (preferred for single-select) — drive the
+  //      TUI widget with Up/Down/Enter. The widget treats Enter on an
+  //      option as "pick + advance", so a per-question reset-then-step-
+  //      then-Enter is enough to commit single-select answers.
+  //   2. **Escape + text fallback** — used for multi-select questions and
+  //      "Other" picks. Multi-select uses a different widget-internal key
+  //      contract (toggle key + Submit row) that we don't reliably model
+  //      from the outside, so we fall back to typing the answer as text.
+  //      Claude reads "Option1, Option2" and threads it into the same
+  //      AskUserQuestion response.
   const submit = async () => {
     if (!complete || submitting || busy) return;
     setSubmitting(true);

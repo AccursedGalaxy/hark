@@ -138,49 +138,45 @@ describe("formatAskKeySequence", () => {
     expect(keys).toEqual(["Up", "Up", "Up", "Down", "Enter"]);
   });
 
-  it("multi-select toggles each pick with Enter then commits via Submit row", () => {
-    // sectionsQ has 3 declared options. With the Other + Submit rows the
-    // widget exposes 5 rows total; Submit lives at index 4 (0-indexed).
-    // Picking Introduction (0) and Conclusion (2):
-    //   reset(5×Up) + 0 Downs + Enter   ← toggle Introduction
-    //   reset(5×Up) + 2 Downs + Enter   ← toggle Conclusion
-    //   reset(5×Up) + 4 Downs + Enter   ← step to Submit and commit
-    const keys = formatAskKeySequence(
-      [sectionsQ],
-      [["Introduction", "Conclusion"]],
-      [""],
-    );
-    expect(keys).toEqual([
-      "Up", "Up", "Up", "Up", "Up", "Enter",
-      "Up", "Up", "Up", "Up", "Up", "Down", "Down", "Enter",
-      "Up", "Up", "Up", "Up", "Up", "Down", "Down", "Down", "Down", "Enter",
-    ]);
+  it("multi-select forces null so the caller falls back to Escape+text", () => {
+    // See issue #10 — a native Enter-toggle + Submit-row sequence was tried
+    // first and produced wrong picks on a live session. The text fallback
+    // is the same path "Other" picks use and is unambiguous for Claude to
+    // parse, so multi-select questions route there instead.
+    expect(
+      formatAskKeySequence([sectionsQ], [["Introduction", "Conclusion"]], [""]),
+    ).toBeNull();
   });
 
-  it("multi-select with a single pick still requires the Submit step", () => {
-    // Multi-select never auto-advances on Enter — every commit goes through
-    // the Submit row at the bottom of the row list.
-    const keys = formatAskKeySequence([sectionsQ], [["Body"]], [""]);
-    expect(keys).toEqual([
-      "Up", "Up", "Up", "Up", "Up", "Down", "Enter",
-      "Up", "Up", "Up", "Up", "Up", "Down", "Down", "Down", "Down", "Enter",
-    ]);
+  it("any multi-select question in a multi-question form forces null", () => {
+    // A partial mix (some questions native, some via text) would split the
+    // answer across two channels Claude can't reassemble — bail wholesale.
+    expect(
+      formatAskKeySequence(
+        [formatQ, sectionsQ],
+        [["Detailed"], ["Body"]],
+        ["", ""],
+      ),
+    ).toBeNull();
   });
 
-  it("multi-question forms chain sequences in declaration order", () => {
+  it("multi-question single-select forms chain sequences in declaration order", () => {
+    const twoSingle: AskQuestion = {
+      question: "Pick one section",
+      header: "Section",
+      options: [{ label: "Intro" }, { label: "Body" }, { label: "End" }],
+      multiSelect: false,
+    };
     const keys = formatAskKeySequence(
-      [formatQ, sectionsQ],
-      [["Detailed"], ["Body"]],
+      [formatQ, twoSingle],
+      [["Detailed"], ["End"]],
       ["", ""],
     );
     expect(keys).toEqual([
-      // Q1 single-select (2 opts + Other = 3 rows): reset + 1 Down + Enter.
+      // Q1 (2 opts + Other = 3 rows): reset + 1 Down + Enter.
       "Up", "Up", "Up", "Down", "Enter",
-      // Q2 multi-select (3 opts + Other + Submit = 5 rows):
-      //   reset + 1 Down + Enter   ← toggle Body
-      //   reset + 4 Down + Enter   ← step to Submit and commit
-      "Up", "Up", "Up", "Up", "Up", "Down", "Enter",
-      "Up", "Up", "Up", "Up", "Up", "Down", "Down", "Down", "Down", "Enter",
+      // Q2 (3 opts + Other = 4 rows): reset + 2 Down + Enter.
+      "Up", "Up", "Up", "Up", "Down", "Down", "Enter",
     ]);
   });
 
