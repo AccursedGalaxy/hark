@@ -1,15 +1,18 @@
 import { useEffect, useState } from "react";
 import { Composer } from "./components/Composer";
-import { SessionHeader } from "./components/SessionHeader";
-import { SessionRail } from "./components/SessionRail";
+import { ContextRail } from "./components/ContextRail";
+import { Sidebar } from "./components/Sidebar";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { TaskListPanel } from "./components/TaskListPanel";
+import { TopBar } from "./components/TopBar";
 import { Transcript } from "./components/Transcript";
 import { TrustPrompt } from "./components/TrustPrompt";
+import { TweaksPanel } from "./components/TweaksPanel";
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { useSessions } from "./hooks/useSessions";
+import { getContextRail, setContextRail } from "./lib/theme";
 
-const WIDE_QUERY = "(min-width: 760px)";
+const WIDE_QUERY = "(min-width: 880px)";
 const BASE_TITLE = "hark";
 
 function setFavicon(attentionCount: number) {
@@ -26,6 +29,8 @@ function setFavicon(attentionCount: number) {
 
 export default function App() {
   const wide = useMediaQuery(WIDE_QUERY);
+  const [showContext, setShowContext] = useState<boolean>(() => getContextRail());
+
   const {
     connected,
     sessions,
@@ -46,14 +51,12 @@ export default function App() {
     refresh,
   } = useSessions();
 
-  // Sync title + favicon with attention count.
   useEffect(() => {
     const prefix = attentionCount > 0 ? `(${attentionCount}) ` : "";
     document.title = `${prefix}${BASE_TITLE}`;
     setFavicon(attentionCount);
   }, [attentionCount]);
 
-  // On desktop, auto-select the first session if none is picked.
   useEffect(() => {
     if (!wide) return;
     if (current) return;
@@ -61,19 +64,12 @@ export default function App() {
     if (first) setCurrent(first.sessionId);
   }, [wide, current, sessions, setCurrent]);
 
-  // If the currently-selected session disappears (closed externally, or a
-  // pending session got registered under a real UUID after a trust confirm),
-  // clear the selection so the auto-select effect above can pick a new one.
   useEffect(() => {
     if (!current) return;
     if (sessions.length === 0) return;
     if (!sessions.some((s) => s.sessionId === current)) setCurrent(null);
   }, [current, sessions, setCurrent]);
 
-  // After trust confirm, follow the same claude PID to its newly-registered
-  // session (same process, fresh UUID). Otherwise the pending row vanishes
-  // and the user lands on whatever sessions[0] happens to be — likely the
-  // wrong place.
   const [awaitingPid, setAwaitingPid] = useState<number | null>(null);
   useEffect(() => {
     if (awaitingPid === null) return;
@@ -86,19 +82,22 @@ export default function App() {
     }
   }, [awaitingPid, sessions, setCurrent]);
 
-  const showRail = wide || !current;
+  const showSidebar = wide;
   const showSession = wide || !!current;
+  const ctxVisible = wide && showContext && !!currentSession && currentSession.kind !== "pending";
 
   return (
-    <div className={`app ${wide ? "is-wide" : "is-narrow"}`}>
+    <div
+      className={`app ${wide ? "is-wide" : "is-narrow"} ${ctxVisible ? "with-context" : ""}`}
+    >
       {!connected && (
         <div className="conn-banner" role="status">
           Connection lost — reconnecting…
         </div>
       )}
 
-      {wide && (
-        <SessionRail
+      {showSidebar && (
+        <Sidebar
           sessions={sessions}
           current={current}
           onPick={setCurrent}
@@ -108,18 +107,19 @@ export default function App() {
         />
       )}
 
-      {!wide && showRail && (
-        <MobileSessionList
+      {!showSidebar && !current && (
+        <Sidebar
           sessions={sessions}
-          attentionCount={attentionCount}
+          current={current}
           onPick={setCurrent}
+          attentionCount={attentionCount}
           onSpawned={refresh}
           onClose={closeSession}
         />
       )}
 
       {showSession && (
-        <main className="session-pane">
+        <main className="main">
           {!wide && currentSession && (
             <SessionSwitcher
               sessions={sessions}
@@ -130,9 +130,10 @@ export default function App() {
 
           {currentSession ? (
             <>
-              <SessionHeader
+              <TopBar
                 session={currentSession}
                 onBack={!wide ? () => setCurrent(null) : undefined}
+                onClose={() => void closeSession(currentSession.sessionId)}
               />
               {currentSession.kind === "pending" ? (
                 <TrustPrompt
@@ -150,59 +151,53 @@ export default function App() {
                     events={events}
                     loading={transcriptLoading}
                     error={transcriptError}
+                    pendingKind={currentPending?.kind ?? null}
+                    onJumpToQuestion={() => {
+                      const el = document.querySelector(
+                        '[data-screen-label="QuestionDock"]',
+                      );
+                      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                    }}
                   />
-                  <Composer
-                    disabled={!currentSession.hasTmuxPane}
-                    disabledReason={
-                      !currentSession.hasTmuxPane
-                        ? "session not in tmux"
-                        : undefined
-                    }
-                    errorMessage={sendError}
-                    promptKind={currentPromptKind}
-                    pending={currentPending}
-                    lastError={currentLastError}
-                    cwd={currentSession.cwd}
-                    onSend={send}
-                    onUpload={upload}
-                  />
+                  <div className="dock">
+                    <Composer
+                      disabled={!currentSession.hasTmuxPane}
+                      disabledReason={
+                        !currentSession.hasTmuxPane
+                          ? "session not in tmux"
+                          : undefined
+                      }
+                      errorMessage={sendError}
+                      promptKind={currentPromptKind}
+                      pending={currentPending}
+                      lastError={currentLastError}
+                      cwd={currentSession.cwd}
+                      onSend={send}
+                      onUpload={upload}
+                    />
+                  </div>
                 </>
               )}
             </>
           ) : (
             <div className="empty">
-              {connected ? "No sessions" : "Connecting…"}
+              {connected ? "No session selected" : "Connecting…"}
             </div>
           )}
         </main>
       )}
-    </div>
-  );
-}
 
-// Full-screen list shown on mobile when no session is selected. Uses the same
-// rich rail rows because it has the screen space and gives a "home" feel.
-function MobileSessionList({
-  sessions,
-  attentionCount,
-  onPick,
-  onSpawned,
-  onClose,
-}: {
-  sessions: ReturnType<typeof useSessions>["sessions"];
-  attentionCount: number;
-  onPick: (id: string) => void;
-  onSpawned: () => void;
-  onClose: (id: string) => Promise<void>;
-}) {
-  return (
-    <SessionRail
-      sessions={sessions}
-      current={null}
-      onPick={onPick}
-      attentionCount={attentionCount}
-      onSpawned={onSpawned}
-      onClose={onClose}
-    />
+      {ctxVisible && currentSession && (
+        <ContextRail session={currentSession} events={events} />
+      )}
+
+      <TweaksPanel
+        showContext={showContext}
+        onShowContext={(v) => {
+          setShowContext(v);
+          setContextRail(v);
+        }}
+      />
+    </div>
   );
 }

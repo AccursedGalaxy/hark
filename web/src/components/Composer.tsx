@@ -16,7 +16,22 @@ import type {
 } from "../lib/protocol";
 import { useSlashMenu } from "../lib/slashMenu";
 import { fetchSlashCommands } from "../lib/transport";
+import {
+  AttachIcon,
+  CameraIcon,
+  ChevIcon,
+  ClipIcon,
+  CloseIcon,
+  FileIcon,
+  PhotoIcon,
+  QuestionIcon,
+  SendIcon,
+  SparkIcon,
+  TermIcon,
+  TextIcon,
+} from "./icons";
 import { PromptPanel } from "./PromptPanel";
+import { QuestionCard } from "./QuestionCard";
 import { SlashCommandMenu } from "./SlashCommandMenu";
 
 const PROMPT_LABEL: Record<Exclude<PromptKind, null>, string> = {
@@ -25,14 +40,8 @@ const PROMPT_LABEL: Record<Exclude<PromptKind, null>, string> = {
   idle: "awaiting your reply",
 };
 
-// Pastes longer than this prompt the user to attach the content as a file
-// instead of jamming a wall of text into the textarea (and into the tmux
-// pane). Tuned so a typical stack trace still goes inline.
 const PASTE_FILE_THRESHOLD = 4000;
 
-// Single-key chips for the raw-key pad. `key` is the tmux key name passed
-// straight to `tmux send-keys`; see docs/interactions.md for which prompts
-// each one targets.
 type KeyChip = { label: string; key: string; title?: string };
 
 const KEY_ROWS: KeyChip[][] = [
@@ -56,8 +65,6 @@ const KEY_ROWS: KeyChip[][] = [
   ],
 ];
 
-// In-flight upload — kept in state so chips render while bytes are flying.
-// On success we replace the placeholder with the server-issued UploadedFile.
 interface PendingUpload {
   id: string;
   name: string;
@@ -65,12 +72,10 @@ interface PendingUpload {
   mime: string;
   loaded: number;
   total: number;
-  // Local preview URL for image files (revoked when the chip leaves).
   previewUrl?: string;
 }
 
 interface Attachment extends UploadedFile {
-  // Local id we can use for removal before/after the upload finishes.
   id: string;
   previewUrl?: string;
 }
@@ -90,10 +95,7 @@ export function Composer({
   disabledReason?: string;
   errorMessage: string | null;
   promptKind: PromptKind;
-  // Discriminated "what is Claude waiting for" — drives the rich
-  // PromptPanel surface above the textarea. Null when not waiting.
   pending: Pending | null;
-  // Most recent error from StopFailure, surfaced as a retry chip.
   lastError: SessionError | null;
   cwd?: string;
   onSend: (body: SendBody) => Promise<void>;
@@ -120,23 +122,28 @@ export function Composer({
   const photoInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const attachWrapRef = useRef<HTMLDivElement>(null);
-  // Track <html>-level drag state without a counter (browsers fire enter/leave
-  // for every child element). We only really care that a drag is anywhere
-  // over the composer.
   const dragDepth = useRef(0);
   const kbInset = useKeyboardInset();
 
-  // Tier-0 prompt classes that the PromptPanel renders inline (each carries
-  // its own primary action buttons). For everything else (a generic
-  // `permission` from the legacy hook path with no `pending` payload), the
-  // composer keeps the simple Approve/Deny pair as the fallback.
-  const richKind = pending?.kind ?? null;
+  // Pending kinds that have their own focused dock above the composer.
+  const isQuestion = pending?.kind === "ask_user_question";
+  // Whether the textarea is locked because a question / form is up.
+  const lockedByQuestion = isQuestion;
+  // Rich panel (per-tool permission card, plan mode, elicitation, oauth,
+  // error chip). Question card has its own dock instead.
+  const showRichPanel =
+    !disabled &&
+    !isQuestion &&
+    (pending !== null || lastError !== null);
   const showApproveDeny =
-    promptKind === "permission" && richKind === null;
-  const showInteractiveTools = !disabled && promptKind !== null;
-  const showRichPanel = !disabled && (pending !== null || lastError !== null);
+    !lockedByQuestion &&
+    promptKind === "permission" &&
+    (pending === null || pending?.kind === "tool_permission");
+  const showInteractiveTools =
+    !disabled && !lockedByQuestion && promptKind !== null;
   const autoOpenKeypad =
-    promptKind === "permission" || promptKind === "elicitation";
+    !lockedByQuestion &&
+    (promptKind === "permission" || promptKind === "elicitation");
 
   useEffect(() => {
     if (autoOpenKeypad) setKeypadOpen(true);
@@ -145,7 +152,6 @@ export function Composer({
     if (!showInteractiveTools) setKeypadOpen(false);
   }, [showInteractiveTools]);
 
-  // Close the attach menu on outside click.
   useEffect(() => {
     if (!attachMenuOpen) return;
     const onClick = (e: MouseEvent) => {
@@ -157,7 +163,6 @@ export function Composer({
     return () => window.removeEventListener("mousedown", onClick);
   }, [attachMenuOpen]);
 
-  // Revoke object URLs when chips leave to avoid leaking memory.
   useEffect(() => {
     return () => {
       for (const a of attachments) if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -173,17 +178,9 @@ export function Composer({
     ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
   }, [text]);
 
-  // ---- Slash-command popover -------------------------------------------
-  //
-  // All state-machine + key handling lives in useSlashMenu — the hook owns
-  // the trigger detection, filter, highlight, and the resolveSlashKey
-  // dispatch. Composer only owns the lazy command fetch (needs cwd) and
-  // wires the hook's `onCommit` into its own text/caret state.
-
   const commitSlashEdit = useCallback(
     (next: { text: string; caret: number }) => {
       setText(next.text);
-      // Defer caret update so React's value commit doesn't race us.
       requestAnimationFrame(() => {
         const ta = taRef.current;
         if (!ta) return;
@@ -203,11 +200,6 @@ export function Composer({
     onCommit: commitSlashEdit,
   });
 
-  // Lazy-fetch commands the first time the user opens the slash menu for
-  // this session. Cached for the composer's lifetime; if Claude pushes a new
-  // command file, the user can hit refresh or re-select the session. Keyed
-  // on the hook's trigger (not its `open`) so we kick off the fetch the
-  // moment the user types "/", even before commands have loaded.
   const hasSlashTrigger = !!slashMenu.trigger && !disabled;
   useEffect(() => {
     if (!hasSlashTrigger) return;
@@ -240,7 +232,7 @@ export function Composer({
     async (files: File[]) => {
       if (files.length === 0 || disabled) return;
       setUploadError(null);
-      const pending: PendingUpload[] = files.map((f) => ({
+      const pendingArr: PendingUpload[] = files.map((f) => ({
         id: `pu-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         name: f.name || "file",
         size: f.size,
@@ -251,35 +243,35 @@ export function Composer({
           ? URL.createObjectURL(f)
           : undefined,
       }));
-      setUploads((prev) => [...prev, ...pending]);
+      setUploads((prev) => [...prev, ...pendingArr]);
       const total = files.reduce((a, f) => a + f.size, 0);
       try {
         const uploaded = await onUpload(files, (loaded) => {
-          // Approximate per-file progress by scaling the global byte ratio
-          // — XHR doesn't break out per-part progress for multipart bodies.
           const ratio = total > 0 ? loaded / total : 1;
           setUploads((prev) =>
             prev.map((p) =>
-              pending.some((q) => q.id === p.id)
+              pendingArr.some((q) => q.id === p.id)
                 ? { ...p, loaded: Math.round(p.total * ratio) }
                 : p,
             ),
           );
         });
-        // Replace pending placeholders with the real attachments. We pair
-        // up positionally with the request order; the server preserves it.
-        setUploads((prev) => prev.filter((p) => !pending.some((q) => q.id === p.id)));
+        setUploads((prev) =>
+          prev.filter((p) => !pendingArr.some((q) => q.id === p.id)),
+        );
         setAttachments((prev) => [
           ...prev,
           ...uploaded.map((u, i) => ({
             ...u,
-            id: pending[i]?.id ?? `at-${Date.now()}-${i}`,
-            previewUrl: pending[i]?.previewUrl,
+            id: pendingArr[i]?.id ?? `at-${Date.now()}-${i}`,
+            previewUrl: pendingArr[i]?.previewUrl,
           })),
         ]);
       } catch (err) {
-        setUploads((prev) => prev.filter((p) => !pending.some((q) => q.id === p.id)));
-        for (const p of pending) if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
+        setUploads((prev) =>
+          prev.filter((p) => !pendingArr.some((q) => q.id === p.id)),
+        );
+        for (const p of pendingArr) if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
         setUploadError(err instanceof Error ? err.message : "upload failed");
         setTimeout(() => setUploadError(null), 4000);
       }
@@ -294,8 +286,6 @@ export function Composer({
       return prev.filter((a) => a.id !== id);
     });
   };
-
-  // ---- File pickers -----------------------------------------------------
 
   const pickFiles = () => {
     setAttachMenuOpen(false);
@@ -313,11 +303,9 @@ export function Composer({
     const list = e.target.files;
     if (!list || list.length === 0) return;
     const files = Array.from(list);
-    e.target.value = ""; // reset so picking the same file again still fires
+    e.target.value = "";
     void startUpload(files);
   };
-
-  // ---- Drag & drop ------------------------------------------------------
 
   const onDragEnter = (e: React.DragEvent) => {
     if (disabled || !hasFiles(e.dataTransfer)) return;
@@ -344,12 +332,8 @@ export function Composer({
     if (files.length > 0) void startUpload(files);
   };
 
-  // ---- Paste handling ---------------------------------------------------
-
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     if (disabled) return;
-    // Image-in-clipboard → upload as an attachment instead of letting the
-    // textarea swallow it as plain text (which it doesn't anyway).
     const files = Array.from(e.clipboardData.files ?? []);
     if (files.length > 0) {
       e.preventDefault();
@@ -358,8 +342,6 @@ export function Composer({
     }
     const pasted = e.clipboardData.getData("text");
     if (pasted.length >= PASTE_FILE_THRESHOLD) {
-      // Don't preempt — let it land in the textarea, then offer the user a
-      // one-tap "save as file" so they can swap it out if they want.
       setPasteFilePrompt(pasted);
     }
   };
@@ -376,10 +358,9 @@ export function Composer({
     await startUpload([file]);
   }, [pasteFilePrompt, startUpload]);
 
-  // ---- Send -------------------------------------------------------------
-
   const canSend =
     !disabled &&
+    !lockedByQuestion &&
     !busy &&
     uploads.length === 0 &&
     (text.trim().length > 0 || attachments.length > 0);
@@ -396,7 +377,7 @@ export function Composer({
       setAttachments([]);
       setPasteFilePrompt(null);
     } catch {
-      // surfaced via errorMessage prop
+      /* errorMessage surfaces it */
     } finally {
       setBusy(false);
     }
@@ -417,17 +398,12 @@ export function Composer({
   const sendKey = (k: string) => sendKeySequence([k]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    // Slash-menu handles its own keys (arrows / Tab / Enter / Escape) and
-    // reports back whether the event was consumed. An empty filter result
-    // lets Enter fall through here so the user can send literal "/foo".
     if (slashMenu.onKeyDown(e)) return;
     if (e.key === "Enter" && !e.shiftKey && !isTouch()) {
       e.preventDefault();
       void submitText();
     }
   };
-
-  // ---- Render -----------------------------------------------------------
 
   const allChips: Array<
     | { kind: "attachment"; a: Attachment }
@@ -437,12 +413,18 @@ export function Composer({
     ...uploads.map((u) => ({ kind: "upload" as const, u })),
   ];
 
+  const placeholderText = disabled
+    ? (disabledReason ?? "Disabled")
+    : lockedByQuestion
+      ? "Answer the question above to continue…"
+      : "Reply, or describe what to do next…";
+
   return (
     <div
       className={`composer-wrap ${disabled ? "is-disabled" : ""} ${
         dragging ? "is-dragover" : ""
       }`}
-      style={{ paddingBottom: kbInset }}
+      style={{ paddingBottom: kbInset ? kbInset + 18 : undefined }}
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -455,105 +437,41 @@ export function Composer({
         </div>
       )}
 
+      {/* Question dock — separate from the composer so the prompt sits as
+          its own focused interaction above the textarea. */}
+      {isQuestion && pending?.kind === "ask_user_question" && (
+        <div
+          className="question-dock"
+          data-screen-label="QuestionDock"
+          style={{ paddingBottom: 0, marginTop: -14 }}
+        >
+          <QuestionCard
+            questions={pending.questions}
+            busy={busy}
+            onSend={onSend}
+          />
+        </div>
+      )}
+
       {(errorMessage || uploadError) && (
         <div className="composer-error" role="status">
           {errorMessage || uploadError}
         </div>
       )}
 
-      <div className="composer">
-        {showRichPanel && (
-          <PromptPanel
-            pending={pending}
-            lastError={lastError}
-            busy={busy}
-            onSend={onSend}
-          />
-        )}
-
-        {allChips.length > 0 && (
-          <div className="composer-attachments" role="list" aria-label="Attachments">
-            {allChips.map((c) =>
-              c.kind === "attachment" ? (
-                <AttachmentChip
-                  key={c.a.id}
-                  attachment={c.a}
-                  onRemove={() => removeAttachment(c.a.id)}
-                />
-              ) : (
-                <UploadingChip key={c.u.id} upload={c.u} />
-              ),
-            )}
-          </div>
-        )}
-
-        {pasteFilePrompt && (
-          <div className="composer-paste-prompt" role="status">
-            <span>
-              Long paste ({pasteFilePrompt.length.toLocaleString()} chars).
-              Send as file?
-            </span>
-            <div className="composer-paste-prompt-actions">
-              <button
-                type="button"
-                className="btn btn-sm btn-approve"
-                onClick={() => void convertPasteToFile()}
-              >
-                Save as file
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-ghost"
-                onClick={() => setPasteFilePrompt(null)}
-              >
-                Keep inline
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div className="composer-input">
-          {/* Hidden file inputs — driven by the paperclip menu. */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            hidden
-            onChange={onFileInput}
-            aria-hidden="true"
-          />
-          <input
-            ref={photoInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            hidden
-            onChange={onFileInput}
-            aria-hidden="true"
-          />
-          <input
-            ref={cameraInputRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            hidden
-            onChange={onFileInput}
-            aria-hidden="true"
-          />
-
-          {/* Paperclip with menu. Sits inside the textarea's bottom-left
-           * corner, mirroring the send button on the right. */}
+      <div className={`composer ${disabled ? "is-disabled" : ""}`}>
+        <div className="composer-top">
           <div className="composer-attach" ref={attachWrapRef}>
             <button
               type="button"
-              className="composer-attach-btn"
+              className="chip"
               title="Attach files"
               aria-label="Attach files"
               aria-expanded={attachMenuOpen}
               disabled={disabled}
               onClick={() => setAttachMenuOpen((v) => !v)}
             >
-              <ClipIcon />
+              <AttachIcon /> Attach
             </button>
             {attachMenuOpen && (
               <div className="composer-attach-menu" role="menu">
@@ -601,6 +519,152 @@ export function Composer({
               </div>
             )}
           </div>
+          <button
+            type="button"
+            className="chip"
+            title="Insert @file"
+            disabled={disabled}
+            onClick={() => {
+              const ta = taRef.current;
+              if (!ta) return;
+              ta.focus();
+              const before = text.slice(0, caret);
+              const after = text.slice(caret);
+              const next = before + "@" + after;
+              setText(next);
+              requestAnimationFrame(() => {
+                ta.setSelectionRange(caret + 1, caret + 1);
+                setCaret(caret + 1);
+              });
+            }}
+          >
+            <SparkIcon /> @file
+          </button>
+          <button
+            type="button"
+            className="chip"
+            title="Insert /slash command"
+            disabled={disabled}
+            onClick={() => {
+              const ta = taRef.current;
+              if (!ta) return;
+              ta.focus();
+              const before = text.slice(0, caret);
+              const after = text.slice(caret);
+              const insert = before.endsWith("/") ? "" : "/";
+              const next = before + insert + after;
+              setText(next);
+              requestAnimationFrame(() => {
+                ta.setSelectionRange(caret + insert.length, caret + insert.length);
+                setCaret(caret + insert.length);
+              });
+            }}
+          >
+            <TermIcon /> /run
+          </button>
+          {showInteractiveTools && (
+            <button
+              type="button"
+              className={"chip warn" + (keypadOpen ? " is-active" : "")}
+              title="Toggle raw key pad"
+              aria-expanded={keypadOpen}
+              onClick={() => setKeypadOpen((v) => !v)}
+            >
+              <QuestionIcon /> Keys
+              <ChevIcon />
+            </button>
+          )}
+          <span style={{ flex: 1 }} />
+          <span
+            className={`chip ${disabled ? "dead" : promptKind ? "warn" : "live"}`}
+            style={{ cursor: "default" }}
+          >
+            <span
+              className="dot"
+              style={{ width: 6, height: 6, marginRight: 4 }}
+            />
+            {disabled ? "disconnected" : promptKind ? PROMPT_LABEL[promptKind] : "connected"}
+          </span>
+        </div>
+
+        {showRichPanel && (
+          <PromptPanel
+            pending={pending}
+            lastError={lastError}
+            busy={busy}
+            onSend={onSend}
+          />
+        )}
+
+        {allChips.length > 0 && (
+          <div className="composer-attachments" role="list" aria-label="Attachments">
+            {allChips.map((c) =>
+              c.kind === "attachment" ? (
+                <AttachmentChip
+                  key={c.a.id}
+                  attachment={c.a}
+                  onRemove={() => removeAttachment(c.a.id)}
+                />
+              ) : (
+                <UploadingChip key={c.u.id} upload={c.u} />
+              ),
+            )}
+          </div>
+        )}
+
+        {pasteFilePrompt && (
+          <div className="composer-paste-prompt" role="status">
+            <span>
+              Long paste ({pasteFilePrompt.length.toLocaleString()} chars). Send
+              as file?
+            </span>
+            <div className="composer-paste-prompt-actions">
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => void convertPasteToFile()}
+              >
+                Save as file
+              </button>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setPasteFilePrompt(null)}
+              >
+                Keep inline
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="composer-input">
+          {/* Hidden file inputs */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={onFileInput}
+            aria-hidden="true"
+          />
+          <input
+            ref={photoInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
+            onChange={onFileInput}
+            aria-hidden="true"
+          />
+          <input
+            ref={cameraInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            hidden
+            onChange={onFileInput}
+            aria-hidden="true"
+          />
 
           {slashMenu.open && (
             <SlashCommandMenu
@@ -614,10 +678,8 @@ export function Composer({
             ref={taRef}
             rows={1}
             value={text}
-            placeholder={
-              disabled ? (disabledReason ?? "Disabled") : "Send a message…"
-            }
-            disabled={disabled}
+            placeholder={placeholderText}
+            disabled={disabled || lockedByQuestion}
             onChange={(e) => {
               setText(e.target.value);
               setCaret(e.target.selectionStart);
@@ -631,82 +693,53 @@ export function Composer({
           />
           <button
             type="button"
-            className="composer-send"
+            className="send"
             onClick={() => void submitText()}
             disabled={!canSend}
-            title={
-              uploads.length > 0 ? "Waiting for upload…" : "Send (Enter)"
-            }
+            title={uploads.length > 0 ? "Waiting for upload…" : "Send (Enter)"}
             aria-label="Send"
           >
             <SendIcon />
           </button>
         </div>
 
-        {(showInteractiveTools || (disabled && disabledReason)) && (
+        {showApproveDeny && (
           <div className="composer-actions">
             <div className="composer-actions-primary">
-              {showApproveDeny && (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn-approve"
-                    title="Send '1' then Enter (approve a permission prompt)"
-                    onClick={() => void sendKeySequence(["1", "Enter"])}
-                    disabled={disabled || busy}
-                  >
-                    Approve
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-deny"
-                    title="Send '2' then Enter (deny a permission prompt)"
-                    onClick={() => void sendKeySequence(["2", "Enter"])}
-                    disabled={disabled || busy}
-                  >
-                    Deny
-                  </button>
-                </>
-              )}
+              <button
+                type="button"
+                className="btn primary"
+                title="Send '1' then Enter (approve)"
+                onClick={() => void sendKeySequence(["1", "Enter"])}
+                disabled={disabled || busy}
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                className="btn danger"
+                title="Send '2' then Enter (deny)"
+                onClick={() => void sendKeySequence(["2", "Enter"])}
+                disabled={disabled || busy}
+              >
+                Deny
+              </button>
             </div>
-
             <div className="composer-actions-secondary">
-              {showInteractiveTools && (
-                <>
-                  <span
-                    className={`composer-hint-prompt prompt-${promptKind}`}
-                    title="What Claude Code is waiting for"
-                  >
-                    {PROMPT_LABEL[promptKind!]}
-                  </span>
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    title="Toggle raw key pad"
-                    aria-expanded={keypadOpen}
-                    aria-label={keypadOpen ? "Hide key pad" : "Show key pad"}
-                    onClick={() => setKeypadOpen((v) => !v)}
-                  >
-                    {keypadOpen ? "▾ Keys" : "▸ Keys"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    title="Send Escape"
-                    onClick={() => void sendKeySequence(["Escape"])}
-                    disabled={busy}
-                  >
-                    Esc
-                  </button>
-                </>
-              )}
-              {disabled && disabledReason && (
-                <span className="composer-hint">{disabledReason}</span>
-              )}
+              <button
+                type="button"
+                className="btn ghost btn-sm"
+                title="Send Escape"
+                onClick={() => void sendKeySequence(["Escape"])}
+                disabled={busy}
+              >
+                Esc
+              </button>
             </div>
           </div>
         )}
-        {keypadOpen && (
+
+        {keypadOpen && showInteractiveTools && (
           <div className="composer-keypad" role="group" aria-label="Raw keys">
             {KEY_ROWS.map((row, i) => (
               <div className="keypad-row" key={i}>
@@ -726,6 +759,15 @@ export function Composer({
             ))}
           </div>
         )}
+
+        <div className="composer-foot">
+          <span>{disabled ? disabledReason ?? "Disabled" : "Claude Code · interactive"}</span>
+          <span className="spc" />
+          <span>
+            <kbd>↵</kbd> send · <kbd>⇧</kbd>
+            <kbd>↵</kbd> newline · <kbd>/</kbd> commands
+          </span>
+        </div>
       </div>
 
       {pasteAsFileOpen && (
@@ -765,8 +807,6 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// ---- Chips ----------------------------------------------------------------
-
 function AttachmentChip({
   attachment,
   onRemove,
@@ -805,7 +845,9 @@ function AttachmentChip({
 
 function UploadingChip({ upload }: { upload: PendingUpload }) {
   const pct =
-    upload.total > 0 ? Math.min(100, Math.round((upload.loaded / upload.total) * 100)) : 0;
+    upload.total > 0
+      ? Math.min(100, Math.round((upload.loaded / upload.total) * 100))
+      : 0;
   const isImage = upload.mime.startsWith("image/");
   return (
     <div className="attach-chip attach-chip-uploading" role="listitem" aria-busy>
@@ -830,14 +872,15 @@ function UploadingChip({ upload }: { upload: PendingUpload }) {
           aria-valuemin={0}
           aria-valuemax={100}
         >
-          <div className="attach-chip-progress-fill" style={{ width: `${pct}%` }} />
+          <div
+            className="attach-chip-progress-fill"
+            style={{ width: `${pct}%` }}
+          />
         </div>
       </div>
     </div>
   );
 }
-
-// ---- Paste-as-file dialog -------------------------------------------------
 
 function PasteAsFileDialog({
   onAttach,
@@ -857,7 +900,11 @@ function PasteAsFileDialog({
     onAttach(content, name.trim() || "snippet.txt");
   };
   return (
-    <div className="paste-dialog-overlay" onClick={onCancel} role="presentation">
+    <div
+      className="paste-dialog-overlay"
+      onClick={onCancel}
+      role="presentation"
+    >
       <div
         className="paste-dialog"
         role="dialog"
@@ -891,16 +938,12 @@ function PasteAsFileDialog({
           placeholder="Paste long text, logs, or code here…"
         />
         <div className="paste-dialog-actions">
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={onCancel}
-          >
+          <button type="button" className="btn ghost" onClick={onCancel}>
             Cancel
           </button>
           <button
             type="button"
-            className="btn btn-approve"
+            className="btn primary"
             disabled={!content.trim()}
             onClick={submit}
           >
@@ -911,98 +954,3 @@ function PasteAsFileDialog({
     </div>
   );
 }
-
-// ---- Icons ----------------------------------------------------------------
-
-function SendIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path
-        d="M8 13V3M8 3L4 7M8 3L12 7"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ClipIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M21 11.5l-8.5 8.5a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.67 3.67 0 015.19 5.19l-9.2 9.19a1.83 1.83 0 01-2.59-2.59L14.5 7"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function CameraIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M4 8h3l2-2h6l2 2h3a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1V9a1 1 0 011-1z"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinejoin="round"
-      />
-      <circle cx="12" cy="13" r="3.5" stroke="currentColor" strokeWidth="1.6" />
-    </svg>
-  );
-}
-
-function PhotoIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.6" />
-      <circle cx="9" cy="10" r="1.5" fill="currentColor" />
-      <path
-        d="M3 17l5-5 4 4 3-3 6 6"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function FileIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinejoin="round"
-      />
-      <path d="M14 3v5h5" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function TextIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function CloseIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path
-        d="M4 4l8 8M12 4l-8 8"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-

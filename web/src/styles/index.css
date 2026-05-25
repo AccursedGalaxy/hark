@@ -1,33 +1,13 @@
-/* Style entrypoint.
+/* hark — session manager (design system from Claude Design handoff)
  *
- * Architecture:
- *   tokens.css           — semantic primitives (space, radius, type, motion)
- *   themes/*.css         — colour palettes; switched by [data-theme] on <html>
- *   base.css             — resets, body, scrollbars, focus ring
- *   markdown.css         — `.md` rendered-markdown styles
- *   components/*.css     — one file per major UI area
- *
- * To add a new theme: copy themes/dark.css, rename, change colour values only.
- * To restyle a component: edit just that file. Tokens prevent drift.
+ * Single stylesheet:
+ *   - design.css   : the design's tokens, layout, sidebar, topbar, transcript,
+ *                    tool capsules, question card, composer, context rail.
+ *   - extras.css   : features the design doesn't include (slash menu,
+ *                    attachments, paste dialog, drop overlay, prompt-panel
+ *                    variants, trust prompt, mobile switcher, etc.)
+ *   - markdown.css : assistant-text markdown styling
  */
-
-@import "./tokens.css";
-@import "./themes/dark.css";
-@import "./themes/light.css";
-@import "./base.css";
+@import "./design.css";
 @import "./markdown.css";
-
-@import "./components/app.css";
-@import "./components/rail.css";
-@import "./components/switcher.css";
-@import "./components/session.css";
-@import "./components/transcript.css";
-@import "./components/tool-call.css";
-@import "./components/tasklist.css";
-@import "./components/composer.css";
-@import "./components/slash-menu.css";
-@import "./components/perm-card.css";
-@import "./components/prompt-panel.css";
-@import "./components/trust-prompt.css";
-@import "./components/theme-toggle.css";
-@import "./components/status-orb.css";
+@import "./extras.css";

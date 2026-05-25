@@ -104,6 +104,10 @@ interface Args {
   meta?: ToolResultMeta;
   isError?: boolean;
   hasResult: boolean;
+  // Subject of the task this call refers to, looked up from the session's
+  // running TaskCreate→TaskUpdate state. Lets TaskUpdate rows say *what*
+  // changed, not just `Task #N`.
+  taskSubject?: string;
 }
 
 export function summarizeToolUse({
@@ -112,6 +116,7 @@ export function summarizeToolUse({
   meta,
   hasResult,
   isError,
+  taskSubject,
 }: Args): ToolSummary {
   const obj = (input && typeof input === "object")
     ? (input as Record<string, unknown>)
@@ -305,8 +310,14 @@ export function summarizeToolUse({
       const change = readStatusChange(meta);
       const updatedSubject =
         typeof obj.subject === "string" ? obj.subject : undefined;
-      const label = updatedSubject
-        ? `#${taskId} → ${truncate(updatedSubject)}`
+      // Prefer a subject rename from the input (the model intentionally
+      // chose new wording); fall back to the looked-up subject from state
+      // so a status-only update still tells the reader what task it is.
+      const subjectForLabel = updatedSubject ?? taskSubject;
+      const label = subjectForLabel
+        ? taskId
+          ? `#${taskId} ${updatedSubject ? "→" : "·"} ${truncate(subjectForLabel)}`
+          : truncate(subjectForLabel)
         : taskId
           ? `Task #${taskId}`
           : "Task update";
@@ -320,9 +331,9 @@ export function summarizeToolUse({
               : change.to === "deleted"
                 ? "bad"
                 : "warn";
-        badges.push({ text: `${change.from} → ${change.to}`, tone });
+        badges.push({ text: `→ ${shortStatus(change.to)}`, tone });
       } else if (typeof obj.status === "string") {
-        badges.push({ text: String(obj.status), tone: "info" });
+        badges.push({ text: shortStatus(String(obj.status)), tone: "info" });
       }
       return {
         tone: "task",
@@ -422,6 +433,97 @@ function hostFromUrl(url: string): string {
   } catch {
     return truncate(url, 40);
   }
+}
+
+// Compact status label for Task badges so they don't crowd the capsule head.
+// Maps Claude Code's snake_case statuses to short display strings.
+function shortStatus(s: string): string {
+  switch (s) {
+    case "in_progress":
+      return "doing";
+    case "completed":
+      return "done";
+    case "pending":
+      return "pending";
+    case "deleted":
+      return "deleted";
+    default:
+      return s;
+  }
+}
+
+// Compact one-line summary for an inline Task* row (rendered instead of
+// the expandable capsule). Returns the text after the icon — the caller
+// adds the glyph. Examples:
+//   `+ new · Research all Claude Code prompts`
+//   `→ done · Wire task list panel`
+//   `→ doing · #3`
+//   `renamed · New subject`
+//   `removed · Old task`
+export interface TaskUpdateLine {
+  /** Tone hint so the caller can colour the arrow/verb. */
+  tone: "good" | "bad" | "info" | "warn";
+  /** The text shown after the icon. */
+  text: string;
+}
+
+export function summarizeTaskCreate(args: {
+  input: unknown;
+}): TaskUpdateLine {
+  const obj =
+    args.input && typeof args.input === "object"
+      ? (args.input as Record<string, unknown>)
+      : {};
+  const subject =
+    typeof obj.subject === "string" && obj.subject.length > 0
+      ? truncate(obj.subject)
+      : "task";
+  return { tone: "info", text: `+ new · ${subject}` };
+}
+
+export function summarizeTaskUpdate(args: {
+  input: unknown;
+  meta?: ToolResultMeta;
+  taskSubject?: string;
+}): TaskUpdateLine {
+  const obj =
+    args.input && typeof args.input === "object"
+      ? (args.input as Record<string, unknown>)
+      : {};
+  const taskId = typeof obj.taskId === "string" ? obj.taskId : "";
+  const renamedSubject =
+    typeof obj.subject === "string" && obj.subject.length > 0
+      ? obj.subject
+      : undefined;
+  const change = readStatusChange(args.meta);
+  const status =
+    change?.to ??
+    (typeof obj.status === "string" ? obj.status : undefined);
+
+  const idTag = taskId ? `#${taskId}` : "";
+  const subject = renamedSubject ?? args.taskSubject;
+  // "#3 Wire task list" — id is shown only when we don't also have a
+  // subject from state (otherwise the subject is enough to identify it).
+  const ref = subject
+    ? truncate(subject)
+    : idTag || "task";
+
+  if (status === "deleted") {
+    return { tone: "bad", text: `removed · ${ref}` };
+  }
+  if (status === "completed") {
+    return { tone: "good", text: `→ done · ${ref}` };
+  }
+  if (status === "in_progress") {
+    return { tone: "info", text: `→ doing · ${ref}` };
+  }
+  if (status === "pending") {
+    return { tone: "warn", text: `→ pending · ${ref}` };
+  }
+  if (renamedSubject) {
+    return { tone: "info", text: `renamed · ${truncate(renamedSubject)}` };
+  }
+  return { tone: "info", text: `updated · ${ref}` };
 }
 
 // Status: running (no result yet), good (result ok), bad (result error),

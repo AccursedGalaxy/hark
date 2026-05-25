@@ -1,11 +1,16 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { fetchRecentSpawnDirs, spawnSession } from "../lib/transport";
 
-// Compact +New control. Collapsed: a single button. Expanded: a cwd input + Go.
-// The server expands `~` and validates the path, so we can pass user input
-// through verbatim.
-export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
-  const [open, setOpen] = useState(false);
+export function NewSessionButton({
+  inline,
+  onSpawned,
+  onCancel,
+}: {
+  inline?: boolean;
+  onSpawned: () => void;
+  onCancel?: () => void;
+}) {
+  const [open, setOpen] = useState(!!inline);
   const [cwd, setCwd] = useState("~");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -16,15 +21,17 @@ export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    // Fetch fresh suggestions each time the form opens — live cwds change as
-    // sessions come and go, and the user may have spawned from another device.
     void fetchRecentSpawnDirs().then(setSuggestions).catch(() => {});
   }, [open]);
 
   const close = () => {
-    setOpen(false);
     setErr(null);
     setCwd("~");
+    if (inline) {
+      onCancel?.();
+    } else {
+      setOpen(false);
+    }
   };
 
   const go = async () => {
@@ -35,7 +42,7 @@ export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
     try {
       await spawnSession(trimmed);
       onSpawned();
-      close();
+      if (!inline) setOpen(false);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "spawn failed");
     } finally {
@@ -43,11 +50,11 @@ export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
     }
   };
 
-  if (!open) {
+  if (!open && !inline) {
     return (
       <button
         type="button"
-        className="rail-new"
+        className="btn"
         onClick={() => setOpen(true)}
         title="Spawn a new Claude session in a tmux window"
       >
@@ -84,7 +91,7 @@ export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
       <div className="rail-new-actions">
         <button
           type="button"
-          className="btn btn-primary"
+          className="btn primary"
           onClick={() => void go()}
           disabled={busy || !cwd.trim()}
         >
@@ -92,7 +99,7 @@ export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
         </button>
         <button
           type="button"
-          className="btn btn-ghost"
+          className="btn ghost"
           onClick={close}
           disabled={busy}
         >

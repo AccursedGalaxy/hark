@@ -5,17 +5,28 @@ import type {
   TranscriptEvent,
 } from "../lib/protocol";
 import { indexToolResults } from "../lib/protocol";
+import { reduceTaskState } from "../lib/taskState";
+import {
+  summarizeTaskCreate,
+  summarizeTaskUpdate,
+  type TaskUpdateLine,
+} from "../lib/toolFormat";
+import { ChevIcon, ListIcon } from "./icons";
 import { Markdown } from "./Markdown";
-import { OrphanToolResult, ToolCall } from "./ToolCall";
+import { ToolCapsule } from "./ToolCapsule";
 
 export function Transcript({
   events,
   loading,
   error,
+  pendingKind,
+  onJumpToQuestion,
 }: {
   events: TranscriptEvent[];
   loading: boolean;
   error: string | null;
+  pendingKind: string | null;
+  onJumpToQuestion: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -35,10 +46,7 @@ export function Transcript({
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [events]);
 
-  // Build a tool_use_id -> tool_result lookup once per render. Used to:
-  //   (a) fuse each tool_use block with its result inside the assistant row
-  //   (b) skip rendering top-level tool_result events claimed by a pairing
-  const { resultsById, claimedIds } = useMemo(() => {
+  const { resultsById, claimedIds, taskSubjectsById } = useMemo(() => {
     const resultsById = indexToolResults(events);
     const claimedIds = new Set<string>();
     for (const ev of events) {
@@ -49,18 +57,17 @@ export function Transcript({
         }
       }
     }
-    return { resultsById, claimedIds };
+    // Reduce the full event stream into the current TaskCreate/TaskUpdate
+    // list so per-call capsules can show the *subject* of the task they
+    // touched, not just `Task #N`. Reusing the same reducer the panel
+    // above uses keeps the two views in lock-step.
+    const taskSubjectsById = new Map<string, string>();
+    for (const t of reduceTaskState(events).tasks) {
+      taskSubjectsById.set(t.id, t.subject);
+    }
+    return { resultsById, claimedIds, taskSubjectsById };
   }, [events]);
 
-  // Pre-pass: derive what each event renders to. Two responsibilities:
-  //   1. Drop assistant events whose blocks are all empty (Claude Code
-  //      sometimes writes a `thinking: ""` row before the real one).
-  //   2. Merge consecutive assistant entries into one visual turn — the
-  //      JSONL splits a logical turn into multiple lines (thinking, then
-  //      tool_use, sometimes also text) and we want one "claude" label per
-  //      turn, not one per line.
-  // Claimed tool_results render to nothing but don't break the assistant
-  // streak (visually they belong to the prior turn).
   const rows = useMemo(() => {
     const out: { ev: TranscriptEvent; showWho: boolean }[] = [];
     let prevWasAssistant = false;
@@ -71,10 +78,7 @@ export function Transcript({
         prevWasAssistant = true;
         continue;
       }
-      if (ev.kind === "tool_result" && claimedIds.has(ev.toolUseId)) {
-        // Don't emit a row, and don't break the assistant streak.
-        continue;
-      }
+      if (ev.kind === "tool_result" && claimedIds.has(ev.toolUseId)) continue;
       out.push({ ev, showWho: true });
       prevWasAssistant = false;
     }
@@ -95,25 +99,54 @@ export function Transcript({
     );
   }
 
+  const lastQuestionText = pendingKind === "ask_user_question"
+    ? "Claude is asking — jump to question"
+    : pendingKind === "exit_plan_mode"
+      ? "Plan is ready — review and approve"
+      : pendingKind === "tool_permission"
+        ? "Permission requested"
+        : pendingKind === "elicitation"
+          ? "Form requested"
+          : null;
+
   return (
     <div className="transcript" ref={ref} onScroll={onScroll}>
-      <div className="transcript-inner">
+      <div className="thread">
         {rows.map(({ ev, showWho }, i) => (
           <EventRow
             key={ev.uuid || `${ev.kind}-${i}`}
             ev={ev}
             showWho={showWho}
             resultsById={resultsById}
+            taskSubjectsById={taskSubjectsById}
           />
         ))}
+        {lastQuestionText && (
+          <button
+            type="button"
+            className="q-pointer"
+            onClick={onJumpToQuestion}
+          >
+            <span className="led"></span>
+            <span>
+              <span
+                className="lbl"
+                style={{ display: "block", marginBottom: 2 }}
+              >
+                Claude is asking
+              </span>
+              <span className="txt">{lastQuestionText}</span>
+            </span>
+            <span className="jump">
+              Jump to prompt <ChevIcon />
+            </span>
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
-// A block contributes to the visible row only if it has actual content.
-// Empty thinking/text blocks (Claude Code sometimes writes `thinking: ""`)
-// would otherwise produce a styled-but-empty `block-thinking` element.
 function hasVisibleBlocks(blocks: ContentBlock[]): boolean {
   return blocks.some((b) => {
     if (b.type === "text") return b.text.trim().length > 0;
@@ -127,17 +160,19 @@ function EventRow({
   ev,
   showWho,
   resultsById,
+  taskSubjectsById,
 }: {
   ev: TranscriptEvent;
   showWho: boolean;
   resultsById: Map<string, ToolResultEvent>;
+  taskSubjectsById: Map<string, string>;
 }) {
   switch (ev.kind) {
     case "user":
       return (
-        <div className="ev ev-user">
-          <div className="who">you</div>
-          <div className="bubble-user">{ev.text}</div>
+        <div className="turn user">
+          <span className="who">you</span>
+          <div className="bubble">{ev.text}</div>
         </div>
       );
     case "system":
@@ -147,14 +182,18 @@ function EventRow({
         <AssistantRow
           blocks={ev.blocks}
           resultsById={resultsById}
+          taskSubjectsById={taskSubjectsById}
           showWho={showWho}
         />
       );
     case "tool_result":
-      // Reaching this branch means the result is genuinely orphaned (no
-      // matching tool_use in the visible event window). Render a fallback
-      // card so nothing is silently dropped.
-      return <OrphanToolResult result={ev} />;
+      return (
+        <ToolCapsule
+          name={ev.toolName ?? "tool"}
+          result={ev}
+          standalone
+        />
+      );
     default:
       return null;
   }
@@ -163,9 +202,30 @@ function EventRow({
 function SystemRow({ text }: { text: string }) {
   const preview = text.length > 200 ? text.slice(0, 200) + "…" : text;
   return (
-    <div className="ev ev-system" title={text}>
-      <span className="system-label">system</span>
-      <span className="system-text">{preview}</span>
+    <div
+      style={{
+        display: "flex",
+        gap: 8,
+        alignItems: "center",
+        fontFamily: "var(--mono)",
+        fontSize: 11,
+        color: "var(--fg-3)",
+        padding: "4px 0",
+      }}
+      title={text}
+    >
+      <span
+        style={{
+          textTransform: "uppercase",
+          letterSpacing: "0.1em",
+          color: "var(--fg-4)",
+        }}
+      >
+        system
+      </span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {preview}
+      </span>
     </div>
   );
 }
@@ -173,20 +233,26 @@ function SystemRow({ text }: { text: string }) {
 function AssistantRow({
   blocks,
   resultsById,
+  taskSubjectsById,
   showWho,
 }: {
   blocks: ContentBlock[];
   resultsById: Map<string, ToolResultEvent>;
+  taskSubjectsById: Map<string, string>;
   showWho: boolean;
 }) {
   return (
-    <div className={`ev ev-assistant ${showWho ? "" : "is-cont"}`}>
-      {showWho && <div className="who">claude</div>}
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {showWho && (
+        <div className="assistant-marker">
+          <span className="av"></span> claude · sonnet
+        </div>
+      )}
       {blocks.map((b, i) => {
         if (b.type === "text") {
           if (b.text.trim().length === 0) return null;
           return (
-            <div key={i} className="assistant-text">
+            <div key={i} className="assistant-line has-md">
               <Markdown source={b.text} />
             </div>
           );
@@ -194,16 +260,73 @@ function AssistantRow({
         if (b.type === "thinking") {
           if (b.text.trim().length === 0) return null;
           return (
-            <div key={i} className="block-thinking">
+            <div key={i} className="assistant-thinking">
               {b.text}
             </div>
           );
         }
         if (b.type === "tool_use") {
-          return <ToolCall key={i} use={b} result={resultsById.get(b.id)} />;
+          // TaskCreate / TaskUpdate render as compact one-line rows (no
+          // expand toggle, no badges) — they're status churn the reader
+          // never needs to drill into; the task list panel above is the
+          // canonical view.
+          if (b.name === "TaskUpdate") {
+            return (
+              <TaskUpdateRow
+                key={i}
+                line={summarizeTaskUpdate({
+                  input: b.input,
+                  meta: resultsById.get(b.id)?.meta,
+                  taskSubject: lookupTaskSubject(b, taskSubjectsById),
+                })}
+              />
+            );
+          }
+          if (b.name === "TaskCreate") {
+            return (
+              <TaskUpdateRow
+                key={i}
+                line={summarizeTaskCreate({ input: b.input })}
+              />
+            );
+          }
+          return (
+            <ToolCapsule
+              key={i}
+              name={b.name}
+              input={b.input}
+              result={resultsById.get(b.id)}
+              taskSubject={lookupTaskSubject(b, taskSubjectsById)}
+            />
+          );
         }
         return null;
       })}
     </div>
   );
+}
+
+function TaskUpdateRow({ line }: { line: TaskUpdateLine }) {
+  return (
+    <div className={`task-update-row tone-${line.tone}`} title={line.text}>
+      <span className="glyph">
+        <ListIcon />
+      </span>
+      <span className="text">{line.text}</span>
+    </div>
+  );
+}
+
+// For TaskUpdate, find the subject of the task it's modifying. For
+// TaskCreate the subject is already in `input` so the formatter doesn't
+// need it from us.
+function lookupTaskSubject(
+  block: Extract<ContentBlock, { type: "tool_use" }>,
+  taskSubjectsById: Map<string, string>,
+): string | undefined {
+  if (block.name !== "TaskUpdate") return undefined;
+  const input = block.input as Record<string, unknown> | null | undefined;
+  const id = input && typeof input.taskId === "string" ? input.taskId : "";
+  if (!id) return undefined;
+  return taskSubjectsById.get(id);
 }

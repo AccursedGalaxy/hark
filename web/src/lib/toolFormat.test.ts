@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { summarizeToolUse } from "./toolFormat";
+import {
+  summarizeTaskCreate,
+  summarizeTaskUpdate,
+  summarizeToolUse,
+} from "./toolFormat";
 
 describe("summarizeToolUse — TaskCreate", () => {
   it("renders subject as the label and a `new task` badge", () => {
@@ -51,7 +55,7 @@ describe("summarizeToolUse — TaskUpdate", () => {
     expect(s.label).toBe("Task #3");
     const badge = (s.badges ?? [])[0];
     expect(badge).toBeDefined();
-    expect(badge.text).toBe("in_progress → completed");
+    expect(badge.text).toBe("→ done");
     expect(badge.tone).toBe("good");
   });
 
@@ -102,7 +106,7 @@ describe("summarizeToolUse — TaskUpdate", () => {
       input: { taskId: "1", status: "completed" },
       hasResult: false,
     });
-    expect(s.badges?.[0].text).toBe("completed");
+    expect(s.badges?.[0].text).toBe("done");
   });
 
   it("renders a subject rename as `#id → new subject`", () => {
@@ -112,5 +116,90 @@ describe("summarizeToolUse — TaskUpdate", () => {
       hasResult: false,
     });
     expect(s.label).toBe("#7 → Refined subject");
+  });
+
+  it("uses the looked-up subject so a status-only update still says what task", () => {
+    const s = summarizeToolUse({
+      name: "TaskUpdate",
+      input: { taskId: "3", status: "completed" },
+      meta: {
+        kind: "raw",
+        data: { statusChange: { from: "in_progress", to: "completed" } },
+      },
+      hasResult: true,
+      taskSubject: "Wire task list panel",
+    });
+    expect(s.label).toBe("#3 · Wire task list panel");
+    expect(s.badges?.[0].text).toBe("→ done");
+  });
+
+  it("prefers an input-side rename over the looked-up subject", () => {
+    const s = summarizeToolUse({
+      name: "TaskUpdate",
+      input: { taskId: "3", subject: "New name" },
+      hasResult: false,
+      taskSubject: "Old name",
+    });
+    expect(s.label).toBe("#3 → New name");
+  });
+});
+
+describe("summarizeTaskUpdate — inline row text", () => {
+  it("uses the looked-up subject and tones `→ done` for completed", () => {
+    const r = summarizeTaskUpdate({
+      input: { taskId: "1", status: "completed" },
+      meta: {
+        kind: "raw",
+        data: { statusChange: { from: "in_progress", to: "completed" } },
+      },
+      taskSubject: "Wire task list panel",
+    });
+    expect(r.tone).toBe("good");
+    expect(r.text).toBe("→ done · Wire task list panel");
+  });
+
+  it("falls back to `#id` when no subject is available", () => {
+    const r = summarizeTaskUpdate({
+      input: { taskId: "1", status: "in_progress" },
+      meta: {
+        kind: "raw",
+        data: { statusChange: { from: "pending", to: "in_progress" } },
+      },
+    });
+    expect(r.tone).toBe("info");
+    expect(r.text).toBe("→ doing · #1");
+  });
+
+  it("renders deleted as `removed` with bad tone", () => {
+    const r = summarizeTaskUpdate({
+      input: { taskId: "2", status: "deleted" },
+      taskSubject: "Old task",
+    });
+    expect(r.tone).toBe("bad");
+    expect(r.text).toBe("removed · Old task");
+  });
+
+  it("renders a pure rename as `renamed · <new>`", () => {
+    const r = summarizeTaskUpdate({
+      input: { taskId: "1", subject: "New subject" },
+      taskSubject: "Old subject",
+    });
+    expect(r.tone).toBe("info");
+    expect(r.text).toBe("renamed · New subject");
+  });
+});
+
+describe("summarizeTaskCreate — inline row text", () => {
+  it("renders the subject after a `+ new · ` prefix", () => {
+    const r = summarizeTaskCreate({
+      input: { subject: "Research all Claude Code prompts" },
+    });
+    expect(r.tone).toBe("info");
+    expect(r.text).toBe("+ new · Research all Claude Code prompts");
+  });
+
+  it("falls back to `task` when no subject is provided", () => {
+    const r = summarizeTaskCreate({ input: {} });
+    expect(r.text).toBe("+ new · task");
   });
 });

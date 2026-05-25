@@ -271,7 +271,7 @@ function Preview() {
             style={{
               fontSize: 13,
               fontWeight: 600,
-              color: "var(--muted)",
+              color: "var(--fg-3)",
               textTransform: "uppercase",
               letterSpacing: "0.08em",
               marginBottom: 8,

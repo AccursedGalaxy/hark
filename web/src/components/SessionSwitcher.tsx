@@ -1,9 +1,13 @@
 import type { SessionView } from "../hooks/useSessions";
 import { sessionLabel } from "../lib/format";
-import { Dot } from "./Dot";
 
-// Mobile session switcher. Horizontal scroll if many sessions; pills stay
-// scannable up to ~5. Past that, swap for a slide-over of <SessionRail>.
+const STATE_TO_DOT: Record<string, string> = {
+  busy: "live",
+  wait: "waiting",
+  idle: "idle",
+  dead: "error",
+};
+
 export function SessionSwitcher({
   sessions,
   current,
@@ -24,11 +28,13 @@ export function SessionSwitcher({
           role="tab"
           type="button"
           aria-selected={s.sessionId === current}
-          className={`pill ${s.sessionId === current ? "is-active" : ""} ${s.needsAttention ? "is-attn" : ""}`}
+          className={`pill ${s.sessionId === current ? "is-active" : ""} ${
+            s.needsAttention ? "is-attn" : ""
+          }`}
           onClick={() => onPick(s.sessionId)}
         >
-          <Dot state={s.state} />
-          <span className="pill-text">{sessionLabel(s)}</span>
+          <span className={"dot " + (STATE_TO_DOT[s.state] ?? "idle")} />
+          <span>{sessionLabel(s)}</span>
         </button>
       ))}
     </div>
