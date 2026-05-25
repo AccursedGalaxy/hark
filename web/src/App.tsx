@@ -1,9 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Composer } from "./components/Composer";
 import { SessionHeader } from "./components/SessionHeader";
 import { SessionRail } from "./components/SessionRail";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { Transcript } from "./components/Transcript";
+import { TrustPrompt } from "./components/TrustPrompt";
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { useSessions } from "./hooks/useSessions";
 
@@ -58,6 +59,31 @@ export default function App() {
     if (first) setCurrent(first.sessionId);
   }, [wide, current, sessions, setCurrent]);
 
+  // If the currently-selected session disappears (closed externally, or a
+  // pending session got registered under a real UUID after a trust confirm),
+  // clear the selection so the auto-select effect above can pick a new one.
+  useEffect(() => {
+    if (!current) return;
+    if (sessions.length === 0) return;
+    if (!sessions.some((s) => s.sessionId === current)) setCurrent(null);
+  }, [current, sessions, setCurrent]);
+
+  // After trust confirm, follow the same claude PID to its newly-registered
+  // session (same process, fresh UUID). Otherwise the pending row vanishes
+  // and the user lands on whatever sessions[0] happens to be — likely the
+  // wrong place.
+  const [awaitingPid, setAwaitingPid] = useState<number | null>(null);
+  useEffect(() => {
+    if (awaitingPid === null) return;
+    const match = sessions.find(
+      (s) => s.pid === awaitingPid && s.kind !== "pending",
+    );
+    if (match) {
+      setCurrent(match.sessionId);
+      setAwaitingPid(null);
+    }
+  }, [awaitingPid, sessions, setCurrent]);
+
   const showRail = wide || !current;
   const showSession = wide || !!current;
 
@@ -106,24 +132,34 @@ export default function App() {
                 session={currentSession}
                 onBack={!wide ? () => setCurrent(null) : undefined}
               />
-              <Transcript
-                events={events}
-                loading={transcriptLoading}
-                error={transcriptError}
-              />
-              <Composer
-                disabled={!currentSession.hasTmuxPane}
-                disabledReason={
-                  !currentSession.hasTmuxPane
-                    ? "session not in tmux"
-                    : undefined
-                }
-                errorMessage={sendError}
-                promptKind={currentPromptKind}
-                pendingPermission={currentPendingPermission}
-                onSend={send}
-                onUpload={upload}
-              />
+              {currentSession.kind === "pending" ? (
+                <TrustPrompt
+                  session={currentSession}
+                  onSend={send}
+                  onTrustConfirmed={setAwaitingPid}
+                />
+              ) : (
+                <>
+                  <Transcript
+                    events={events}
+                    loading={transcriptLoading}
+                    error={transcriptError}
+                  />
+                  <Composer
+                    disabled={!currentSession.hasTmuxPane}
+                    disabledReason={
+                      !currentSession.hasTmuxPane
+                        ? "session not in tmux"
+                        : undefined
+                    }
+                    errorMessage={sendError}
+                    promptKind={currentPromptKind}
+                    pendingPermission={currentPendingPermission}
+                    onSend={send}
+                    onUpload={upload}
+                  />
+                </>
+              )}
             </>
           ) : (
             <div className="empty">

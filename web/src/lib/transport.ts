@@ -115,6 +115,13 @@ export interface SpawnResponse {
   createdSession: boolean;
 }
 
+export async function fetchRecentSpawnDirs(): Promise<string[]> {
+  const r = await fetch("/api/spawn/recent");
+  if (!r.ok) return [];
+  const data = (await r.json()) as { dirs?: string[] };
+  return Array.isArray(data.dirs) ? data.dirs : [];
+}
+
 export async function spawnSession(cwd: string): Promise<SpawnResponse> {
   const r = await fetch("/api/sessions/new", {
     method: "POST",

@@ -182,5 +182,59 @@ describe("HookState", () => {
       expect(snap.needsAttention).toBe(false);
       expect(snap.pendingPermission).toBeUndefined();
     });
+
+    it("drops pendingPermission when a Stop hook arrives next", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "npm test" },
+      });
+      // Stop fires only once Claude's turn is over — which it can't be
+      // while a permission is pending — so any prior permission was
+      // resolved (typically by the user typing 1/2 in the CLI).
+      state.record({ session_id: "s1", hook_event_name: "Stop" });
+      expect(state.snapshot().s1.pendingPermission).toBeUndefined();
+    });
+
+    it("drops pendingPermission on an idle_prompt Notification", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      state.record({
+        session_id: "s1",
+        hook_event_name: "Notification",
+        notification_type: "idle_prompt",
+      });
+      expect(state.snapshot().s1.pendingPermission).toBeUndefined();
+    });
+
+    it("captures transcript_path for the resolver, off the wire", () => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+        transcript_path: "/tmp/sess.jsonl",
+      });
+      // Not on the broadcast — only addressable through the sidecar getter.
+      expect((ev.pendingPermission as Record<string, unknown>).transcriptPath).toBeUndefined();
+      expect(state.pendingTranscriptPath("s1")).toBe("/tmp/sess.jsonl");
+    });
+
+    it("forgets the transcript path once pending state clears", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+        transcript_path: "/tmp/sess.jsonl",
+      });
+      state.record({ session_id: "s1", hook_event_name: "Stop" });
+      expect(state.pendingTranscriptPath("s1")).toBeUndefined();
+    });
   });
 });

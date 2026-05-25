@@ -122,42 +122,64 @@ export function useSessions(): SessionsApi {
     return () => clearInterval(id);
   }, [refresh]);
 
-  // Subscribe to the hook-attention SSE stream. Also used as our liveness signal.
+  // Subscribe to the hook-attention SSE stream. Also used as our liveness
+  // signal. We re-open the stream on every visibility return to force a
+  // fresh snapshot: mobile browsers suspend backgrounded SSE connections
+  // and missed events aren't replayed, so a long-suspended tab can be
+  // sitting on stale state (e.g., a permission the user already resolved
+  // on desktop). Reconnecting yields a clean snapshot from the server.
   useEffect(() => {
-    const close = openHookStream({
-      onOpen: () => setConnected(true),
-      onError: () => setConnected(false),
-      onSnapshot: (snap) => {
-        const next: Record<string, AttentionInfo> = {};
-        for (const [sid, v] of Object.entries(snap)) {
-          next[sid] = {
-            needsAttention: !!v.needsAttention,
-            lastEvent: v.lastEvent,
-            lastEventAt: v.lastEventAt,
-            message: v.message,
-            notificationType: v.notificationType,
-            pendingPermission: v.pendingPermission,
-          };
-        }
-        setAttention(next);
-        setConnected(true);
-      },
-      onHook: (ev) => {
-        setAttention((prev) => ({
-          ...prev,
-          [ev.sessionId]: {
-            needsAttention: !!ev.needsAttention,
-            lastEvent: ev.lastEvent,
-            lastEventAt: ev.lastEventAt,
-            message: ev.message,
-            notificationType: ev.notificationType,
-            pendingPermission: ev.pendingPermission,
-          },
-        }));
-      },
-    });
-    return close;
-  }, []);
+    let close: (() => void) | null = null;
+    const open = () => {
+      close?.();
+      close = openHookStream({
+        onOpen: () => setConnected(true),
+        onError: () => setConnected(false),
+        onSnapshot: (snap) => {
+          const next: Record<string, AttentionInfo> = {};
+          for (const [sid, v] of Object.entries(snap)) {
+            next[sid] = {
+              needsAttention: !!v.needsAttention,
+              lastEvent: v.lastEvent,
+              lastEventAt: v.lastEventAt,
+              message: v.message,
+              notificationType: v.notificationType,
+              pendingPermission: v.pendingPermission,
+            };
+          }
+          setAttention(next);
+          setConnected(true);
+        },
+        onHook: (ev) => {
+          setAttention((prev) => ({
+            ...prev,
+            [ev.sessionId]: {
+              needsAttention: !!ev.needsAttention,
+              lastEvent: ev.lastEvent,
+              lastEventAt: ev.lastEventAt,
+              message: ev.message,
+              notificationType: ev.notificationType,
+              pendingPermission: ev.pendingPermission,
+            },
+          }));
+        },
+      });
+    };
+    open();
+
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      // Snapshot reopen for SSE liveness; refresh() so the polled session
+      // list also catches up (it carries pendingPermission and status).
+      open();
+      refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      close?.();
+    };
+  }, [refresh]);
 
   const sessions = useMemo(() => {
     const merged = rawSessions.map((s) => applyAttention(s, attention[s.sessionId]));
@@ -252,6 +274,19 @@ export function useSessions(): SessionsApi {
       onEvent: (ev) => {
         if (cancelled) return;
         setEvents((prev) => [...prev, ev]);
+        // External resolution: any new transcript event newer than the
+        // pending permission means the user already answered the prompt
+        // somewhere else (e.g., typing 1 in the CLI). Bumping resolvedAt
+        // hides Approve/Deny immediately instead of waiting for the
+        // server-side broadcast — which fires from the same signal but
+        // takes a round-trip.
+        const tsMs = Date.parse(ev.ts ?? "");
+        if (Number.isFinite(tsMs)) {
+          setResolvedAt((prev) => {
+            const cur = prev[sessionId] ?? 0;
+            return tsMs > cur ? { ...prev, [sessionId]: tsMs } : prev;
+          });
+        }
       },
     });
 

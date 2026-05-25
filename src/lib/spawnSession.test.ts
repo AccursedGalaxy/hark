@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildLoginShellCommand,
   buildNewSessionArgs,
   buildNewWindowArgs,
   parseSessionRows,
@@ -53,6 +54,26 @@ describe("parseSessionRows", () => {
 
   it("returns an empty array when tmux has no sessions", () => {
     expect(parseSessionRows("")).toEqual([]);
+  });
+});
+
+describe("buildLoginShellCommand", () => {
+  it("wraps the command in a login-shell invocation so PATH from .zshrc/.bash_profile is loaded", () => {
+    expect(buildLoginShellCommand("claude", "/usr/bin/zsh")).toBe(
+      "exec /usr/bin/zsh -ilc 'exec claude'",
+    );
+  });
+
+  it("preserves flags on the inner command", () => {
+    expect(
+      buildLoginShellCommand("claude --resume abc123", "/bin/bash"),
+    ).toBe("exec /bin/bash -ilc 'exec claude --resume abc123'");
+  });
+
+  it("safely escapes single quotes in the inner command", () => {
+    expect(buildLoginShellCommand("echo 'hi'", "/bin/sh")).toBe(
+      "exec /bin/sh -ilc 'exec echo '\\''hi'\\'''",
+    );
   });
 });
 

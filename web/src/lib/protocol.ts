@@ -6,7 +6,10 @@
 // ---- Sessions ----
 
 export type SessionStatus = "busy" | "idle" | string;
-export type SessionKind = "interactive" | "bg" | string;
+// "pending" = a `claude` process running in a tmux pane but not yet
+// registered with Claude Code (usually blocked on the trust dialog).
+// Synthesized by the server so the user can drive it from the rail.
+export type SessionKind = "interactive" | "bg" | "pending" | string;
 
 export interface PendingPermission {
   toolName: string;

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { spawnSession } from "../lib/transport";
+import { useEffect, useId, useRef, useState } from "react";
+import { fetchRecentSpawnDirs, spawnSession } from "../lib/transport";
 
 // Compact +New control. Collapsed: a single button. Expanded: a cwd input + Go.
 // The server expands `~` and validates the path, so we can pass user input
@@ -9,10 +9,16 @@ export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
   const [cwd, setCwd] = useState("~");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listId = useId();
 
   useEffect(() => {
-    if (open) inputRef.current?.focus();
+    if (!open) return;
+    inputRef.current?.focus();
+    // Fetch fresh suggestions each time the form opens — live cwds change as
+    // sessions come and go, and the user may have spawned from another device.
+    void fetchRecentSpawnDirs().then(setSuggestions).catch(() => {});
   }, [open]);
 
   const close = () => {
@@ -61,12 +67,20 @@ export function NewSessionButton({ onSpawned }: { onSpawned: () => void }) {
         autoCapitalize="off"
         autoCorrect="off"
         disabled={busy}
+        list={listId}
         onChange={(e) => setCwd(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") void go();
           else if (e.key === "Escape") close();
         }}
       />
+      {suggestions.length > 0 && (
+        <datalist id={listId}>
+          {suggestions.map((d) => (
+            <option key={d} value={d} />
+          ))}
+        </datalist>
+      )}
       <div className="rail-new-actions">
         <button
           type="button"

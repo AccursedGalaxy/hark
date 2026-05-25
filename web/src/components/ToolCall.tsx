@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ContentBlock, ToolResultEvent } from "../lib/protocol";
 import { TR_CHAR_LIMIT, TR_LINE_LIMIT } from "../lib/format";
 import {
@@ -32,8 +32,65 @@ export function ToolCall({ use, result }: Props) {
     if (canExpand) setOpen((v) => !v);
   };
 
+  // When the user opens a capsule near the bottom of the transcript, the
+  // expanded body grows down behind the composer. Once the expand animation
+  // finishes, nudge the transcript up just enough that the capsule's bottom
+  // sits at the bottom of the viewport — no manual scroll required.
+  // (`block: "end"`-style behavior, but only when actually overflowing, so
+  // a fully-visible capsule never shifts.)
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Don't run on the first render — `status === "bad"` auto-opens errors and
+  // we shouldn't jerk the page on initial load.
+  const didMount = useRef(false);
+  useEffect(() => {
+    if (!didMount.current) {
+      didMount.current = true;
+      return;
+    }
+    if (!open) return;
+    const el = rootRef.current;
+    if (!el) return;
+    const scroller = el.closest(".transcript") as HTMLElement | null;
+    if (!scroller) return;
+    const wrap = el.querySelector(".tc-body-wrap") as HTMLElement | null;
+
+    const nudge = () => {
+      const elRect = el.getBoundingClientRect();
+      const sRect = scroller.getBoundingClientRect();
+      // Slack so the bottom edge isn't flush against the composer line.
+      const PAD = 12;
+      const overflow = elRect.bottom - (sRect.bottom - PAD);
+      if (overflow > 0) {
+        scroller.scrollBy({ top: overflow, behavior: "smooth" });
+      }
+    };
+
+    // Wait for the grid-template-rows transition on .tc-body-wrap so the
+    // measurement reflects the fully-expanded height. Fall back to a
+    // timeout in case the event doesn't fire (some browsers swallow
+    // transitionend for grid tracks under specific conditions).
+    let fired = false;
+    const onEnd = (e: TransitionEvent) => {
+      if (e.propertyName !== "grid-template-rows") return;
+      if (fired) return;
+      fired = true;
+      nudge();
+    };
+    wrap?.addEventListener("transitionend", onEnd);
+    const fallback = window.setTimeout(() => {
+      if (fired) return;
+      fired = true;
+      nudge();
+    }, 220);
+    return () => {
+      wrap?.removeEventListener("transitionend", onEnd);
+      window.clearTimeout(fallback);
+    };
+  }, [open]);
+
   return (
     <div
+      ref={rootRef}
       className={`tc tone-${summary.tone} status-${status} ${open ? "is-open" : ""}`}
       data-open={open}
     >

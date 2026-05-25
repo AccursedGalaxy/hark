@@ -4,15 +4,21 @@
 .md {
   color: var(--text);
   font-size: var(--font-md);
-  line-height: 1.6;
+  line-height: 1.55;
 }
 
+/* Gap between adjacent blocks. Sized so it reads as a true blank line at the
+ * .md font-size + line-height, not just a tighter line break — without this
+ * paragraphs collapse into a wall. */
 .md > * + * {
-  margin-top: var(--space-3);
+  margin-top: var(--space-5);
 }
 
 .md p {
   margin: 0;
+}
+.md p + p {
+  margin-top: var(--space-5);
 }
 
 .md h1,
@@ -128,5 +134,8 @@
 
 /* Tight variant for places where vertical rhythm matters less. */
 .md.md-tight > * + * {
+  margin-top: var(--space-2);
+}
+.md.md-tight p + p {
   margin-top: var(--space-2);
 }

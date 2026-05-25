@@ -89,7 +89,9 @@ export function Transcript({
   }
   if (events.length === 0) {
     return (
-      <div className="transcript transcript-empty">No transcript yet.</div>
+      <div className="transcript transcript-empty">
+        Start typing to begin the conversation.
+      </div>
     );
   }
 

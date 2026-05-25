@@ -12,6 +12,16 @@ import {
 import { HookState, type HookBroadcast } from "./lib/hookState.js";
 import { resolveTmuxPaneForPid } from "./lib/pane.js";
 import { parseMultipart } from "./lib/parseMultipart.js";
+import {
+  listPendingSessions,
+  parseSyntheticSessionId,
+  type PendingSession,
+} from "./lib/pendingSessions.js";
+import {
+  mergeSuggestions,
+  readRecentDirs,
+  recordSpawnedDir,
+} from "./lib/recentDirs.js";
 import { sendKey, sendLiteral, sendText } from "./lib/sendKeys.js";
 import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
@@ -112,6 +122,35 @@ async function findSession(sessionId: string): Promise<SessionFile | null> {
   return all.find((s) => s.sessionId === sessionId) ?? null;
 }
 
+// Resolve a session id (registered UUID or synthetic `pending-<pid>`) to the
+// tmux pane we should drive. Centralized so /send, /upload, /close all
+// transparently support pending sessions.
+interface ResolvedPane {
+  pane: { socket: string; paneId: string };
+  pid: number;
+  sessionId: string;
+  isPending: boolean;
+}
+async function resolveSessionPane(id: string): Promise<ResolvedPane | null> {
+  const pendingPid = parseSyntheticSessionId(id);
+  if (pendingPid !== null) {
+    if (!isAlive(pendingPid)) return null;
+    const pane = await resolveTmuxPaneForPid(pendingPid);
+    if (!pane) return null;
+    return { pane, pid: pendingPid, sessionId: id, isPending: true };
+  }
+  const session = await findSession(id);
+  if (!session) return null;
+  const pane = await resolveTmuxPaneForPid(session.pid);
+  if (!pane) return null;
+  return {
+    pane,
+    pid: session.pid,
+    sessionId: session.sessionId,
+    isPending: false,
+  };
+}
+
 async function findTranscriptPath(sessionId: string): Promise<string | null> {
   let projects: string[];
   try {
@@ -148,9 +187,14 @@ function broadcastHook(ev: HookBroadcast): void {
 }
 
 app.get("/api/sessions", async (_req, res) => {
-  const sessions = await listLiveSessions();
+  const [sessions, pending, paneLocations] = await Promise.all([
+    listLiveSessions(),
+    listPendingSessions(),
+    listPaneLocations(),
+  ]);
   const attention = hookState.snapshot();
-  const paneLocations = await listPaneLocations();
+  const registeredPids = new Set(sessions.map((s) => s.pid));
+
   const augmented = await Promise.all(
     sessions.map(async (s) => {
       const att = attention[s.sessionId];
@@ -171,7 +215,35 @@ app.get("/api/sessions", async (_req, res) => {
       };
     }),
   );
-  res.json({ sessions: augmented });
+
+  // Pending rows: claude processes waiting on Claude's trust dialog (or
+  // otherwise pre-init). Driving `1\r` from the rail lets the user clear
+  // the gate without having to switch to tmux.
+  const pendingRows = pending
+    .filter((p) => !registeredPids.has(p.pid))
+    .map((p) => {
+      const loc = paneLocations.get(p.paneId);
+      const now = Date.now();
+      return {
+        pid: p.pid,
+        sessionId: p.sessionId,
+        cwd: p.cwd,
+        startedAt: now,
+        updatedAt: now,
+        version: "",
+        kind: "pending" as const,
+        status: "idle" as const,
+        hasTmuxPane: true,
+        tmuxLocation: loc ? formatLocation(loc) : null,
+        tmuxWindowName: loc?.windowName ?? null,
+        needsAttention: true,
+        lastEvent: "Pending",
+        lastEventAt: now,
+        lastEventMessage: "Waiting for trust confirmation",
+      };
+    });
+
+  res.json({ sessions: [...augmented, ...pendingRows] });
 });
 
 app.post("/api/hook", (req, res) => {
@@ -204,8 +276,23 @@ app.get("/api/events", (req, res) => {
 });
 
 app.get("/api/sessions/:id/transcript", async (req, res) => {
+  // Pending sessions don't have a transcript yet — return an empty one so
+  // the UI shows the composer (where the user can type `1` to clear the
+  // trust gate) instead of a 404 error.
+  if (parseSyntheticSessionId(req.params.id) !== null) {
+    res.json({ events: [], offset: 0 });
+    return;
+  }
   const filePath = await findTranscriptPath(req.params.id);
   if (!filePath) {
+    // The session itself exists but hasn't written any events yet (fresh
+    // claude that just cleared its trust gate, or a session that hasn't
+    // produced output). Return an empty transcript so the UI shows a
+    // friendly "start typing" state instead of "transcript: 404".
+    if (await findSession(req.params.id)) {
+      res.json({ events: [], offset: 0 });
+      return;
+    }
     res.status(404).json({ error: "transcript not found" });
     return;
   }
@@ -214,8 +301,44 @@ app.get("/api/sessions/:id/transcript", async (req, res) => {
 });
 
 app.get("/api/sessions/:id/stream", async (req, res) => {
+  // Pending session: there's no transcript file yet, so keep the SSE open
+  // with just a `ready` event and heartbeat. When the user clears the trust
+  // gate, Claude will register a real session and the UI will reload under
+  // the actual UUID — at which point this stream gets torn down.
+  if (parseSyntheticSessionId(req.params.id) !== null) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    res.write(`event: ready\ndata: ${JSON.stringify({ offset: 0 })}\n\n`);
+    const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      res.end();
+    });
+    return;
+  }
+
   const filePath = await findTranscriptPath(req.params.id);
   if (!filePath) {
+    // Mirror the transcript endpoint: if the session is registered but its
+    // JSONL hasn't appeared yet, hold the stream open with ready+heartbeat
+    // rather than 404-looping the EventSource. Events that arrive later
+    // surface when the user re-selects the session (the file becomes
+    // visible on the next /transcript fetch).
+    if (await findSession(req.params.id)) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+      res.write(`event: ready\ndata: ${JSON.stringify({ offset: 0 })}\n\n`);
+      const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
+      req.on("close", () => {
+        clearInterval(heartbeat);
+        res.end();
+      });
+      return;
+    }
     res.status(404).json({ error: "transcript not found" });
     return;
   }
@@ -257,6 +380,7 @@ app.get("/api/sessions/:id/stream", async (req, res) => {
       );
       const tParsed = Date.now();
       offset = newOffset;
+      maybeResolvePendingPermission(req.params.id, events);
       for (const ev of events) {
         const tSse = Date.now();
         const payload = TIMING
@@ -305,16 +429,12 @@ function writeEvent(
 }
 
 app.post("/api/sessions/:id/send", async (req, res) => {
-  const session = await findSession(req.params.id);
-  if (!session) {
+  const resolved = await resolveSessionPane(req.params.id);
+  if (!resolved) {
     res.status(404).json({ error: "session not found" });
     return;
   }
-  const pane = await resolveTmuxPaneForPid(session.pid);
-  if (!pane) {
-    res.status(409).json({ error: "session not in tmux" });
-    return;
-  }
+  const { pane } = resolved;
 
   const body = req.body as {
     text?: string;
@@ -347,7 +467,7 @@ app.post("/api/sessions/:id/send", async (req, res) => {
       res.status(400).json({ error: "expected text, key, or attachments" });
       return;
     }
-    clearAttention(session.sessionId);
+    clearAttention(resolved.sessionId);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -355,8 +475,8 @@ app.post("/api/sessions/:id/send", async (req, res) => {
 });
 
 app.post("/api/sessions/:id/upload", async (req, res) => {
-  const session = await findSession(req.params.id);
-  if (!session) {
+  const resolved = await resolveSessionPane(req.params.id);
+  if (!resolved) {
     res.status(404).json({ error: "session not found" });
     return;
   }
@@ -374,7 +494,7 @@ app.post("/api/sessions/:id/upload", async (req, res) => {
       parsed.files.map((f) =>
         storeUpload({
           cacheRoot: uploadsRoot,
-          sessionId: session.sessionId,
+          sessionId: resolved.sessionId,
           originalName: f.filename,
           mime: f.mime,
           data: f.data,
@@ -393,19 +513,31 @@ app.post("/api/sessions/:id/attention/clear", (req, res) => {
 });
 
 app.post("/api/sessions/:id/close", async (req, res) => {
-  const session = await findSession(req.params.id);
-  if (!session) {
+  const resolved = await resolveSessionPane(req.params.id);
+  if (!resolved) {
     res.status(404).json({ error: "session not found" });
     return;
   }
   try {
+    // Pending sessions have no `.json` file yet, so pass null and skip the
+    // unlink — closeSession handles either case.
     const result = await closeSession(
-      session.pid,
-      sessionFilePathForPid(session.pid),
+      resolved.pid,
+      resolved.isPending ? null : sessionFilePathForPid(resolved.pid),
       closeSessionDeps,
     );
-    hookState.clear(session.sessionId);
+    hookState.clear(resolved.sessionId);
     res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/spawn/recent", async (_req, res) => {
+  try {
+    const liveCwds = (await listLiveSessions()).map((s) => s.cwd);
+    const recent = await readRecentDirs();
+    res.json({ dirs: mergeSuggestions(liveCwds, recent) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -432,6 +564,9 @@ app.post("/api/sessions/new", async (req, res) => {
       cwd,
       command: body.command,
     });
+    // Persist the user's spelling (raw) rather than the expanded absolute
+    // path — if they typed ~/foo, that's what they'll want to see next time.
+    void recordSpawnedDir(raw).catch(() => {});
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -446,12 +581,74 @@ function expandHome(p: string): string {
 
 function clearAttention(sessionId: string): void {
   const prev = hookState.get(sessionId);
-  if (!prev || !prev.needsAttention) return;
+  // Either condition is enough to do work. The pending-only branch covers
+  // weird sequences like PermissionRequest → Notification(auth_success),
+  // where `needsAttention` is already false but a stale pendingPermission
+  // is still hanging on and driving the UI.
+  if (!prev || (!prev.needsAttention && !prev.pendingPermission)) return;
   hookState.clear(sessionId);
   const next = hookState.get(sessionId);
   if (!next) return;
   broadcastHook({ sessionId, ...next });
 }
+
+// New transcript events arriving after a PermissionRequest mean the user
+// already resolved the prompt — typically by typing 1/2 in the CLI. The
+// hook stream gives us no explicit "resolved" signal, but the JSONL does:
+// tool_result (approve) or a fresh assistant turn (deny) lands with a
+// timestamp strictly after `pendingPermission.requestedAt`. Drop the
+// pending state so clients stop rendering Approve/Deny.
+function maybeResolvePendingPermission(
+  sessionId: string,
+  events: TranscriptEvent[],
+): void {
+  if (events.length === 0) return;
+  const att = hookState.get(sessionId);
+  const pp = att?.pendingPermission;
+  if (!pp) return;
+  for (const ev of events) {
+    const tsMs = Date.parse(ev.ts ?? "");
+    if (Number.isFinite(tsMs) && tsMs > pp.requestedAt) {
+      clearAttention(sessionId);
+      return;
+    }
+  }
+}
+
+// Periodic resolver. The fs.watch-based detection above only fires while a
+// client has an SSE transcript stream open — which on mobile is fragile
+// (the OS suspends backgrounded tabs and missed events aren't replayed).
+// This loop is the safety net: every tick, stat the transcript file for
+// any session with a pendingPermission and clear it once the file has
+// grown past the requestedAt. Independent of any client; bounds the
+// "stale Approve/Deny" window to the tick interval.
+const PERMISSION_RESOLVE_TICK_MS = 1500;
+// Small fudge so a transcript write that landed in the same millisecond as
+// the PermissionRequest (unlikely but possible on a fast machine) doesn't
+// instantly self-resolve. Real CLI approvals take humans seconds.
+const PERMISSION_RESOLVE_SKEW_MS = 50;
+
+async function resolveStaleFromTranscripts(): Promise<void> {
+  const snap = hookState.snapshot();
+  for (const [sessionId, att] of Object.entries(snap)) {
+    const pp = att.pendingPermission;
+    if (!pp) continue;
+    const path = hookState.pendingTranscriptPath(sessionId);
+    if (!path) continue;
+    try {
+      const stat = await fs.stat(path);
+      if (stat.mtimeMs > pp.requestedAt + PERMISSION_RESOLVE_SKEW_MS) {
+        clearAttention(sessionId);
+      }
+    } catch {
+      /* transcript missing or transiently unreadable — try again next tick */
+    }
+  }
+}
+
+setInterval(() => {
+  void resolveStaleFromTranscripts();
+}, PERMISSION_RESOLVE_TICK_MS).unref?.();
 
 app.use(express.static(path.join(__dirname, "..", "public")));
 

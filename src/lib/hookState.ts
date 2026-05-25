@@ -19,6 +19,14 @@ export type PendingPermission = {
   requestedAt: number;
 };
 
+// Server-only metadata tied to a session's pending permission. Kept off the
+// wire because the absolute transcript path is filesystem detail the web
+// client never needs — its only consumer is the periodic resolver that
+// detects CLI-side approval by stat'ing the transcript file.
+export type PendingMeta = {
+  transcriptPath?: string;
+};
+
 export type SessionAttention = {
   needsAttention: boolean;
   lastEvent: string;
@@ -43,6 +51,11 @@ const INFORMATIONAL_NOTIFICATION_TYPES = new Set([
 
 export class HookState {
   private readonly bySession = new Map<string, SessionAttention>();
+  // Server-only sidecar map. The transcript path is needed by the periodic
+  // resolver to detect that Claude has appended new events since the
+  // permission fired (i.e., the user already answered it in the CLI), but
+  // it never goes out on the SSE wire.
+  private readonly pendingMeta = new Map<string, PendingMeta>();
 
   record(input: HookEventInput): HookBroadcast {
     if (!input || typeof input.session_id !== "string" || !input.session_id) {
@@ -53,8 +66,8 @@ export class HookState {
 
     // PermissionRequest carries the tool detail. We treat it as a strong
     // "needs attention" signal even if no Notification arrives — and we
-    // preserve `pendingPermission` across subsequent Notification/Stop
-    // events so the UI doesn't lose the tool name mid-prompt.
+    // preserve `pendingPermission` across subsequent Notification events so
+    // the UI doesn't lose the tool name mid-prompt.
     if (input.hook_event_name === "PermissionRequest") {
       const pending: PendingPermission | undefined =
         typeof input.tool_name === "string"
@@ -73,8 +86,24 @@ export class HookState {
         pendingPermission: pending,
       };
       this.bySession.set(input.session_id, entry);
+      if (typeof input.transcript_path === "string" && input.transcript_path) {
+        this.pendingMeta.set(input.session_id, {
+          transcriptPath: input.transcript_path,
+        });
+      }
       return { sessionId: input.session_id, ...entry };
     }
+
+    // Stop and idle-prompt Notifications mean Claude's turn is over and
+    // it's idle / waiting for fresh user input — Claude can't reach those
+    // states while a permission is still pending, so any prior pending
+    // state must have been resolved (typically by the user answering 1/2
+    // directly in the CLI). Drop it so the web UI stops rendering
+    // Approve/Deny for a prompt that no longer exists.
+    const resolvesPending =
+      input.hook_event_name === "Stop" ||
+      (input.hook_event_name === "Notification" &&
+        input.notification_type === "idle_prompt");
 
     const informational =
       typeof input.notification_type === "string" &&
@@ -85,12 +114,10 @@ export class HookState {
       lastEventAt: now,
       message: input.message,
       notificationType: input.notification_type,
-      // Preserve any pendingPermission from an earlier PermissionRequest
-      // until the user acts (clear()) or a new PermissionRequest replaces
-      // it — Notification/Stop alone shouldn't drop the tool detail.
-      pendingPermission: prev?.pendingPermission,
+      pendingPermission: resolvesPending ? undefined : prev?.pendingPermission,
     };
     this.bySession.set(input.session_id, entry);
+    if (resolvesPending) this.pendingMeta.delete(input.session_id);
     return { sessionId: input.session_id, ...entry };
   }
 
@@ -102,10 +129,17 @@ export class HookState {
       needsAttention: false,
       pendingPermission: undefined,
     });
+    this.pendingMeta.delete(sessionId);
   }
 
   get(sessionId: string): SessionAttention | undefined {
     return this.bySession.get(sessionId);
+  }
+
+  // Used by the server's periodic resolver. Returns the transcript path
+  // that came in with the original PermissionRequest hook, if any.
+  pendingTranscriptPath(sessionId: string): string | undefined {
+    return this.pendingMeta.get(sessionId)?.transcriptPath;
   }
 
   snapshot(): Record<string, SessionAttention> {

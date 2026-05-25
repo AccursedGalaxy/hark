@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import os from "node:os";
 
 // Pure argv builders for the two tmux invocations we use. Kept separate from
 // the runner so the shape is easy to test without spawning processes.
@@ -7,6 +8,22 @@ export interface SpawnInput {
   sessionName: string;
   cwd: string;
   command: string;
+}
+
+// Build a shell-command that runs `claude` inside the user's login +
+// interactive shell so PATH from .zshrc / .bashrc is in effect. The pane
+// IS interactive (it's a TUI), so `-i` is correct here; without it, zsh
+// users whose PATH additions live in .zshrc (the common case) end up with
+// only `.zprofile`'s PATH and `claude` isn't found, causing the window
+// to auto-close on spawn.
+export function buildLoginShellCommand(
+  claudeCommand: string,
+  shell: string,
+): string {
+  // Single-quote the inner command and escape any embedded single quotes:
+  // ' → '\''. Keeps complex commands (e.g., `claude --resume <id>`) safe.
+  const escaped = claudeCommand.replace(/'/g, "'\\''");
+  return `exec ${shell} -ilc 'exec ${escaped}'`;
 }
 
 export function buildNewWindowArgs(input: SpawnInput): string[] {
@@ -118,7 +135,9 @@ export async function spawnClaudeSession(opts: {
   cwd: string;
   command?: string;
 }): Promise<SpawnResult> {
-  const command = opts.command ?? "claude";
+  const userShell = os.userInfo().shell || "/bin/sh";
+  const inner = opts.command ?? "claude";
+  const command = buildLoginShellCommand(inner, userShell);
   const sessions = await listSessions();
   const target = pickSpawnTarget(sessions);
 
