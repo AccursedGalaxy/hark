@@ -1012,6 +1012,47 @@
 .tweaks-label { color: var(--fg-1); font-size: 13px; }
 .tweaks-spacer { flex: 1; }
 
+/* ───── intermediate widths — main column ────────────
+   On tablet-sized viewports (e.g. iPad Pro portrait at 1024px) the app
+   stays in `is-wide` mode, but the 296px sidebar + 280px context rail
+   squeeze the main column to ~450px. The desktop topbar (crumbs +
+   status chip + meta + four icon buttons) overflows that. We progress-
+   ively hide secondary pieces using a container query on .main so the
+   fix is independent of which side rails are visible — the same rules
+   kick in whether the context rail is open, closed, or the viewport
+   just happens to be narrow. */
+.app.is-wide .main {
+  container-type: inline-size;
+  container-name: main;
+}
+
+@container main (max-width: 860px) {
+  /* Drop the parent-path crumb — keep just the last segment + branch
+     chip. Same idea as is-narrow, just triggered by the squeezed main
+     column rather than the viewport width. */
+  .topbar .crumbs > span:not(.here):not(.branch):not(.sep),
+  .topbar .crumbs > .sep { display: none; }
+  .topbar { gap: 10px; padding: 0 16px; }
+}
+
+@container main (max-width: 700px) {
+  /* Inline meta (`#abc · interactive · v1.2.158`) is the least useful
+     piece — the id is also shown in the context rail, and kind/version
+     are slow-changing. */
+  .topbar .topbar-meta { display: none; }
+}
+
+@container main (max-width: 560px) {
+  /* History / fork / share are placeholders for now — keep only the
+     close (.danger) button when the bar is this tight. */
+  .topbar > div:last-child > button:not(.danger) { display: none; }
+  .topbar .status-chip {
+    font-size: 10px;
+    padding: 4px 9px 4px 7px;
+    letter-spacing: 0.02em;
+  }
+}
+
 /* ───── narrow ─────────────────────────────────────── */
 .app.is-narrow .rail {
   border-right: 0;
