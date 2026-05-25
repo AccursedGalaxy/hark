@@ -105,7 +105,7 @@ export function TaskListPanel({ events, sessionId }: Props) {
                     {g.label} · {g.items.length}
                   </div>
                   {g.items.map((t) => (
-                    <div key={t.id} className={"task " + g.status}>
+                    <div key={t.id} className={"tasklist-task " + g.status}>
                       <span className="check">
                         {g.status === "done" && <CheckIcon />}
                       </span>

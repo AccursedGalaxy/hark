@@ -39,6 +39,14 @@ export interface TranscriptStreamOptions {
   // Tag included in TIMING log lines so concurrent streams can be told
   // apart. Defaults to "-".
   tag?: string;
+  // Byte offset to start streaming from. Defaults to the file's current
+  // size (tail-only — the normal case, where the client just fetched the
+  // historical transcript over /transcript). Set to 0 (or another value)
+  // when the caller knows the file's existing content hasn't been delivered
+  // yet — e.g. openLazyTranscriptStream upgrading after a brand-new
+  // session's JSONL appears, where fetchTranscript got an empty response
+  // because the file didn't exist at fetch time.
+  initialOffset?: number;
 }
 
 const DEFAULT_HEARTBEAT_MS = 15_000;
@@ -99,7 +107,16 @@ export function openLazyTranscriptStream(
       return;
     }
     try {
-      const real = await openTranscriptStream(filePath, writer, opts);
+      // initialOffset: 0 — the file just appeared and the fetchTranscript
+      // that the client ran while waiting for it returned empty. Start from
+      // the beginning so the first turn (user message + assistant init) is
+      // actually delivered; without this the user only sees what arrives
+      // after we attach the watcher, which on a fresh session means the
+      // assistant's reply but not their own prompt.
+      const real = await openTranscriptStream(filePath, writer, {
+        ...opts,
+        initialOffset: 0,
+      });
       if (closed) {
         real.close();
         return;
@@ -153,8 +170,13 @@ export async function openTranscriptStream(
     /* missing or transiently unreadable — start with an empty index */
   }
 
-  let offset = (await fs.stat(filePath)).size;
+  const fileSize = (await fs.stat(filePath)).size;
+  let offset = opts.initialOffset ?? fileSize;
   writer.event("ready", { offset });
+  // If the caller asked us to start before EOF, drain the gap up-front so the
+  // existing content is delivered as proper `event` frames (not just exposed
+  // by the next watch-fire, which only sees content written after attach).
+  const shouldPrime = offset < fileSize;
 
   const log = opts.log ?? ((line) => console.log(line));
   const tag = opts.tag ?? "-";
@@ -207,6 +229,11 @@ export async function openTranscriptStream(
     if (pendingWatchTs === null) pendingWatchTs = Date.now();
     void drain();
   });
+
+  if (shouldPrime) {
+    pendingWatchTs = Date.now();
+    void drain();
+  }
 
   const heartbeat = startHeartbeat(
     writer,

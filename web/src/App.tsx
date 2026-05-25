@@ -10,6 +10,7 @@ import { TrustPrompt } from "./components/TrustPrompt";
 import { TweaksPanel } from "./components/TweaksPanel";
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { useSessions } from "./hooks/useSessions";
+import { sessionLabel, tildeify } from "./lib/format";
 import { getContextRail, setContextRail } from "./lib/theme";
 
 const WIDE_QUERY = "(min-width: 880px)";
@@ -146,7 +147,14 @@ export default function App() {
               <TopBar
                 session={currentSession}
                 onBack={!wide ? () => setCurrent(null) : undefined}
-                onClose={() => void closeSession(currentSession.sessionId)}
+                onClose={() => {
+                  const label = sessionLabel(currentSession);
+                  const ok = window.confirm(
+                    `Close session "${label}"?\n\nThis terminates the Claude process in ${tildeify(currentSession.cwd)}.`,
+                  );
+                  if (!ok) return;
+                  void closeSession(currentSession.sessionId);
+                }}
               />
               {currentSession.kind === "pending" ? (
                 <TrustPrompt

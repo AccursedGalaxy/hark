@@ -1026,6 +1026,15 @@
   padding: 24px 14px 32px;
 }
 
+/* The sidebar's per-row close button is revealed on hover. On touch
+   devices that turns the first tap into a hover-activation (showing the
+   close button) instead of firing the row's click handler — so the user
+   has to tap twice to actually open the session. Hide it on narrow; the
+   TopBar's close button covers the same action once a session is open. */
+.app.is-narrow .session-close {
+  display: none;
+}
+
 /* ───── narrow — within-session layout ────────────────
    The session view (topbar + tasklist + transcript + composer) is the
    piece that suffers most on phones: the topbar gets cramped by a long
@@ -1070,8 +1079,9 @@
 }
 /* Inline session metadata (`#abc · interactive · v2`) and the
    history/fork/share buttons aren't useful on a phone — they only show
-   when there's room to spare. We keep the close button accessible via
-   the long-press session-close in the sidebar list. */
+   when there's room to spare. The trailing .danger close button stays
+   visible: it's the only way to close a session on narrow, since the
+   sidebar's per-row close button is hidden there. */
 .app.is-narrow .topbar .topbar-meta,
 .app.is-narrow .topbar .spacer {
   display: none;

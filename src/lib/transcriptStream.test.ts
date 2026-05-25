@@ -243,6 +243,43 @@ describe("openTranscriptStream", () => {
     expect((evt.data as { kind: string; uuid: string }).uuid).toBe("u1");
   });
 
+  it("openLazyTranscriptStream replays existing content when the file appears with bytes already in it", async () => {
+    // Regression for the fresh-session bug: a brand-new session's JSONL is
+    // often created with its first turn's lines already buffered (user
+    // message + assistant init) in one write. Without priming, the watching
+    // stream attaches at EOF and the first turn is silently dropped — the
+    // user sees the assistant's reply but never their own prompt.
+    const w = makeWriter();
+    const handle = openLazyTranscriptStream(
+      async () => {
+        try {
+          await fs.access(filePath);
+          return filePath;
+        } catch {
+          return null;
+        }
+      },
+      w,
+      { heartbeatMs: 0, pollMs: 20 },
+    );
+    handles.push(handle);
+
+    await fs.writeFile(
+      filePath,
+      userLine("u1", "first prompt") +
+        assistantToolUseLine("a1", "tool1", "Bash"),
+    );
+
+    await waitFor(
+      () => w.events.filter((e) => e.name === "event").length >= 2,
+      { timeoutMs: 2000 },
+    );
+    const uuids = w.events
+      .filter((e) => e.name === "event")
+      .map((e) => (e.data as { uuid: string }).uuid);
+    expect(uuids).toEqual(["u1", "a1"]);
+  });
+
   it("openLazyTranscriptStream close() while polling stops the upgrade", async () => {
     const w = makeWriter();
     let attempts = 0;

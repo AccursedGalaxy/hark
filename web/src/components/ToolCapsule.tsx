@@ -33,6 +33,14 @@ interface Props {
 // Tool capsule matching the design — led + glyph + label + diff pills,
 // click-to-expand body with summary + content.
 export function ToolCapsule({ name, input, result, standalone, taskSubject }: Props) {
+  // Subagent spawns get their own capsule variant — different silhouette
+  // (eyebrow + prominent task line + structured prompt/report sections)
+  // so they're scannable as "another agent did work here" rather than
+  // blending into the file-edit / shell-command stream.
+  if (name === "Agent" && !standalone) {
+    return <AgentCapsule input={input} result={result} />;
+  }
+
   const summary = summarizeToolUse({
     name,
     input,
@@ -87,6 +95,138 @@ export function ToolCapsule({ name, input, result, standalone, taskSubject }: Pr
       )}
     </div>
   );
+}
+
+// Dedicated capsule for Agent / subagent spawns. The collapsed head leads
+// with an eyebrow chip ("subagent · <type>") so the kind of delegate is
+// the first thing you read, with the description as the prominent task
+// line. The expanded body splits prompt (what we asked for) from report
+// (what the subagent returned) — same content the generic ToolBody would
+// dump as one blob, but sectioned so the report (the thing the reader
+// actually cares about) doesn't get lost above a 50-line prompt.
+function AgentCapsule({
+  input,
+  result,
+}: {
+  input?: unknown;
+  result?: ToolResultEvent;
+}) {
+  const obj = (input && typeof input === "object")
+    ? (input as Record<string, unknown>)
+    : {};
+  const sub = typeof obj.subagent_type === "string" ? obj.subagent_type : "agent";
+  const description =
+    typeof obj.description === "string" && obj.description.trim()
+      ? obj.description.trim()
+      : `subagent · ${sub}`;
+  const prompt =
+    typeof obj.prompt === "string" && obj.prompt.trim()
+      ? obj.prompt.trim()
+      : "";
+  const isolation = typeof obj.isolation === "string" ? obj.isolation : undefined;
+  const status = deriveStatus(result);
+  // Default expanded once we have a report so the user can read it without
+  // an extra click — the report is the whole point of having spawned this.
+  const [open, setOpen] = useState<boolean>(false);
+  const [promptOpen, setPromptOpen] = useState<boolean>(false);
+  const canExpand = !!result;
+
+  return (
+    <div
+      className={"tool agent " + statusToClass(status)}
+      data-open={open ? "true" : "false"}
+    >
+      <button
+        type="button"
+        className="tool-head agent-head"
+        onClick={() => canExpand && setOpen((v) => !v)}
+        disabled={!canExpand && status !== "running"}
+        aria-expanded={open}
+      >
+        <span className="led"></span>
+        <span className="glyph">
+          <AgentSpawnIcon />
+        </span>
+        <span className="agent-title">
+          <span className="agent-eyebrow">
+            subagent <span className="sep">·</span>
+            <span className="agent-type">{sub}</span>
+            {isolation && (
+              <>
+                <span className="sep">·</span>
+                <span className="agent-iso">{isolation}</span>
+              </>
+            )}
+          </span>
+          <span className="agent-desc">{description}</span>
+        </span>
+        <span className="tool-meta">
+          <AgentStatusBadge status={status} hasResult={!!result} isError={result?.isError} />
+        </span>
+        {canExpand && (
+          <span className="chev">
+            <ChevIcon />
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="tool-body agent-body">
+          {prompt && (
+            <div className="agent-section">
+              <button
+                type="button"
+                className="agent-section-head"
+                onClick={() => setPromptOpen((v) => !v)}
+                aria-expanded={promptOpen}
+              >
+                <span className="lbl">Prompt</span>
+                <span className="hint">
+                  {promptOpen ? "hide" : `show (${prompt.split("\n").length} lines)`}
+                </span>
+              </button>
+              {promptOpen && (
+                <div className="agent-prompt">
+                  <OutputBlock text={prompt} />
+                </div>
+              )}
+            </div>
+          )}
+          <div className="agent-section">
+            <div className="agent-section-head static">
+              <span className="lbl">Report</span>
+            </div>
+            {result ? (
+              <OutputBlock text={result.output} />
+            ) : (
+              <div className="tool-running">working…</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentStatusBadge({
+  status,
+  hasResult,
+  isError,
+}: {
+  status: ToolStatus;
+  hasResult: boolean;
+  isError: boolean | undefined;
+}) {
+  if (!hasResult) {
+    return <span className="diff-pill info">running</span>;
+  }
+  if (isError) {
+    return <span className="diff-pill del">failed</span>;
+  }
+  if (status === "warn") {
+    return <span className="diff-pill info">interrupted</span>;
+  }
+  return <span className="diff-pill add">done</span>;
 }
 
 function ToolBody({
@@ -257,8 +397,13 @@ function toneToClass(tone: ToolTone): string {
       return "web";
     case "search":
       return "search";
-    case "task":
     case "agent":
+      // Agent has its own tone (plum-tinted) distinct from task/skill (amber)
+      // so the subagent capsule reads as a different *kind* of work — a
+      // delegate doing its own loop — and isn't confused with TaskCreate /
+      // TaskUpdate or Skill invocations.
+      return "agent";
+    case "task":
     case "skill":
       return "task";
     default:
@@ -286,6 +431,7 @@ function ToolGlyph({ tone }: { tone: ToolTone }) {
     case "search":
       return <SearchIcon />;
     case "agent":
+      return <AgentSpawnIcon />;
     case "task":
       return <ListIcon />;
     case "skill":
@@ -293,4 +439,22 @@ function ToolGlyph({ tone }: { tone: ToolTone }) {
     default:
       return <SparkIcon />;
   }
+}
+
+// Subagent glyph — a small node branching to a second node, signaling
+// "this hands off to another agent." Lives here (not in icons.tsx)
+// because it's only used by Agent-toned capsules.
+function AgentSpawnIcon() {
+  return (
+    <svg
+      width="13" height="13" viewBox="0 0 24 24"
+      stroke-width="2" fill="none" stroke="currentColor"
+      stroke-linecap="round" stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="5" cy="6" r="2.2"></circle>
+      <circle cx="19" cy="18" r="2.2"></circle>
+      <path d="M7 7.5 Q 12 11 17 16.5"></path>
+    </svg>
+  );
 }

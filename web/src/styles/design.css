@@ -587,7 +587,14 @@ a { color: var(--accent); }
 .tasklist-body::-webkit-scrollbar { width: 8px; }
 .tasklist-body::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
 
-.task {
+/* Per-row item inside .tasklist-body. The bare `.task` selector used to
+   own this rule, but that also matched `.tool.task` on agent/skill tool
+   capsules (multi-class element) and clobbered their grid layout — the
+   capsule's grid took 18px/1fr/auto from here instead of the 18px/22px/
+   1fr/auto/auto declared on .tool-head, so the title cell collapsed to
+   0 and the whole capsule rendered as an empty 24px-wide stub. Keep
+   this class name distinct from anything that might co-occur. */
+.tasklist-task {
   display: grid;
   grid-template-columns: 18px 1fr auto;
   gap: 12px;
@@ -598,8 +605,8 @@ a { color: var(--accent); }
   color: var(--fg-1);
   transition: background .1s;
 }
-.task:hover { background: oklch(from var(--ink-2) l c h / 0.5); }
-.task .check {
+.tasklist-task:hover { background: oklch(from var(--ink-2) l c h / 0.5); }
+.tasklist-task .check {
   width: 16px; height: 16px;
   border-radius: 50%;
   border: 1.5px solid var(--line-strong);
@@ -608,29 +615,29 @@ a { color: var(--accent); }
   background: transparent;
   flex: none;
 }
-.task.done .check {
+.tasklist-task.done .check {
   background: var(--jade);
   border-color: var(--jade);
   color: oklch(0.18 0.012 250);
 }
-.task.done .label { color: var(--fg-3); text-decoration: line-through; text-decoration-color: var(--fg-4); }
-.task.now .check {
+.tasklist-task.done .label { color: var(--fg-3); text-decoration: line-through; text-decoration-color: var(--fg-4); }
+.tasklist-task.now .check {
   border-color: var(--accent);
   background: var(--accent-soft);
   position: relative;
 }
-.task.now .check::after {
+.tasklist-task.now .check::after {
   content: ""; width: 7px; height: 7px; border-radius: 50%;
   background: var(--accent);
   animation: pulse 1.4s ease-in-out infinite;
 }
-.task.now .label { color: var(--fg-0); font-weight: 500; }
-.task.todo .check { border-style: dashed; }
-.task .meta {
+.tasklist-task.now .label { color: var(--fg-0); font-weight: 500; }
+.tasklist-task.todo .check { border-style: dashed; }
+.tasklist-task .meta {
   font-family: var(--mono); font-size: 10.5px; color: var(--fg-3);
   display: flex; align-items: center; gap: 6px;
 }
-.task.now .meta { color: var(--accent); }
+.tasklist-task.now .meta { color: var(--accent); }
 
 .task-sep {
   margin: 8px 4px 4px;
@@ -757,6 +764,105 @@ a { color: var(--accent); }
 .tool.web .glyph { color: var(--plum); background: var(--plum-soft); border-color: oklch(from var(--plum) l c h / 0.3); }
 .tool.search .glyph { color: var(--jade); background: var(--jade-soft); border-color: oklch(from var(--jade) l c h / 0.3); }
 .tool.task .glyph { color: var(--amber); background: var(--amber-soft); border-color: oklch(from var(--amber) l c h / 0.3); }
+.tool.agent .glyph { color: var(--plum); background: var(--plum-soft); border-color: oklch(from var(--plum) l c h / 0.35); }
+/* Agent capsule reads as a richer, more deliberate object than a regular
+   tool call: a thin plum left edge stripe + a subtle tinted background
+   so it sits visually adjacent to (but distinct from) edits and shell
+   commands. The silhouette stays the same so it slots into the existing
+   rhythm of tool capsules. */
+.tool.agent {
+  border-color: oklch(from var(--plum) l c h / 0.35);
+  background:
+    linear-gradient(180deg, oklch(from var(--plum) l c h / 0.06), oklch(from var(--plum) l c h / 0.02)),
+    linear-gradient(180deg, oklch(from var(--ink-2) l c h / 0.7), oklch(from var(--ink-2) l c h / 0.45));
+  position: relative;
+}
+.tool.agent::before {
+  content: "";
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--plum), oklch(from var(--plum) l c h / 0.3));
+}
+.tool.agent:hover { border-color: oklch(from var(--plum) l c h / 0.55); }
+/* Agent head: same 5-column grid as .tool-head but the title cell is a
+   two-line stack (eyebrow + description) so the kind-of-delegate is
+   visible at a glance alongside the task it's doing. */
+.tool-head.agent-head {
+  padding: 11px 12px 11px 14px;
+}
+.agent-title {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  overflow: hidden;
+}
+.agent-eyebrow {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--plum);
+  display: inline-flex; align-items: center; gap: 6px;
+  white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.agent-eyebrow .sep { color: var(--fg-4); }
+.agent-eyebrow .agent-type {
+  color: var(--fg-1);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+}
+.agent-eyebrow .agent-iso {
+  color: var(--fg-3);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  font-style: italic;
+}
+.agent-desc {
+  font-family: var(--sans);
+  font-size: 13.5px;
+  color: var(--fg-0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+/* Expanded body — sectioned. Prompt is collapsed by default (it's
+   usually a long instruction block), Report is always shown. */
+.tool-body.agent-body {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 12px 14px 14px;
+}
+.agent-section {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.agent-section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-family: var(--mono); font-size: 10.5px;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--fg-3);
+  background: transparent; border: 0;
+  padding: 2px 0;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+}
+.agent-section-head.static { cursor: default; }
+.agent-section-head .lbl { color: var(--fg-2); }
+.agent-section-head .hint {
+  text-transform: none; letter-spacing: 0;
+  font-size: 11px;
+  color: var(--accent);
+}
+.agent-section-head:not(.static):hover .hint { color: var(--fg-0); }
+.agent-prompt {
+  border-left: 2px solid oklch(from var(--plum) l c h / 0.4);
+  padding-left: 10px;
+  margin-left: 1px;
+  color: var(--fg-3);
+}
+.agent-prompt pre { font-size: 11.5px; color: var(--fg-2); }
 
 .tool-title {
   display: flex; align-items: baseline; gap: 10px; min-width: 0;

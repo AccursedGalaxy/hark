@@ -23,6 +23,12 @@ export type ToolTone =
   | "skill"
   | "neutral";
 
+// Agent / subagent tool calls get their own capsule variant — see
+// `AgentCapsule` in components/ToolCapsule.tsx. We still emit a summary
+// from `summarizeToolUse` so other code paths (search, debugging) can
+// reason about them uniformly, but the renderer picks the dedicated
+// component based on `name === "Agent"`.
+
 export type BadgeTone = "good" | "bad" | "info" | "warn";
 
 export interface ToolBadge {
@@ -267,14 +273,19 @@ export function summarizeToolUse({
       };
     }
     case "Agent": {
+      // The dedicated AgentCapsule renderer reads `subagent_type`,
+      // `description`, and `prompt` directly. This summary is the
+      // text-only fallback (used if the renderer is ever bypassed) and
+      // also drives the in-app fuzzy search over tool calls.
       const sub =
         typeof obj.subagent_type === "string" ? obj.subagent_type : "agent";
       const desc =
         typeof obj.description === "string" ? obj.description : undefined;
       return {
         tone: "agent",
-        label: `Agent · ${sub}`,
-        detail: desc,
+        label: desc ? truncate(desc) : `subagent · ${sub}`,
+        detail: desc ? `subagent · ${sub}` : undefined,
+        badges: [{ text: sub, tone: "info" }],
       };
     }
     case "Skill": {
