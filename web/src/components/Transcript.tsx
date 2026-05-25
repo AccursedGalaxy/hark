@@ -1,7 +1,12 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ContentBlock, TranscriptEvent } from "../lib/protocol";
-import { TR_CHAR_LIMIT, TR_LINE_LIMIT } from "../lib/format";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import type {
+  ContentBlock,
+  ToolResultEvent,
+  TranscriptEvent,
+} from "../lib/protocol";
+import { indexToolResults } from "../lib/protocol";
 import { Markdown } from "./Markdown";
+import { OrphanToolResult, ToolCall } from "./ToolCall";
 
 export function Transcript({
   events,
@@ -21,7 +26,6 @@ export function Transcript({
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
 
-  // Reset stickiness whenever we load a different transcript.
   useEffect(() => {
     stick.current = true;
   }, [loading]);
@@ -30,6 +34,52 @@ export function Transcript({
     const el = ref.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [events]);
+
+  // Build a tool_use_id -> tool_result lookup once per render. Used to:
+  //   (a) fuse each tool_use block with its result inside the assistant row
+  //   (b) skip rendering top-level tool_result events claimed by a pairing
+  const { resultsById, claimedIds } = useMemo(() => {
+    const resultsById = indexToolResults(events);
+    const claimedIds = new Set<string>();
+    for (const ev of events) {
+      if (ev.kind !== "assistant") continue;
+      for (const b of ev.blocks) {
+        if (b.type === "tool_use" && resultsById.has(b.id)) {
+          claimedIds.add(b.id);
+        }
+      }
+    }
+    return { resultsById, claimedIds };
+  }, [events]);
+
+  // Pre-pass: derive what each event renders to. Two responsibilities:
+  //   1. Drop assistant events whose blocks are all empty (Claude Code
+  //      sometimes writes a `thinking: ""` row before the real one).
+  //   2. Merge consecutive assistant entries into one visual turn — the
+  //      JSONL splits a logical turn into multiple lines (thinking, then
+  //      tool_use, sometimes also text) and we want one "claude" label per
+  //      turn, not one per line.
+  // Claimed tool_results render to nothing but don't break the assistant
+  // streak (visually they belong to the prior turn).
+  const rows = useMemo(() => {
+    const out: { ev: TranscriptEvent; showWho: boolean }[] = [];
+    let prevWasAssistant = false;
+    for (const ev of events) {
+      if (ev.kind === "assistant") {
+        if (!hasVisibleBlocks(ev.blocks)) continue;
+        out.push({ ev, showWho: !prevWasAssistant });
+        prevWasAssistant = true;
+        continue;
+      }
+      if (ev.kind === "tool_result" && claimedIds.has(ev.toolUseId)) {
+        // Don't emit a row, and don't break the assistant streak.
+        continue;
+      }
+      out.push({ ev, showWho: true });
+      prevWasAssistant = false;
+    }
+    return out;
+  }, [events, claimedIds]);
 
   if (loading) {
     return <div className="transcript transcript-empty">Loading…</div>;
@@ -46,15 +96,40 @@ export function Transcript({
   return (
     <div className="transcript" ref={ref} onScroll={onScroll}>
       <div className="transcript-inner">
-        {events.map((ev, i) => (
-          <EventRow key={ev.uuid || `${ev.kind}-${i}`} ev={ev} />
+        {rows.map(({ ev, showWho }, i) => (
+          <EventRow
+            key={ev.uuid || `${ev.kind}-${i}`}
+            ev={ev}
+            showWho={showWho}
+            resultsById={resultsById}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function EventRow({ ev }: { ev: TranscriptEvent }) {
+// A block contributes to the visible row only if it has actual content.
+// Empty thinking/text blocks (Claude Code sometimes writes `thinking: ""`)
+// would otherwise produce a styled-but-empty `block-thinking` element.
+function hasVisibleBlocks(blocks: ContentBlock[]): boolean {
+  return blocks.some((b) => {
+    if (b.type === "text") return b.text.trim().length > 0;
+    if (b.type === "thinking") return b.text.trim().length > 0;
+    if (b.type === "tool_use") return true;
+    return false;
+  });
+}
+
+function EventRow({
+  ev,
+  showWho,
+  resultsById,
+}: {
+  ev: TranscriptEvent;
+  showWho: boolean;
+  resultsById: Map<string, ToolResultEvent>;
+}) {
   switch (ev.kind) {
     case "user":
       return (
@@ -66,9 +141,18 @@ function EventRow({ ev }: { ev: TranscriptEvent }) {
     case "system":
       return <SystemRow text={ev.text} />;
     case "assistant":
-      return <AssistantRow blocks={ev.blocks} />;
+      return (
+        <AssistantRow
+          blocks={ev.blocks}
+          resultsById={resultsById}
+          showWho={showWho}
+        />
+      );
     case "tool_result":
-      return <ToolResultRow output={ev.output} isError={ev.isError} />;
+      // Reaching this branch means the result is genuinely orphaned (no
+      // matching tool_use in the visible event window). Render a fallback
+      // card so nothing is silently dropped.
+      return <OrphanToolResult result={ev} />;
     default:
       return null;
   }
@@ -84,69 +168,40 @@ function SystemRow({ text }: { text: string }) {
   );
 }
 
-function AssistantRow({ blocks }: { blocks: ContentBlock[] }) {
+function AssistantRow({
+  blocks,
+  resultsById,
+  showWho,
+}: {
+  blocks: ContentBlock[];
+  resultsById: Map<string, ToolResultEvent>;
+  showWho: boolean;
+}) {
   return (
-    <div className="ev ev-assistant">
-      <div className="who">claude</div>
+    <div className={`ev ev-assistant ${showWho ? "" : "is-cont"}`}>
+      {showWho && <div className="who">claude</div>}
       {blocks.map((b, i) => {
-        if (b.type === "text")
+        if (b.type === "text") {
+          if (b.text.trim().length === 0) return null;
           return (
             <div key={i} className="assistant-text">
               <Markdown source={b.text} />
             </div>
           );
-        if (b.type === "thinking")
+        }
+        if (b.type === "thinking") {
+          if (b.text.trim().length === 0) return null;
           return (
             <div key={i} className="block-thinking">
               {b.text}
             </div>
           );
+        }
         if (b.type === "tool_use") {
-          const input =
-            typeof b.input === "object"
-              ? JSON.stringify(b.input)
-              : String(b.input ?? "");
-          const trimmed = input.length > 240 ? input.slice(0, 240) + "…" : input;
-          return (
-            <div key={i} className="block-tool">
-              <span className="tool-name">{b.name}</span>
-              <span className="tool-args">{trimmed}</span>
-            </div>
-          );
+          return <ToolCall key={i} use={b} result={resultsById.get(b.id)} />;
         }
         return null;
       })}
-    </div>
-  );
-}
-
-function ToolResultRow({
-  output,
-  isError,
-}: {
-  output: string;
-  isError: boolean;
-}) {
-  const lines = output.split("\n");
-  const tooLong = lines.length > TR_LINE_LIMIT || output.length > TR_CHAR_LIMIT;
-  const [expanded, setExpanded] = useState(false);
-  let display = output;
-  if (tooLong && !expanded) {
-    display = lines.slice(0, TR_LINE_LIMIT).join("\n");
-    if (display.length > TR_CHAR_LIMIT) display = display.slice(0, TR_CHAR_LIMIT);
-  }
-  return (
-    <div className={`ev ev-tool-result ${isError ? "is-error" : ""}`}>
-      <pre>{display}</pre>
-      {tooLong && !expanded && (
-        <button
-          type="button"
-          className="tr-more"
-          onClick={() => setExpanded(true)}
-        >
-          show full ({lines.length} lines)
-        </button>
-      )}
     </div>
   );
 }

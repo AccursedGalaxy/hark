@@ -39,6 +39,7 @@ export default function App() {
     upload,
     currentPromptKind,
     currentPendingPermission,
+    closeSession,
     refresh,
   } = useSessions();
 
@@ -75,6 +76,7 @@ export default function App() {
           onPick={setCurrent}
           attentionCount={attentionCount}
           onSpawned={refresh}
+          onClose={closeSession}
         />
       )}
 
@@ -84,6 +86,7 @@ export default function App() {
           attentionCount={attentionCount}
           onPick={setCurrent}
           onSpawned={refresh}
+          onClose={closeSession}
         />
       )}
 
@@ -140,11 +143,13 @@ function MobileSessionList({
   attentionCount,
   onPick,
   onSpawned,
+  onClose,
 }: {
   sessions: ReturnType<typeof useSessions>["sessions"];
   attentionCount: number;
   onPick: (id: string) => void;
   onSpawned: () => void;
+  onClose: (id: string) => Promise<void>;
 }) {
   return (
     <SessionRail
@@ -153,6 +158,7 @@ function MobileSessionList({
       onPick={onPick}
       attentionCount={attentionCount}
       onSpawned={onSpawned}
+      onClose={onClose}
     />
   );
 }

@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { parseLine, parseTranscript } from "./transcript.js";
+import {
+  extractToolMeta,
+  indexToolResults,
+  parseLine,
+  parseTranscript,
+  ToolNameIndex,
+} from "./transcript.js";
 
 const userString = JSON.stringify({
   type: "user",
@@ -47,6 +53,13 @@ const toolResult = JSON.stringify({
       },
     ],
   },
+  toolUseResult: {
+    stdout: "total 0",
+    stderr: "",
+    interrupted: false,
+    isImage: false,
+    noOutputExpected: false,
+  },
 });
 
 const attachment = JSON.stringify({
@@ -76,6 +89,61 @@ const systemReminderOnly = JSON.stringify({
 const permissionMode = JSON.stringify({
   type: "permission-mode",
   permissionMode: "auto",
+});
+
+// Real shape Claude Code writes when the user pastes/attaches an image
+// along with typed text. The message is *not* `isMeta` — it's the genuine
+// user prompt that the parser must surface.
+const userTextPlusImage = JSON.stringify({
+  type: "user",
+  uuid: "u-img",
+  timestamp: "2026-05-25T12:11:11.000Z",
+  message: {
+    role: "user",
+    content: [
+      { type: "text", text: "I'd like to close sessions. [Image #1]" },
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "..." },
+      },
+    ],
+  },
+});
+
+// What Claude Code writes when an image attachment is recorded as
+// bookkeeping (isMeta=true, synthesised placeholder text). Not the user's
+// real message — should NOT render as a user bubble.
+const imageBookkeeping = JSON.stringify({
+  type: "user",
+  uuid: "u-imgbk",
+  timestamp: "2026-05-25T12:11:11.000Z",
+  isMeta: true,
+  message: {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: "[Image: source: /home/aki/.claude/image-cache/x/1.png]",
+      },
+    ],
+  },
+});
+
+// User message with no text — only an image. Real prompts where the user
+// just drops a screenshot with no caption.
+const userImageOnly = JSON.stringify({
+  type: "user",
+  uuid: "u-imgonly",
+  timestamp: "2026-05-25T12:11:11.000Z",
+  message: {
+    role: "user",
+    content: [
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "..." },
+      },
+    ],
+  },
 });
 
 describe("parseLine", () => {
@@ -116,6 +184,8 @@ describe("parseLine", () => {
   });
 
   it("parses a tool_result wrapped in a user message", () => {
+    // Without enrichment the parser can't know the tool name yet, so meta
+    // comes back as `raw` carrying the original toolUseResult blob.
     expect(parseLine(toolResult)).toEqual({
       kind: "tool_result",
       uuid: "tr1",
@@ -123,7 +193,39 @@ describe("parseLine", () => {
       toolUseId: "tu_1",
       output: "total 0",
       isError: false,
+      meta: {
+        kind: "raw",
+        data: {
+          stdout: "total 0",
+          stderr: "",
+          interrupted: false,
+          isImage: false,
+          noOutputExpected: false,
+        },
+      },
     });
+  });
+
+  it("parses a tool_result without a toolUseResult sibling (no meta)", () => {
+    const noMeta = JSON.stringify({
+      type: "user",
+      uuid: "tr-bare",
+      timestamp: "t",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tu_2",
+            content: "x",
+            is_error: false,
+          },
+        ],
+      },
+    });
+    const ev = parseLine(noMeta);
+    expect(ev?.kind).toBe("tool_result");
+    expect((ev as { meta?: unknown }).meta).toBeUndefined();
   });
 
   it("returns null for attachment events", () => {
@@ -160,6 +262,133 @@ describe("parseLine", () => {
       text: "cache invalidated",
     });
   });
+
+  // ---- User messages with array content (image attachments) ----
+  // Real bug: my earlier parser only handled the array case as a tool_result
+  // probe. Anything else returned null and the user's message vanished.
+
+  it("parses a user message with text + image content as a user event", () => {
+    const ev = parseLine(userTextPlusImage);
+    expect(ev?.kind).toBe("user");
+    if (ev?.kind !== "user") throw new Error("expected user");
+    expect(ev.uuid).toBe("u-img");
+    // The text is preserved; the image presence is noted at the end so the
+    // reader knows an attachment was sent without us inlining base64 bytes.
+    expect(ev.text).toBe("I'd like to close sessions. [Image #1]\n[image attached]");
+  });
+
+  it("parses an image-only user message as a user event", () => {
+    const ev = parseLine(userImageOnly);
+    expect(ev?.kind).toBe("user");
+    if (ev?.kind !== "user") throw new Error("expected user");
+    expect(ev.text).toBe("[image attached]");
+  });
+
+  it("classifies isMeta image-bookkeeping rows as system events, not user", () => {
+    const ev = parseLine(imageBookkeeping);
+    expect(ev?.kind).toBe("system");
+    if (ev?.kind !== "system") throw new Error("expected system");
+    // The synthesised placeholder is bookkeeping; we still preserve it as
+    // the system row text so debugging users can see what was recorded.
+    expect(ev.text).toContain("[Image: source:");
+  });
+
+  it("still parses a tool_result list as a tool_result event (unchanged)", () => {
+    const ev = parseLine(toolResult);
+    expect(ev?.kind).toBe("tool_result");
+  });
+
+  it("returns null for a user message with an empty content array", () => {
+    const empty = JSON.stringify({
+      type: "user",
+      uuid: "u-empty",
+      timestamp: "t",
+      message: { role: "user", content: [] },
+    });
+    expect(parseLine(empty)).toBeNull();
+  });
+
+  // ---- Slash-commands and local-command stdout ----
+  // Claude Code wraps slash commands like `/clear` in XML tags inside the
+  // content string. Rendered naively they read as `<command-name>/clear</…>`
+  // garbage. We want a clean `/clear` (or `/skill args`) user message.
+
+  it("renders a bare slash-command as a clean user event", () => {
+    const slash = JSON.stringify({
+      type: "user",
+      uuid: "sl1",
+      timestamp: "t",
+      message: {
+        role: "user",
+        content:
+          "<command-name>/clear</command-name>\n            " +
+          "<command-message>clear</command-message>\n            " +
+          "<command-args></command-args>",
+      },
+    });
+    expect(parseLine(slash)).toEqual({
+      kind: "user",
+      uuid: "sl1",
+      ts: "t",
+      text: "/clear",
+    });
+  });
+
+  it("preserves args for a slash-command with content", () => {
+    const slash = JSON.stringify({
+      type: "user",
+      uuid: "sl2",
+      timestamp: "t",
+      message: {
+        role: "user",
+        content:
+          "<command-message>frontend-design:frontend-design</command-message>\n" +
+          "<command-name>/frontend-design:frontend-design</command-name>\n" +
+          "<command-args>now please design a modern frontend</command-args>",
+      },
+    });
+    expect(parseLine(slash)).toEqual({
+      kind: "user",
+      uuid: "sl2",
+      ts: "t",
+      text: "/frontend-design:frontend-design now please design a modern frontend",
+    });
+  });
+
+  it("surfaces local-command stdout as a system event", () => {
+    const lc = JSON.stringify({
+      type: "user",
+      uuid: "lc1",
+      timestamp: "t",
+      message: {
+        role: "user",
+        content: "<local-command-stdout>(no content)</local-command-stdout>",
+      },
+    });
+    const ev = parseLine(lc);
+    expect(ev?.kind).toBe("system");
+    if (ev?.kind !== "system") throw new Error("expected system");
+    // The "(no content)" sentinel is meaningless to the reader; strip it
+    // so the row reads as plain command output (or empty).
+    expect(ev.text).toBe("");
+  });
+
+  it("keeps real local-command stdout content in the system event", () => {
+    const lc = JSON.stringify({
+      type: "user",
+      uuid: "lc2",
+      timestamp: "t",
+      message: {
+        role: "user",
+        content:
+          "<local-command-stdout>build succeeded in 1.2s</local-command-stdout>",
+      },
+    });
+    const ev = parseLine(lc);
+    expect(ev?.kind).toBe("system");
+    if (ev?.kind !== "system") throw new Error("expected system");
+    expect(ev.text).toBe("build succeeded in 1.2s");
+  });
 });
 
 describe("parseTranscript", () => {
@@ -182,5 +411,301 @@ describe("parseTranscript", () => {
 
   it("returns an empty array for empty input", () => {
     expect(parseTranscript("")).toEqual([]);
+  });
+
+  it("resolves toolName and typed meta when a tool_use precedes its result", () => {
+    const blob = [assistantMixed, toolResult].join("\n");
+    const events = parseTranscript(blob);
+    const tr = events.find((e) => e.kind === "tool_result");
+    expect(tr).toBeDefined();
+    if (tr?.kind !== "tool_result") throw new Error("expected tool_result");
+    expect(tr.toolName).toBe("Bash");
+    expect(tr.meta).toEqual({
+      kind: "bash",
+      stderr: "",
+      interrupted: false,
+    });
+  });
+
+  it("leaves toolName undefined when no matching tool_use is in the stream", () => {
+    // tool_result without a prior assistant tool_use block — happens when
+    // the SSE consumer started watching mid-conversation.
+    const events = parseTranscript(toolResult);
+    const tr = events[0];
+    if (tr?.kind !== "tool_result") throw new Error("expected tool_result");
+    expect(tr.toolName).toBeUndefined();
+    expect(tr.meta?.kind).toBe("raw");
+  });
+});
+
+describe("extractToolMeta", () => {
+  it("extracts Read shape", () => {
+    expect(
+      extractToolMeta("Read", {
+        type: "text",
+        file: {
+          filePath: "/x/y.ts",
+          content: "...",
+          numLines: 12,
+          startLine: 1,
+          totalLines: 50,
+        },
+      }),
+    ).toEqual({
+      kind: "read",
+      filePath: "/x/y.ts",
+      numLines: 12,
+      startLine: 1,
+      totalLines: 50,
+    });
+  });
+
+  it("falls back to raw when Read shape is malformed", () => {
+    expect(extractToolMeta("Read", { type: "text" })).toEqual({
+      kind: "raw",
+      data: { type: "text" },
+    });
+  });
+
+  it("extracts Bash shape and preserves backgroundTaskId when present", () => {
+    expect(
+      extractToolMeta("Bash", {
+        stdout: "out",
+        stderr: "err",
+        interrupted: true,
+        isImage: false,
+        noOutputExpected: false,
+        backgroundTaskId: "b1",
+      }),
+    ).toEqual({
+      kind: "bash",
+      stderr: "err",
+      interrupted: true,
+      backgroundTaskId: "b1",
+    });
+  });
+
+  it("extracts Edit shape with structuredPatch passthrough", () => {
+    const patch = [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 3 }];
+    expect(
+      extractToolMeta("Edit", {
+        filePath: "/a.ts",
+        oldString: "x",
+        newString: "y",
+        replaceAll: true,
+        userModified: false,
+        structuredPatch: patch,
+        originalFile: "long original blob",
+      }),
+    ).toEqual({
+      kind: "edit",
+      filePath: "/a.ts",
+      replaceAll: true,
+      userModified: false,
+      structuredPatch: patch,
+    });
+  });
+
+  it("extracts Write shape and defaults type to 'update' when absent", () => {
+    expect(
+      extractToolMeta("Write", {
+        filePath: "/b.ts",
+        content: "...",
+        originalFile: null,
+        userModified: false,
+      }),
+    ).toEqual({
+      kind: "write",
+      filePath: "/b.ts",
+      type: "update",
+      userModified: false,
+      structuredPatch: undefined,
+    });
+  });
+
+  it("extracts Glob shape", () => {
+    expect(
+      extractToolMeta("Glob", {
+        filenames: ["a", "b"],
+        numFiles: 2,
+        durationMs: 3,
+        truncated: false,
+      }),
+    ).toEqual({
+      kind: "glob",
+      numFiles: 2,
+      truncated: false,
+      durationMs: 3,
+      filenames: ["a", "b"],
+    });
+  });
+
+  it("extracts WebFetch shape", () => {
+    expect(
+      extractToolMeta("WebFetch", {
+        url: "https://x",
+        code: 200,
+        codeText: "OK",
+        bytes: 1234,
+        durationMs: 50,
+        result: "body",
+      }),
+    ).toEqual({
+      kind: "webfetch",
+      url: "https://x",
+      code: 200,
+      codeText: "OK",
+      bytes: 1234,
+      durationMs: 50,
+    });
+  });
+
+  it("extracts WebSearch shape with derived resultCount", () => {
+    expect(
+      extractToolMeta("WebSearch", {
+        query: "q",
+        searchCount: 1,
+        durationSeconds: 2,
+        results: [{}, {}, {}],
+      }),
+    ).toEqual({
+      kind: "websearch",
+      query: "q",
+      searchCount: 1,
+      durationSeconds: 2,
+      resultCount: 3,
+    });
+  });
+
+  it("returns raw for known string-shaped error blobs", () => {
+    expect(extractToolMeta("Read", "Error: File does not exist.")).toEqual({
+      kind: "raw",
+      data: "Error: File does not exist.",
+    });
+    expect(extractToolMeta("Bash", "Cancelled: ...")).toEqual({
+      kind: "raw",
+      data: "Cancelled: ...",
+    });
+  });
+
+  it("returns raw for unknown tools (MCP, Agent, Task*, Skill, etc.)", () => {
+    expect(
+      extractToolMeta("Agent", {
+        agentId: "x",
+        status: "completed",
+        prompt: "...",
+      }),
+    ).toEqual({
+      kind: "raw",
+      data: { agentId: "x", status: "completed", prompt: "..." },
+    });
+    expect(
+      extractToolMeta("mcp__claude_ai_Gmail__list_labels", "{...}"),
+    ).toEqual({ kind: "raw", data: "{...}" });
+    expect(extractToolMeta(undefined, { anything: 1 })).toEqual({
+      kind: "raw",
+      data: { anything: 1 },
+    });
+  });
+});
+
+describe("ToolNameIndex", () => {
+  it("resolves names from prior assistant blocks", () => {
+    const ix = new ToolNameIndex();
+    ix.noteAssistant([
+      { type: "tool_use", id: "x", name: "Read", input: {} },
+      { type: "text", text: "noise" },
+    ]);
+    expect(ix.resolve("x")).toBe("Read");
+    expect(ix.resolve("missing")).toBeUndefined();
+  });
+
+  it("re-extracts meta from raw when enriching with a now-known name", () => {
+    const ix = new ToolNameIndex();
+    ix.noteAssistant([
+      { type: "tool_use", id: "tu_1", name: "Bash", input: { command: "ls" } },
+    ]);
+    const enriched = ix.enrich({
+      kind: "tool_result",
+      uuid: "u",
+      ts: "t",
+      toolUseId: "tu_1",
+      output: "ok",
+      isError: false,
+      meta: {
+        kind: "raw",
+        data: {
+          stdout: "ok",
+          stderr: "",
+          interrupted: false,
+          isImage: false,
+          noOutputExpected: false,
+        },
+      },
+    });
+    expect(enriched.toolName).toBe("Bash");
+    expect(enriched.meta).toEqual({
+      kind: "bash",
+      stderr: "",
+      interrupted: false,
+    });
+  });
+
+  it("leaves the event untouched when the id is unknown", () => {
+    const ix = new ToolNameIndex();
+    const ev = {
+      kind: "tool_result" as const,
+      uuid: "u",
+      ts: "t",
+      toolUseId: "orphan",
+      output: "x",
+      isError: false,
+      meta: { kind: "raw" as const, data: { something: 1 } },
+    };
+    expect(ix.enrich(ev)).toEqual(ev);
+  });
+
+  it("does not re-extract when meta is already typed", () => {
+    // Defends against a hypothetical downstream consumer that has already
+    // resolved meta to a typed kind — re-enrichment shouldn't clobber it.
+    const ix = new ToolNameIndex();
+    ix.noteAssistant([
+      { type: "tool_use", id: "tu_1", name: "Read", input: {} },
+    ]);
+    const enriched = ix.enrich({
+      kind: "tool_result",
+      uuid: "u",
+      ts: "t",
+      toolUseId: "tu_1",
+      output: "x",
+      isError: false,
+      meta: {
+        kind: "read",
+        filePath: "/x",
+        numLines: 1,
+        totalLines: 1,
+        startLine: 1,
+      },
+    });
+    expect(enriched.meta).toEqual({
+      kind: "read",
+      filePath: "/x",
+      numLines: 1,
+      totalLines: 1,
+      startLine: 1,
+    });
+  });
+});
+
+describe("indexToolResults", () => {
+  it("builds a lookup keyed by toolUseId", () => {
+    const events = parseTranscript([assistantMixed, toolResult].join("\n"));
+    const map = indexToolResults(events);
+    expect(map.size).toBe(1);
+    expect(map.get("tu_1")?.toolName).toBe("Bash");
+  });
+
+  it("returns an empty map when there are no tool_results", () => {
+    expect(indexToolResults(parseTranscript(assistantText))).toEqual(new Map());
   });
 });

@@ -77,8 +77,17 @@
 .ev-assistant .assistant-text + .assistant-text {
   margin-top: var(--space-3);
 }
-.ev-assistant .assistant-text + .block-tool,
-.ev-assistant .block-tool + .assistant-text {
+/* Continuation rows belong to the same logical Claude turn as the row
+   above (the JSONL splits turns into multiple lines). Pull them in tighter
+   so they read as one block of speech, not two. */
+.ev-assistant.is-cont {
+  margin-top: calc(var(--space-3) * -1 + 2px);
+}
+/* Spacing between assistant prose and tool capsules. The capsule owns its
+   own visual chrome; we just give it breathing room. */
+.ev-assistant .assistant-text + .tc,
+.ev-assistant .tc + .assistant-text,
+.ev-assistant .tc + .tc {
   margin-top: var(--space-3);
 }
 .ev-assistant .block-thinking {
@@ -90,61 +99,6 @@
   font-size: var(--font-md);
   white-space: pre-wrap;
   word-wrap: break-word;
-}
-.ev-assistant .block-tool {
-  background: var(--tool-bg);
-  border: 1px solid var(--border-soft);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-2);
-  margin: var(--space-2) 0;
-  font-family: var(--font-mono);
-  font-size: var(--font-sm);
-  display: flex;
-  gap: var(--space-2);
-  align-items: baseline;
-  flex-wrap: wrap;
-}
-.block-tool .tool-name {
-  color: var(--accent);
-  font-weight: 600;
-}
-.block-tool .tool-args {
-  color: var(--text-dim);
-  word-break: break-all;
-}
-
-/* ---- Tool result ---- */
-
-.ev-tool-result {
-  background: var(--tool-bg);
-  border: 1px solid var(--border-soft);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-2);
-  font-family: var(--font-mono);
-  font-size: var(--font-sm);
-  color: var(--text-dim);
-}
-.ev-tool-result.is-error {
-  border-left: 2px solid var(--attn);
-}
-.ev-tool-result pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  overflow-wrap: anywhere;
-  font: inherit;
-}
-.ev-tool-result .tr-more {
-  margin-top: var(--space-2);
-  background: transparent;
-  color: var(--accent);
-  border: none;
-  padding: 0;
-  font-size: var(--font-sm);
-  cursor: pointer;
-}
-.ev-tool-result .tr-more:hover {
-  text-decoration: underline;
 }
 
 /* ---- System row (centered, low-key) ---- */

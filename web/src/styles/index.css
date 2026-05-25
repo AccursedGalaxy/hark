@@ -22,6 +22,7 @@
 @import "./components/switcher.css";
 @import "./components/session.css";
 @import "./components/transcript.css";
+@import "./components/tool-call.css";
 @import "./components/composer.css";
 @import "./components/perm-card.css";
 @import "./components/theme-toggle.css";

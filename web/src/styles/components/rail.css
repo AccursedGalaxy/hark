@@ -118,19 +118,18 @@
 }
 
 .rail-row {
-  display: block;
+  position: relative;
+  display: flex;
+  align-items: stretch;
   width: 100%;
-  text-align: left;
-  background: none;
-  border: none;
   border-bottom: 1px solid var(--border-soft);
   border-left: 2px solid transparent;
-  padding: var(--space-3) var(--space-4);
-  cursor: pointer;
   color: var(--text);
   transition: background var(--duration-fast) var(--ease);
 }
-.rail-row:hover {
+/* Hover only applies when the row isn't already the active selection, so a
+   pointer parked on the active row doesn't visually compete with it. */
+.rail-row:not(.is-active):hover {
   background: var(--surface-2);
 }
 .rail-row.is-active {
@@ -140,12 +139,71 @@
 .rail-row.is-attn {
   background: var(--attn-bg);
 }
-.rail-row.is-attn:hover {
+.rail-row.is-attn:not(.is-active):hover {
   background: var(--attn-bg-strong);
 }
 .rail-row.is-attn.is-active {
   background: var(--attn-bg-strong);
   border-left-color: var(--attn);
+}
+.rail-row.is-closing {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.rail-row-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  /* Suppress the click-induced focus background that browsers apply to
+     <button>; keyboard-only focus still gets a ring via :focus-visible. */
+  outline: none;
+}
+.rail-row-body:focus { outline: none; }
+.rail-row-body:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.rail-close {
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--duration-fast) var(--ease),
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+.rail-row:hover .rail-close,
+.rail-close:focus-visible {
+  opacity: 1;
+}
+.rail-close:hover {
+  background: var(--attn-bg);
+  color: var(--attn);
+}
+/* Touch devices can't hover — keep close affordance visible. */
+@media (hover: none) {
+  .rail-close {
+    opacity: 0.6;
+  }
 }
 
 .rail-row-top {
@@ -186,6 +244,15 @@
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+.rail-loc {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  background: var(--surface-3);
+  padding: 1px 6px;
+  border-radius: var(--radius-1);
+  font-family: var(--font-mono);
+  letter-spacing: 0;
 }
 .badge-ro {
   font-size: 9px;

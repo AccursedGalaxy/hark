@@ -33,6 +33,46 @@ export function buildNewSessionArgs(input: SpawnInput): string[] {
   ];
 }
 
+// One row from `tmux list-sessions -F '#{session_attached} #{session_activity} #{session_name}'`.
+export interface TmuxSessionRow {
+  name: string;
+  attached: number;
+  activity: number;
+}
+
+export function parseSessionRows(stdout: string): TmuxSessionRow[] {
+  const rows: TmuxSessionRow[] = [];
+  for (const raw of stdout.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    // `attached activity name` — name is the rest of the line because tmux
+    // session names can contain spaces, though it's rare.
+    const parts = line.split(/\s+/);
+    if (parts.length < 3) continue;
+    const attached = Number(parts[0]);
+    const activity = Number(parts[1]);
+    const name = parts.slice(2).join(" ");
+    if (!Number.isFinite(attached) || !Number.isFinite(activity)) continue;
+    rows.push({ name, attached, activity });
+  }
+  return rows;
+}
+
+// Pick the best existing tmux session to drop a new window into:
+//   1. attached sessions ranked by most recent activity
+//   2. otherwise the most-recently-active unattached session
+// Returns null when there are no sessions at all (caller should new-session).
+export function pickSpawnTarget(
+  rows: TmuxSessionRow[],
+): TmuxSessionRow | null {
+  if (rows.length === 0) return null;
+  const sorted = [...rows].sort((a, b) => {
+    if (a.attached !== b.attached) return b.attached - a.attached;
+    return b.activity - a.activity;
+  });
+  return sorted[0] ?? null;
+}
+
 // ---- runtime ----
 
 function run(args: string[]): Promise<void> {
@@ -53,13 +93,14 @@ function runWithStdout(args: string[]): Promise<string> {
   });
 }
 
-async function listSessionNames(): Promise<string[]> {
+async function listSessions(): Promise<TmuxSessionRow[]> {
   try {
-    const out = await runWithStdout(["list-sessions", "-F", "#{session_name}"]);
-    return out
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const out = await runWithStdout([
+      "list-sessions",
+      "-F",
+      "#{session_attached} #{session_activity} #{session_name}",
+    ]);
+    return parseSessionRows(out);
   } catch {
     return [];
   }
@@ -70,25 +111,26 @@ export interface SpawnResult {
   createdSession: boolean;
 }
 
-// Spawn a new Claude window. To avoid polluting unrelated tmux sessions
-// (e.g. "Work", "dev"), we keep our windows inside a dedicated "claude"
-// session. If it exists, add a window; otherwise create the session.
+// Spawn a new Claude window. Prefers the user's current tmux focus: pick the
+// most-recently-attached existing session and add a window there. If there's
+// no tmux server at all, fall back to creating a dedicated "claude" session.
 export async function spawnClaudeSession(opts: {
   cwd: string;
   command?: string;
 }): Promise<SpawnResult> {
   const command = opts.command ?? "claude";
-  const sessions = await listSessionNames();
+  const sessions = await listSessions();
+  const target = pickSpawnTarget(sessions);
 
-  if (sessions.includes("claude")) {
+  if (target) {
     await run(
       buildNewWindowArgs({
-        sessionName: "claude",
+        sessionName: target.name,
         cwd: opts.cwd,
         command,
       }),
     );
-    return { sessionName: "claude", createdSession: false };
+    return { sessionName: target.name, createdSession: false };
   }
 
   await run(

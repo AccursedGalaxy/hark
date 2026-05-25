@@ -12,6 +12,7 @@ import type {
 import { derivePromptKind, deriveState } from "../lib/protocol";
 import {
   clearAttention as clearAttentionApi,
+  closeSession as closeSessionApi,
   fetchSessions,
   fetchTranscript,
   openHookStream,
@@ -50,6 +51,7 @@ export interface SessionsApi {
   // (from the PermissionRequest hook). Drives the rich permission card.
   currentPendingPermission: PendingPermission | null;
   clearAttention: (id: string) => void;
+  closeSession: (id: string) => Promise<void>;
   refresh: () => void;
 }
 
@@ -299,6 +301,28 @@ export function useSessions(): SessionsApi {
     void clearAttentionApi(id);
   }, []);
 
+  const closeSession = useCallback(
+    async (id: string): Promise<void> => {
+      // Optimistically drop from the rail so the click feels immediate; we'll
+      // re-sync on the next poll either way.
+      setRawSessions((prev) => prev.filter((s) => s.sessionId !== id));
+      setAttention((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _omit, ...rest } = prev;
+        return rest;
+      });
+      setCurrentState((cur) => (cur === id ? null : cur));
+      try {
+        await closeSessionApi(id);
+      } finally {
+        // Catches the case where the kill failed and the session is still
+        // alive on the next poll: it'll reappear and the user can retry.
+        refresh();
+      }
+    },
+    [refresh],
+  );
+
   return {
     connected,
     sessions,
@@ -315,6 +339,7 @@ export function useSessions(): SessionsApi {
     currentPromptKind,
     currentPendingPermission,
     clearAttention,
+    closeSession,
     refresh,
   };
 }

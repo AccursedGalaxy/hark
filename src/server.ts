@@ -4,14 +4,27 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  closeSession,
+  defaultDeps as closeSessionDeps,
+  sessionFilePathForPid,
+} from "./lib/closeSession.js";
 import { HookState, type HookBroadcast } from "./lib/hookState.js";
 import { resolveTmuxPaneForPid } from "./lib/pane.js";
 import { parseMultipart } from "./lib/parseMultipart.js";
 import { sendKey, sendLiteral, sendText } from "./lib/sendKeys.js";
+import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
 import {
+  formatLocation,
+  listPaneLocations,
+  type PaneLocation,
+} from "./lib/tmuxLocations.js";
+import {
+  parseLine,
   readFromOffset,
   readTranscriptFile,
+  ToolNameIndex,
   type TranscriptEvent,
 } from "./lib/transcript.js";
 import { storeUpload } from "./lib/uploads.js";
@@ -85,8 +98,13 @@ async function listLiveSessions(): Promise<SessionFile[]> {
         }
       }),
   );
-  out.sort((a, b) => b.updatedAt - a.updatedAt);
-  return out;
+  // Collapse PIDs that share a sessionId — `claude --resume` leaves the old
+  // PID alive briefly, and both write a sessions/<pid>.json. The newest one
+  // is the live TUI; the older is a zombie that would just confuse the UI
+  // and (worse) be a stale send-keys target.
+  const deduped = dedupeBySessionId(out);
+  deduped.sort((a, b) => b.updatedAt - a.updatedAt);
+  return deduped;
 }
 
 async function findSession(sessionId: string): Promise<SessionFile | null> {
@@ -132,12 +150,18 @@ function broadcastHook(ev: HookBroadcast): void {
 app.get("/api/sessions", async (_req, res) => {
   const sessions = await listLiveSessions();
   const attention = hookState.snapshot();
+  const paneLocations = await listPaneLocations();
   const augmented = await Promise.all(
     sessions.map(async (s) => {
       const att = attention[s.sessionId];
+      const pane = await resolveTmuxPaneForPid(s.pid);
+      const loc: PaneLocation | undefined =
+        pane ? paneLocations.get(pane.paneId) : undefined;
       return {
         ...s,
-        hasTmuxPane: (await resolveTmuxPaneForPid(s.pid)) !== null,
+        hasTmuxPane: pane !== null,
+        tmuxLocation: loc ? formatLocation(loc) : null,
+        tmuxWindowName: loc?.windowName ?? null,
         needsAttention: att?.needsAttention ?? false,
         lastEvent: att?.lastEvent,
         lastEventAt: att?.lastEventAt,
@@ -200,6 +224,20 @@ app.get("/api/sessions/:id/stream", async (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
 
+  // Prime a tool-name index from everything already in the file so that
+  // tool_result events arriving on the stream can be enriched even though
+  // their matching tool_use blocks were emitted in an earlier read pass.
+  const toolNames = new ToolNameIndex();
+  try {
+    const existing = await fs.readFile(filePath, "utf8");
+    for (const line of existing.split("\n")) {
+      const ev = parseLine(line);
+      if (ev?.kind === "assistant") toolNames.noteAssistant(ev.blocks);
+    }
+  } catch {
+    /* file may be missing — fall through */
+  }
+
   let offset = (await fs.stat(filePath)).size;
   res.write(`event: ready\ndata: ${JSON.stringify({ offset })}\n\n`);
 
@@ -215,6 +253,7 @@ app.get("/api/sessions/:id/stream", async (req, res) => {
       const { events, offset: newOffset } = await readFromOffset(
         filePath,
         offset,
+        toolNames,
       );
       const tParsed = Date.now();
       offset = newOffset;
@@ -351,6 +390,25 @@ app.post("/api/sessions/:id/upload", async (req, res) => {
 app.post("/api/sessions/:id/attention/clear", (req, res) => {
   clearAttention(req.params.id);
   res.json({ ok: true });
+});
+
+app.post("/api/sessions/:id/close", async (req, res) => {
+  const session = await findSession(req.params.id);
+  if (!session) {
+    res.status(404).json({ error: "session not found" });
+    return;
+  }
+  try {
+    const result = await closeSession(
+      session.pid,
+      sessionFilePathForPid(session.pid),
+      closeSessionDeps,
+    );
+    hookState.clear(session.sessionId);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 app.post("/api/sessions/new", async (req, res) => {

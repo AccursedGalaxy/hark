@@ -25,6 +25,11 @@ export interface RawSession {
   status?: SessionStatus;
   name?: string;
   hasTmuxPane: boolean;
+  // Compact tmux location for the session's pane (e.g., "dev:2"), or null
+  // when the session has no pane. Used to distinguish sibling sessions in
+  // the same cwd that would otherwise share a label.
+  tmuxLocation?: string | null;
+  tmuxWindowName?: string | null;
   needsAttention?: boolean;
   lastEvent?: string;
   lastEventAt?: number;
@@ -58,18 +63,98 @@ export type ContentBlock =
   | { type: "thinking"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown };
 
+// Mirror of the backend's ToolResultMeta union. Used by the renderer to
+// switch on tool-specific result shapes (file path + line count for Read,
+// stderr + interrupted flag for Bash, etc.). Anything we haven't typed
+// arrives as `raw` so the renderer can degrade to a generic display.
+export type ToolResultMeta =
+  | {
+      kind: "read";
+      filePath: string;
+      numLines: number;
+      totalLines: number;
+      startLine: number;
+    }
+  | {
+      kind: "bash";
+      stderr: string;
+      interrupted: boolean;
+      backgroundTaskId?: string;
+      returnCodeInterpretation?: string;
+    }
+  | {
+      kind: "edit";
+      filePath: string;
+      replaceAll: boolean;
+      userModified: boolean;
+      structuredPatch?: unknown;
+    }
+  | {
+      kind: "write";
+      filePath: string;
+      type: string;
+      userModified: boolean;
+      structuredPatch?: unknown;
+    }
+  | {
+      kind: "glob";
+      numFiles: number;
+      truncated: boolean;
+      durationMs: number;
+      filenames: string[];
+    }
+  | {
+      kind: "webfetch";
+      url: string;
+      code: number;
+      codeText: string;
+      bytes: number;
+      durationMs: number;
+    }
+  | {
+      kind: "websearch";
+      query: string;
+      searchCount: number;
+      durationSeconds: number;
+      resultCount: number;
+    }
+  | { kind: "raw"; data: unknown };
+
+export type ToolResultEvent = {
+  kind: "tool_result";
+  uuid: string;
+  ts: string;
+  toolUseId: string;
+  // Resolved by the backend when the matching tool_use is in scope.
+  // Undefined for results whose tool_use was emitted before the SSE
+  // consumer started — renderers should degrade gracefully.
+  toolName?: string;
+  output: string;
+  isError: boolean;
+  meta?: ToolResultMeta;
+};
+
 export type TranscriptEvent =
   | { kind: "user"; uuid: string; ts: string; text: string }
   | { kind: "assistant"; uuid: string; ts: string; blocks: ContentBlock[] }
-  | {
-      kind: "tool_result";
-      uuid: string;
-      ts: string;
-      toolUseId: string;
-      output: string;
-      isError: boolean;
-    }
+  | ToolResultEvent
   | { kind: "system"; uuid: string; ts: string; text: string };
+
+/**
+ * Index tool_result events by their `toolUseId` so a renderer can fuse each
+ * `tool_use` block with its result inline. Mirror of the backend helper of
+ * the same name; kept duplicated rather than imported so the web bundle
+ * stays decoupled from `src/`.
+ */
+export function indexToolResults(
+  events: TranscriptEvent[],
+): Map<string, ToolResultEvent> {
+  const out = new Map<string, ToolResultEvent>();
+  for (const ev of events) {
+    if (ev.kind === "tool_result") out.set(ev.toolUseId, ev);
+  }
+  return out;
+}
 
 // ---- Attention (from /api/events SSE) ----
 

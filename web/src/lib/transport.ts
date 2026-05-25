@@ -92,6 +92,23 @@ export async function clearAttention(sessionId: string): Promise<void> {
   ).catch(() => {});
 }
 
+export async function closeSession(sessionId: string): Promise<void> {
+  const r = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/close`,
+    { method: "POST" },
+  );
+  if (!r.ok) {
+    let msg = `close failed (${r.status})`;
+    try {
+      const j = (await r.json()) as { error?: string };
+      if (j.error) msg = j.error;
+    } catch {
+      /* keep default */
+    }
+    throw new Error(msg);
+  }
+}
+
 export interface SpawnResponse {
   ok: true;
   sessionName: string;
