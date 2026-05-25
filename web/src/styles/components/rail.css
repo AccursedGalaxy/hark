@@ -123,32 +123,123 @@
   align-items: stretch;
   width: 100%;
   border-bottom: 1px solid var(--border-soft);
-  border-left: 2px solid transparent;
+  border-left: 3px solid transparent;
   color: var(--text);
-  transition: background var(--duration-fast) var(--ease);
+  /* Per-row state colour, set by `data-state="..."` on the row element.
+   * Every state-driven rule reads from --row-accent so a future palette
+   * change happens in one place. */
+  --row-accent: var(--dead);
+  transition:
+    background var(--duration-med) var(--ease),
+    border-left-color var(--duration-med) var(--ease);
 }
+.rail-row[data-state="busy"] { --row-accent: var(--busy); }
+.rail-row[data-state="idle"] { --row-accent: var(--idle); }
+.rail-row[data-state="wait"] { --row-accent: var(--attn); }
+.rail-row[data-state="dead"] { --row-accent: var(--dead); }
+
+/* Coloured edge band for every row — a quiet visual cue that's always on,
+   so the rail reads as a "stack of states" at a glance, not a uniform list. */
+.rail-row {
+  border-left-color: color-mix(in srgb, var(--row-accent) 45%, transparent);
+}
+
 /* Hover only applies when the row isn't already the active selection, so a
    pointer parked on the active row doesn't visually compete with it. */
 .rail-row:not(.is-active):hover {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--row-accent) 8%, var(--surface-2));
+  border-left-color: var(--row-accent);
 }
+
 .rail-row.is-active {
-  background: var(--accent-bg);
-  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--row-accent) 14%, var(--surface-1));
+  border-left-color: var(--row-accent);
 }
+/* Subtle "selected" sheen on the active row — a very faint horizontal
+   gradient that adds depth without competing with content. */
+.rail-row.is-active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--row-accent) 10%, transparent) 0%,
+    transparent 35%
+  );
+}
+
+/* Attention overrides — these win regardless of derived state because the
+   user-visible "needs you" affordance should always read as urgent. */
 .rail-row.is-attn {
+  --row-accent: var(--attn);
   background: var(--attn-bg);
+  animation: rail-attn-breathe 2.4s var(--ease) infinite;
 }
 .rail-row.is-attn:not(.is-active):hover {
   background: var(--attn-bg-strong);
 }
 .rail-row.is-attn.is-active {
   background: var(--attn-bg-strong);
-  border-left-color: var(--attn);
 }
+@keyframes rail-attn-breathe {
+  0%, 100% { box-shadow: inset 3px 0 0 var(--attn); }
+  50%      { box-shadow: inset 3px 0 0 var(--attn), inset 0 0 24px -8px var(--attn); }
+}
+
+/* Busy rows get a thin moving shimmer along the bottom edge — reads as
+   "this session is producing output right now". Restricted to non-active
+   busy rows so the active session's content stays the focal point. */
+.rail-row[data-state="busy"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--busy) 50%,
+    transparent 100%
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  background-position: -40% 0;
+  animation: rail-busy-shimmer 2.2s linear infinite;
+  pointer-events: none;
+}
+@keyframes rail-busy-shimmer {
+  0%   { background-position: -40% 0; }
+  100% { background-position: 140% 0; }
+}
+
+/* Dead sessions fade into the rail so live ones pop. */
+.rail-row[data-state="dead"] {
+  opacity: 0.55;
+}
+.rail-row[data-state="dead"]:hover {
+  opacity: 0.85;
+}
+
 .rail-row.is-closing {
   opacity: 0.5;
   pointer-events: none;
+}
+
+/* The body button needs to sit above ::after, otherwise the gradient can
+   eat the click target's hit-testing surface in some browsers. */
+.rail-row-body,
+.rail-close {
+  position: relative;
+  z-index: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-row.is-attn,
+  .rail-row[data-state="busy"]::before {
+    animation: none;
+  }
 }
 
 .rail-row-body {

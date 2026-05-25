@@ -61,6 +61,7 @@ export function SessionRail({
           sessions.map((s) => (
             <div
               key={s.sessionId}
+              data-state={s.state}
               className={`rail-row ${s.sessionId === current ? "is-active" : ""} ${s.needsAttention ? "is-attn" : ""} ${closing === s.sessionId ? "is-closing" : ""}`}
             >
               <button

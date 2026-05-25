@@ -1,5 +1,4 @@
 import express from "express";
-import { watch } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +8,7 @@ import {
   defaultDeps as closeSessionDeps,
   sessionFilePathForPid,
 } from "./lib/closeSession.js";
-import { HookState, type HookBroadcast } from "./lib/hookState.js";
+import { PromptState, type HookBroadcast } from "./lib/promptState.js";
 import { resolveTmuxPaneForPid } from "./lib/pane.js";
 import { parseMultipart } from "./lib/parseMultipart.js";
 import {
@@ -31,13 +30,13 @@ import {
   listPaneLocations,
   type PaneLocation,
 } from "./lib/tmuxLocations.js";
+import { readTranscriptFile, type TranscriptEvent } from "./lib/transcript.js";
 import {
-  parseLine,
-  readFromOffset,
-  readTranscriptFile,
-  ToolNameIndex,
-  type TranscriptEvent,
-} from "./lib/transcript.js";
+  openEmptyStream,
+  openLazyTranscriptStream,
+  openTranscriptStream,
+  type SseWriter,
+} from "./lib/transcriptStream.js";
 import { storeUpload } from "./lib/uploads.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -173,7 +172,7 @@ async function findTranscriptPath(sessionId: string): Promise<string | null> {
 
 app.use(express.json({ limit: "1mb" }));
 
-const hookState = new HookState();
+const promptState = new PromptState();
 type HookSubscriber = (ev: HookBroadcast) => void;
 const hookSubscribers = new Set<HookSubscriber>();
 
@@ -193,7 +192,7 @@ app.get("/api/sessions", async (_req, res) => {
     listPendingSessions(),
     listPaneLocations(),
   ]);
-  const attention = hookState.snapshot();
+  const attention = promptState.snapshot();
   const registeredPids = new Set(sessions.map((s) => s.pid));
 
   const augmented = await Promise.all(
@@ -249,7 +248,7 @@ app.get("/api/sessions", async (_req, res) => {
 
 app.post("/api/hook", (req, res) => {
   try {
-    const ev = hookState.record(req.body);
+    const ev = promptState.record(req.body);
     broadcastHook(ev);
     res.json({ ok: true });
   } catch (err) {
@@ -263,7 +262,7 @@ app.get("/api/events", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
 
-  writeEvent(res, "snapshot", hookState.snapshot());
+  writeEvent(res, "snapshot", promptState.snapshot());
 
   const sub: HookSubscriber = (ev) => writeEvent(res, "hook", ev);
   hookSubscribers.add(sub);
@@ -302,121 +301,58 @@ app.get("/api/sessions/:id/transcript", async (req, res) => {
 });
 
 app.get("/api/sessions/:id/stream", async (req, res) => {
-  // Pending session: there's no transcript file yet, so keep the SSE open
-  // with just a `ready` event and heartbeat. When the user clears the trust
-  // gate, Claude will register a real session and the UI will reload under
-  // the actual UUID — at which point this stream gets torn down.
-  if (parseSyntheticSessionId(req.params.id) !== null) {
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders?.();
-    res.write(`event: ready\ndata: ${JSON.stringify({ offset: 0 })}\n\n`);
-    const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
-    req.on("close", () => {
-      clearInterval(heartbeat);
-      res.end();
-    });
-    return;
-  }
+  const sessionId = req.params.id;
+  const isPending = parseSyntheticSessionId(sessionId) !== null;
 
-  const filePath = await findTranscriptPath(req.params.id);
-  if (!filePath) {
-    // Mirror the transcript endpoint: if the session is registered but its
-    // JSONL hasn't appeared yet, hold the stream open with ready+heartbeat
-    // rather than 404-looping the EventSource. Events that arrive later
-    // surface when the user re-selects the session (the file becomes
-    // visible on the next /transcript fetch).
-    if (await findSession(req.params.id)) {
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      res.flushHeaders?.();
-      res.write(`event: ready\ndata: ${JSON.stringify({ offset: 0 })}\n\n`);
-      const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
-      req.on("close", () => {
-        clearInterval(heartbeat);
-        res.end();
-      });
+  // Resolve the transcript file (real session). Pending sessions get
+  // ready+heartbeat only. Brand-new registered sessions whose JSONL
+  // hasn't been written yet get a lazy stream that polls for the file
+  // and upgrades to a watching stream the moment it appears — otherwise
+  // the first turn lands in the JSONL but never reaches the client.
+  let filePath: string | null = null;
+  if (!isPending) {
+    filePath = await findTranscriptPath(sessionId);
+    if (!filePath && !(await findSession(sessionId))) {
+      res.status(404).json({ error: "transcript not found" });
       return;
     }
-    res.status(404).json({ error: "transcript not found" });
-    return;
   }
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
 
-  // Prime a tool-name index from everything already in the file so that
-  // tool_result events arriving on the stream can be enriched even though
-  // their matching tool_use blocks were emitted in an earlier read pass.
-  const toolNames = new ToolNameIndex();
-  try {
-    const existing = await fs.readFile(filePath, "utf8");
-    for (const line of existing.split("\n")) {
-      const ev = parseLine(line);
-      if (ev?.kind === "assistant") toolNames.noteAssistant(ev.blocks);
-    }
-  } catch {
-    /* file may be missing — fall through */
-  }
-
-  let offset = (await fs.stat(filePath)).size;
-  res.write(`event: ready\ndata: ${JSON.stringify({ offset })}\n\n`);
-
-  let inFlight = false;
-  // First watch-fire time per pending batch; reset when drain consumes it.
-  let pendingWatchTs: number | null = null;
-  const drain = async () => {
-    if (inFlight) return;
-    inFlight = true;
-    const tWatch = pendingWatchTs ?? Date.now();
-    pendingWatchTs = null;
-    try {
-      const { events, offset: newOffset } = await readFromOffset(
-        filePath,
-        offset,
-        toolNames,
-      );
-      const tParsed = Date.now();
-      offset = newOffset;
-      maybeResolvePendingPermission(req.params.id, events);
-      for (const ev of events) {
-        const tSse = Date.now();
-        const payload = TIMING
-          ? { ...ev, _timing: { tWatch, tParsed, tSse } }
-          : ev;
-        writeEvent(res, "event", payload);
-        if (TIMING) {
-          const parsedTs = ev.ts ? Date.parse(ev.ts) : NaN;
-          const tJsonl = Number.isFinite(parsedTs) ? parsedTs : tWatch;
-          const sid = req.params.id.slice(0, 8);
-          const uuid = ev.uuid ? ev.uuid.slice(0, 8) : "-";
-          console.log(
-            `[timing] sid=${sid} kind=${ev.kind} uuid=${uuid} ` +
-              `jsonl→watch=${tWatch - tJsonl}ms ` +
-              `watch→parse=${tParsed - tWatch}ms ` +
-              `parse→sse=${tSse - tParsed}ms`,
-          );
-        }
-      }
-    } catch (err) {
-      writeEvent(res, "error", { message: String(err) });
-    } finally {
-      inFlight = false;
-    }
+  const writer: SseWriter = {
+    comment: (text) => res.write(`: ${text}\n\n`),
+    event: (name, data) =>
+      res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`),
   };
 
-  const watcher = watch(filePath, () => {
-    if (pendingWatchTs === null) pendingWatchTs = Date.now();
-    void drain();
-  });
-  const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
+  const streamOpts = {
+    timing: TIMING,
+    tag: sessionId.slice(0, 8),
+    onEvents: (events: TranscriptEvent[]) => {
+      const broadcast = promptState.noteTranscriptEvents(sessionId, events);
+      if (broadcast) broadcastHook(broadcast);
+    },
+  };
+
+  let handle;
+  if (filePath) {
+    handle = await openTranscriptStream(filePath, writer, streamOpts);
+  } else if (isPending) {
+    handle = openEmptyStream(writer);
+  } else {
+    handle = openLazyTranscriptStream(
+      () => findTranscriptPath(sessionId),
+      writer,
+      streamOpts,
+    );
+  }
 
   req.on("close", () => {
-    clearInterval(heartbeat);
-    watcher.close();
+    handle.close();
     res.end();
   });
 });
@@ -468,7 +404,8 @@ app.post("/api/sessions/:id/send", async (req, res) => {
       res.status(400).json({ error: "expected text, key, or attachments" });
       return;
     }
-    clearAttention(resolved.sessionId);
+    const broadcast = promptState.noteSendKeys(resolved.sessionId);
+    if (broadcast) broadcastHook(broadcast);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -509,7 +446,8 @@ app.post("/api/sessions/:id/upload", async (req, res) => {
 });
 
 app.post("/api/sessions/:id/attention/clear", (req, res) => {
-  clearAttention(req.params.id);
+  const next = promptState.clear(req.params.id);
+  if (next) broadcastHook({ sessionId: req.params.id, ...next });
   res.json({ ok: true });
 });
 
@@ -527,7 +465,8 @@ app.post("/api/sessions/:id/close", async (req, res) => {
       resolved.isPending ? null : sessionFilePathForPid(resolved.pid),
       closeSessionDeps,
     );
-    hookState.clear(resolved.sessionId);
+    const next = promptState.clear(resolved.sessionId);
+    if (next) broadcastHook({ sessionId: resolved.sessionId, ...next });
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -590,75 +529,19 @@ function expandHome(p: string): string {
   return p;
 }
 
-function clearAttention(sessionId: string): void {
-  const prev = hookState.get(sessionId);
-  // Either condition is enough to do work. The pending-only branch covers
-  // weird sequences like PermissionRequest → Notification(auth_success),
-  // where `needsAttention` is already false but a stale pendingPermission
-  // is still hanging on and driving the UI.
-  if (!prev || (!prev.needsAttention && !prev.pendingPermission)) return;
-  hookState.clear(sessionId);
-  const next = hookState.get(sessionId);
-  if (!next) return;
-  broadcastHook({ sessionId, ...next });
-}
-
-// New transcript events arriving after a PermissionRequest mean the user
-// already resolved the prompt — typically by typing 1/2 in the CLI. The
-// hook stream gives us no explicit "resolved" signal, but the JSONL does:
-// tool_result (approve) or a fresh assistant turn (deny) lands with a
-// timestamp strictly after `pendingPermission.requestedAt`. Drop the
-// pending state so clients stop rendering Approve/Deny.
-function maybeResolvePendingPermission(
-  sessionId: string,
-  events: TranscriptEvent[],
-): void {
-  if (events.length === 0) return;
-  const att = hookState.get(sessionId);
-  const pp = att?.pendingPermission;
-  if (!pp) return;
-  for (const ev of events) {
-    const tsMs = Date.parse(ev.ts ?? "");
-    if (Number.isFinite(tsMs) && tsMs > pp.requestedAt) {
-      clearAttention(sessionId);
-      return;
-    }
-  }
-}
-
-// Periodic resolver. The fs.watch-based detection above only fires while a
-// client has an SSE transcript stream open — which on mobile is fragile
-// (the OS suspends backgrounded tabs and missed events aren't replayed).
-// This loop is the safety net: every tick, stat the transcript file for
-// any session with a pendingPermission and clear it once the file has
-// grown past the requestedAt. Independent of any client; bounds the
-// "stale Approve/Deny" window to the tick interval.
+// Periodic safety net for the fs.watch-based resolver above: while a
+// client has an SSE transcript stream open we get watch fires, but mobile
+// suspends backgrounded SSE connections and missed events aren't replayed.
+// This loop is independent of any client — it bounds the "stale Approve/
+// Deny" window to the tick interval.
 const PERMISSION_RESOLVE_TICK_MS = 1500;
-// Small fudge so a transcript write that landed in the same millisecond as
-// the PermissionRequest (unlikely but possible on a fast machine) doesn't
-// instantly self-resolve. Real CLI approvals take humans seconds.
-const PERMISSION_RESOLVE_SKEW_MS = 50;
-
-async function resolveStaleFromTranscripts(): Promise<void> {
-  const snap = hookState.snapshot();
-  for (const [sessionId, att] of Object.entries(snap)) {
-    const pp = att.pendingPermission;
-    if (!pp) continue;
-    const path = hookState.pendingTranscriptPath(sessionId);
-    if (!path) continue;
-    try {
-      const stat = await fs.stat(path);
-      if (stat.mtimeMs > pp.requestedAt + PERMISSION_RESOLVE_SKEW_MS) {
-        clearAttention(sessionId);
-      }
-    } catch {
-      /* transcript missing or transiently unreadable — try again next tick */
-    }
-  }
-}
 
 setInterval(() => {
-  void resolveStaleFromTranscripts();
+  void promptState
+    .resolveStaleFromTranscripts((p) => fs.stat(p))
+    .then((broadcasts) => {
+      for (const b of broadcasts) broadcastHook(b);
+    });
 }, PERMISSION_RESOLVE_TICK_MS).unref?.();
 
 app.use(express.static(path.join(__dirname, "..", "public")));

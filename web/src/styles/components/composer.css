@@ -5,6 +5,9 @@
   border-top: 1px solid var(--border);
   background: var(--panel);
   position: relative; /* anchors the drop overlay */
+  /* Sits above .session-presence-wrap so the status chip can hide *behind*
+     the composer's surface during its enter/exit slide. */
+  z-index: 2;
 }
 .composer-wrap.is-disabled {
   opacity: 0.7;

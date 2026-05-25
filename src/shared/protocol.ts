@@ -175,9 +175,19 @@ export function indexToolResults(
 
 // ---- Attention (from /api/events SSE) ----
 
-// Per-session attention state, exactly as recorded by HookState on the
+// What kind of input Claude Code is waiting for. Drives Composer UI:
+// "permission" shows Approve/Deny; "elicitation" shows just the keypad;
+// "idle" lets the user type freely; null means not waiting on the user.
+// Map per docs/interactions.md — informational types collapse to null.
+export type PromptKind = "permission" | "elicitation" | "idle" | null;
+
+// Per-session attention state, exactly as recorded by PromptState on the
 // server. The snapshot endpoint and the streamed hook events both carry
 // this shape; clients consume it verbatim.
+//
+// `promptKind` is the server's verdict on what Claude is waiting for —
+// derived from the hook stream + transcript growth + send-keys signals.
+// Clients render it directly; they no longer derive their own answer.
 export interface AttentionInfo {
   needsAttention: boolean;
   lastEvent: string;
@@ -185,31 +195,31 @@ export interface AttentionInfo {
   message?: string;
   notificationType?: string;
   pendingPermission?: PendingPermission;
+  promptKind: PromptKind;
 }
 
 export interface HookBroadcast extends AttentionInfo {
   sessionId: string;
 }
 
-// What kind of input Claude Code is waiting for. Drives Composer UI:
-// "permission" shows Approve/Deny; "elicitation" shows just the keypad;
-// "idle" lets the user type freely; null means not waiting on the user.
-// Map per docs/interactions.md — informational types collapse to null.
-export type PromptKind = "permission" | "elicitation" | "idle" | null;
-
+// Pure derivation from AttentionInfo's hook-shaped fields. Server-side
+// PromptState calls this once per state mutation so the wire field stays
+// in sync with the other fields. No `resolvedAt` parameter — resolution
+// now mutates the underlying state directly (drops pendingPermission /
+// flips needsAttention), so derivation reads the post-resolution view.
 export function derivePromptKind(
-  att: AttentionInfo | undefined,
-  resolvedAt: number,
+  att:
+    | (Pick<AttentionInfo, "needsAttention" | "lastEvent" | "notificationType"> & {
+        pendingPermission?: PendingPermission;
+      })
+    | undefined,
 ): PromptKind {
   if (!att) return null;
+  if (!att.needsAttention) return null;
   // PermissionRequest always wins — even if a later Notification of a
   // different kind arrived, the tool decision is the user's actual gate.
-  if (att.pendingPermission && att.pendingPermission.requestedAt > resolvedAt) {
-    return "permission";
-  }
+  if (att.pendingPermission) return "permission";
   if (att.lastEvent !== "Notification") return null;
-  const last = att.lastEventAt ?? 0;
-  if (last <= resolvedAt) return null;
   switch (att.notificationType) {
     case "permission_prompt":
       return "permission";

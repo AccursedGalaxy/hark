@@ -9,11 +9,7 @@ import type {
   TranscriptEvent,
   UploadedFile,
 } from "../lib/protocol";
-import {
-  derivePromptKind,
-  deriveState,
-  parseSyntheticSessionId,
-} from "../lib/protocol";
+import { deriveState, parseSyntheticSessionId } from "../lib/protocol";
 import {
   clearAttention as clearAttentionApi,
   closeSession as closeSessionApi,
@@ -48,8 +44,8 @@ export interface SessionsApi {
     onProgress?: (loaded: number, total: number) => void,
   ) => Promise<UploadedFile[]>;
   // What Claude Code is waiting for on the current session, or null if it
-  // isn't. Derived from the Notification hook's notification_type field;
-  // see derivePromptKind in protocol.ts.
+  // isn't. Decided server-side by PromptState and broadcast as the
+  // `promptKind` field on AttentionInfo.
   currentPromptKind: PromptKind;
   // Tool detail for the pending permission on the current session, if any
   // (from the PermissionRequest hook). Drives the rich permission card.
@@ -103,10 +99,6 @@ export function useSessions(): SessionsApi {
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
-  // Per-session timestamp marking when the user resolved the latest pending
-  // Notification (by sending text or keys). A Notification is considered live
-  // when lastEventAt > resolvedAt[sessionId].
-  const [resolvedAt, setResolvedAt] = useState<Record<string, number>>({});
 
   const sessionsRef = useRef<RawSession[]>([]);
   sessionsRef.current = rawSessions;
@@ -149,6 +141,7 @@ export function useSessions(): SessionsApi {
               message: v.message,
               notificationType: v.notificationType,
               pendingPermission: v.pendingPermission,
+              promptKind: v.promptKind ?? null,
             };
           }
           setAttention(next);
@@ -164,6 +157,7 @@ export function useSessions(): SessionsApi {
               message: ev.message,
               notificationType: ev.notificationType,
               pendingPermission: ev.pendingPermission,
+              promptKind: ev.promptKind ?? null,
             },
           }));
         },
@@ -202,17 +196,13 @@ export function useSessions(): SessionsApi {
 
   const currentPromptKind = useMemo<PromptKind>(() => {
     if (!current) return null;
-    return derivePromptKind(attention[current], resolvedAt[current] ?? 0);
-  }, [current, attention, resolvedAt]);
+    return attention[current]?.promptKind ?? null;
+  }, [current, attention]);
 
   const currentPendingPermission = useMemo<PendingPermission | null>(() => {
     if (!current) return null;
-    const att = attention[current];
-    const pp = att?.pendingPermission;
-    if (!pp) return null;
-    if (pp.requestedAt <= (resolvedAt[current] ?? 0)) return null;
-    return pp;
-  }, [current, attention, resolvedAt]);
+    return attention[current]?.pendingPermission ?? null;
+  }, [current, attention]);
 
   const setCurrent = useCallback((id: string | null) => {
     setCurrentState(id);
@@ -297,17 +287,27 @@ export function useSessions(): SessionsApi {
         setEvents((prev) => [...prev, ev]);
         // External resolution: any new transcript event newer than the
         // pending permission means the user already answered the prompt
-        // somewhere else (e.g., typing 1 in the CLI). Bumping resolvedAt
-        // hides Approve/Deny immediately instead of waiting for the
-        // server-side broadcast — which fires from the same signal but
-        // takes a round-trip.
+        // somewhere else (e.g., typing 1 in the CLI). Clear the local
+        // attention immediately instead of waiting for the server-side
+        // broadcast — which fires from the same signal but takes a
+        // round-trip. Server's PromptState.noteTranscriptEvents is the
+        // authoritative resolver; this is just optimistic UI.
         const tsMs = Date.parse(ev.ts ?? "");
-        if (Number.isFinite(tsMs)) {
-          setResolvedAt((prev) => {
-            const cur = prev[sessionId] ?? 0;
-            return tsMs > cur ? { ...prev, [sessionId]: tsMs } : prev;
-          });
-        }
+        if (!Number.isFinite(tsMs)) return;
+        setAttention((prev) => {
+          const cur = prev[sessionId];
+          const pp = cur?.pendingPermission;
+          if (!cur || !pp || tsMs <= pp.requestedAt) return prev;
+          return {
+            ...prev,
+            [sessionId]: {
+              ...cur,
+              needsAttention: false,
+              pendingPermission: undefined,
+              promptKind: null,
+            },
+          };
+        });
       },
     });
 
@@ -323,7 +323,23 @@ export function useSessions(): SessionsApi {
       setSendError(null);
       try {
         await sendToSession(current, body);
-        setResolvedAt((prev) => ({ ...prev, [current]: Date.now() }));
+        // Optimistic clear: the server will broadcast the same state in a
+        // moment via PromptState.noteSendKeys, but updating locally avoids
+        // a visible flash of the now-stale prompt UI during the round-trip.
+        setAttention((prev) => {
+          const cur = prev[current];
+          if (!cur) return prev;
+          if (!cur.needsAttention && !cur.pendingPermission) return prev;
+          return {
+            ...prev,
+            [current]: {
+              ...cur,
+              needsAttention: false,
+              pendingPermission: undefined,
+              promptKind: null,
+            },
+          };
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "send failed";
         setSendError(msg);
