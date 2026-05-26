@@ -399,7 +399,7 @@ export function Composer({
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (slashMenu.onKeyDown(e)) return;
-    if (e.key === "Enter" && !e.shiftKey && !isTouch()) {
+    if (e.key === "Enter" && !e.shiftKey && shouldSendOnEnter()) {
       e.preventDefault();
       void submitText();
     }
@@ -694,6 +694,11 @@ export function Composer({
           <button
             type="button"
             className="send"
+            // preventDefault on pointerdown keeps focus on the textarea
+            // through the tap. Without this, iOS PWA (Add to Home Screen)
+            // blurs the textarea, the soft keyboard collapses, the layout
+            // shifts, and the subsequent click never lands on Send.
+            onPointerDown={(e) => e.preventDefault()}
             onClick={() => void submitText()}
             disabled={!canSend}
             title={uploads.length > 0 ? "Waiting for upload…" : "Send (Enter)"}
@@ -799,6 +804,20 @@ function isTouch() {
     typeof window !== "undefined" &&
     window.matchMedia("(pointer: coarse)").matches
   );
+}
+
+// Whether pressing Enter (without Shift) should submit instead of inserting
+// a newline. Desktop / mouse devices always submit. On a touch device we
+// only submit when there is no on-screen keyboard visible — that's the
+// signal that the user is typing on a hardware keyboard (e.g. iPad +
+// Magic Keyboard), where Enter-to-send is the expected behavior.
+function shouldSendOnEnter() {
+  if (typeof window === "undefined") return true;
+  if (!window.matchMedia("(pointer: coarse)").matches) return true;
+  const vv = window.visualViewport;
+  if (!vv) return false;
+  const softKeyboardGap = window.innerHeight - (vv.height + vv.offsetTop);
+  return softKeyboardGap <= 8;
 }
 
 function formatSize(bytes: number): string {
