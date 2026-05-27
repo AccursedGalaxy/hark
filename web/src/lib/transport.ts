@@ -1,5 +1,6 @@
 import type {
   HookBroadcast,
+  ProjectInfo,
   RawSession,
   SendBody,
   SlashCommand,
@@ -131,6 +132,78 @@ export async function fetchRecentSpawnDirs(): Promise<string[]> {
   if (!r.ok) return [];
   const data = (await r.json()) as { dirs?: string[] };
   return Array.isArray(data.dirs) ? data.dirs : [];
+}
+
+// ---- Projects ------------------------------------------------------------
+
+export async function fetchProjects(): Promise<ProjectInfo[]> {
+  const r = await fetch("/api/projects");
+  if (!r.ok) throw new Error(`projects: ${r.status}`);
+  const data = (await r.json()) as { projects: ProjectInfo[] };
+  return data.projects;
+}
+
+export type PlanResponse =
+  | { exists: true; content: string; mtimeMs: number }
+  | { exists: false };
+
+export async function fetchProjectPlan(
+  projectKey: string,
+): Promise<PlanResponse> {
+  const r = await fetch(
+    `/api/projects/${encodeURIComponent(projectKey)}/plan`,
+  );
+  if (!r.ok) throw new Error(`plan: ${r.status}`);
+  return (await r.json()) as PlanResponse;
+}
+
+export async function captureToProject(
+  projectKey: string,
+  text: string,
+): Promise<ProjectInfo | null> {
+  const r = await fetch(
+    `/api/projects/${encodeURIComponent(projectKey)}/capture`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    },
+  );
+  if (!r.ok) {
+    let msg = `capture failed (${r.status})`;
+    try {
+      const j = (await r.json()) as { error?: string };
+      if (j.error) msg = j.error;
+    } catch {
+      /* keep default */
+    }
+    throw new Error(msg);
+  }
+  const data = (await r.json()) as { ok: true; project: ProjectInfo | null };
+  return data.project;
+}
+
+export interface InstallResponse {
+  ok: true;
+  plan: { path: string; created: boolean };
+  claudemd: {
+    path: string;
+    created: boolean;
+    replaced: boolean;
+    unchanged: boolean;
+    appended: boolean;
+  };
+}
+
+export async function installProject(
+  projectKey: string,
+): Promise<InstallResponse> {
+  const r = await fetch(
+    `/api/projects/${encodeURIComponent(projectKey)}/install`,
+    { method: "POST" },
+  );
+  if (!r.ok) throw new Error(`install: ${r.status}`);
+  return (await r.json()) as InstallResponse;
 }
 
 export async function spawnSession(cwd: string): Promise<SpawnResponse> {

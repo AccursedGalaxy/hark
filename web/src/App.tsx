@@ -1,14 +1,19 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { CaptureModal } from "./components/CaptureModal";
 import { Composer } from "./components/Composer";
 import { ContextRail } from "./components/ContextRail";
+import { PlanPanel } from "./components/PlanPanel";
 import { Sidebar } from "./components/Sidebar";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { TaskListPanel } from "./components/TaskListPanel";
 import { TopBar } from "./components/TopBar";
 import { Transcript } from "./components/Transcript";
 import { TrustPrompt } from "./components/TrustPrompt";
+import { useCaptureShortcut } from "./hooks/useCaptureShortcut";
 import { useMediaQuery } from "./hooks/useMediaQuery";
+import { useProjects } from "./hooks/useProjects";
 import { useSessions } from "./hooks/useSessions";
+import { pickCaptureDefaultProject } from "./lib/captureDefaults";
 import { sessionLabel, tildeify } from "./lib/format";
 import { getContextRail, setContextRail } from "./lib/theme";
 
@@ -37,7 +42,7 @@ export default function App() {
     attentionCount,
     current,
     currentSession,
-    setCurrent,
+    setCurrent: setCurrentRaw,
     events,
     transcriptLoading,
     transcriptError,
@@ -51,6 +56,42 @@ export default function App() {
     refresh,
   } = useSessions();
 
+  const { projects, refresh: refreshProjects } = useProjects();
+
+  // Mutually-exclusive selection: a session OR a project owns the main pane.
+  // Selecting one always clears the other; this matches the user's mental
+  // model where the rail row they clicked drives what's on screen.
+  const [currentProject, setCurrentProjectState] = useState<string | null>(
+    null,
+  );
+  const setCurrent = useCallback(
+    (id: string | null) => {
+      setCurrentRaw(id);
+      if (id !== null) setCurrentProjectState(null);
+    },
+    [setCurrentRaw],
+  );
+  const setCurrentProject = useCallback(
+    (key: string | null) => {
+      setCurrentProjectState(key);
+      if (key !== null) setCurrentRaw(null);
+    },
+    [setCurrentRaw],
+  );
+
+  const [captureOpen, setCaptureOpen] = useState(false);
+  useCaptureShortcut(useCallback(() => setCaptureOpen(true), []));
+
+  const currentProjectInfo = currentProject
+    ? projects.find((p) => p.key === currentProject) ?? null
+    : null;
+
+  const captureDefault = pickCaptureDefaultProject({
+    selectedProjectKey: currentProject,
+    currentSessionProjectKey: currentSession?.projectKey,
+    projects,
+  });
+
   useEffect(() => {
     const prefix = attentionCount > 0 ? `(${attentionCount}) ` : "";
     document.title = `${prefix}${BASE_TITLE}`;
@@ -60,9 +101,21 @@ export default function App() {
   useEffect(() => {
     if (!wide) return;
     if (current) return;
+    if (currentProject) return;
     const first = sessions[0];
     if (first) setCurrent(first.sessionId);
-  }, [wide, current, sessions, setCurrent]);
+  }, [wide, current, currentProject, sessions, setCurrent]);
+
+  // If a previously-selected project disappears (e.g. install rolled back),
+  // drop the selection so the main pane reverts to session/empty instead of
+  // rendering against a stale PlanPanel.
+  useEffect(() => {
+    if (!currentProject) return;
+    if (projects.length === 0) return;
+    if (!projects.some((p) => p.key === currentProject)) {
+      setCurrentProjectState(null);
+    }
+  }, [currentProject, projects]);
 
   useEffect(() => {
     if (!current) return;
@@ -90,8 +143,14 @@ export default function App() {
   }, [awaitingPid, sessions, setCurrent]);
 
   const showSidebar = wide;
-  const showSession = wide || !!current;
-  const ctxVisible = wide && showContext && !!currentSession && currentSession.kind !== "pending";
+  const showMain = wide || !!current || !!currentProject;
+  const showRailOnNarrow = !wide && !current && !currentProject;
+  const ctxVisible =
+    wide &&
+    showContext &&
+    !currentProject &&
+    !!currentSession &&
+    currentSession.kind !== "pending";
 
   return (
     <div
@@ -103,7 +162,7 @@ export default function App() {
         </div>
       )}
 
-      {showSidebar && (
+      {(showSidebar || showRailOnNarrow) && (
         <Sidebar
           sessions={sessions}
           current={current}
@@ -119,31 +178,16 @@ export default function App() {
             setShowContext(v);
             setContextRail(v);
           }}
+          projects={projects}
+          currentProject={currentProject}
+          onPickProject={setCurrentProject}
+          onCapture={() => setCaptureOpen(true)}
         />
       )}
 
-      {!showSidebar && !current && (
-        <Sidebar
-          sessions={sessions}
-          current={current}
-          onPick={setCurrent}
-          attentionCount={attentionCount}
-          onSpawned={(pid) => {
-            if (pid !== null) setAwaitingPid(pid);
-            refresh();
-          }}
-          onClose={closeSession}
-          showContext={showContext}
-          onShowContext={(v) => {
-            setShowContext(v);
-            setContextRail(v);
-          }}
-        />
-      )}
-
-      {showSession && (
+      {showMain && (
         <main className="main">
-          {!wide && currentSession && (
+          {!wide && currentSession && !currentProject && (
             <SessionSwitcher
               sessions={sessions}
               current={current}
@@ -151,7 +195,14 @@ export default function App() {
             />
           )}
 
-          {currentSession ? (
+          {currentProjectInfo ? (
+            <PlanPanel
+              project={currentProjectInfo}
+              onBack={!wide ? () => setCurrentProject(null) : undefined}
+              onCapture={() => setCaptureOpen(true)}
+              onProjectChanged={refreshProjects}
+            />
+          ) : currentSession ? (
             <>
               <TopBar
                 session={currentSession}
@@ -220,6 +271,17 @@ export default function App() {
       {ctxVisible && currentSession && (
         <ContextRail session={currentSession} events={events} />
       )}
+
+      <CaptureModal
+        open={captureOpen}
+        projects={projects}
+        defaultProjectKey={captureDefault}
+        onClose={() => setCaptureOpen(false)}
+        onCaptured={() => {
+          // Bump planMtime so any open PlanPanel re-fetches immediately.
+          refreshProjects();
+        }}
+      />
     </div>
   );
 }

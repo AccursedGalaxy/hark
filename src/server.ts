@@ -25,11 +25,28 @@ import { sendKey, sendLiteral, sendText } from "./lib/sendKeys.js";
 import { discoverCommands } from "./lib/slashCommands.js";
 import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
+import { applyManagedBlock } from "./lib/claudemdBlock.js";
+import { appendCapture } from "./lib/projectCapture.js";
+import {
+  CLAUDE_MD_FILENAME,
+  PLAN_FILENAME,
+} from "./lib/projectConstants.js";
+import {
+  bootstrapPlanIfMissing,
+  planExists,
+  planMtime,
+  readPlan,
+} from "./lib/projectPlan.js";
+import {
+  resolveProjectFromCwd,
+  type ResolveDeps,
+} from "./lib/projectResolution.js";
 import {
   formatLocation,
   listPaneLocations,
   type PaneLocation,
 } from "./lib/tmuxLocations.js";
+import type { ProjectInfo } from "./shared/protocol.js";
 import {
   readSessionTitle,
   readTranscriptFile,
@@ -162,6 +179,55 @@ async function resolveSessionPane(id: string): Promise<ResolvedPane | null> {
   };
 }
 
+// Project resolution is per-cwd and effectively immutable for the lifetime
+// of the server (sessions don't change directories; if a user moves a repo
+// they'll restart hark). Cache aggressively so we don't shell out to `git
+// rev-parse` on every poll for every session. The cache value is a
+// "shallow" ProjectInfo with projectKey + name only — planExists/planMtime
+// are looked up fresh per request via projectPlan, which is cheap (a stat).
+type ShallowProject = Pick<ProjectInfo, "key" | "root" | "name">;
+const projectCache = new Map<string, ShallowProject | null>();
+let projectDeps: ResolveDeps | undefined;
+
+async function resolveProjectCached(
+  cwd: string,
+): Promise<ShallowProject | null> {
+  if (projectCache.has(cwd)) return projectCache.get(cwd)!;
+  const resolved = await resolveProjectFromCwd(cwd, projectDeps);
+  const shallow: ShallowProject | null = resolved
+    ? { key: resolved.key, root: resolved.root, name: resolved.name }
+    : null;
+  projectCache.set(cwd, shallow);
+  return shallow;
+}
+
+// Look up a project the server already knows about. A "known" project is
+// one that's been resolved as the project of an active session's cwd —
+// we never trust client-supplied project keys (paths) blind, since the
+// project endpoints would otherwise write to any absolute path on disk.
+function findKnownProject(key: string): ShallowProject | null {
+  for (const v of projectCache.values()) {
+    if (v && v.key === key) return v;
+  }
+  return null;
+}
+
+async function projectInfoForKey(
+  key: string,
+): Promise<ProjectInfo | null> {
+  const shallow = findKnownProject(key);
+  if (!shallow) return null;
+  const [exists, mtime] = await Promise.all([
+    planExists(shallow.root),
+    planMtime(shallow.root),
+  ]);
+  return {
+    ...shallow,
+    planExists: exists,
+    planMtime: mtime,
+  };
+}
+
 async function findTranscriptPath(sessionId: string): Promise<string | null> {
   let projects: string[];
   try {
@@ -209,9 +275,10 @@ app.get("/api/sessions", async (_req, res) => {
   const augmented = await Promise.all(
     sessions.map(async (s) => {
       const att = attention[s.sessionId];
-      const [pane, transcriptPath] = await Promise.all([
+      const [pane, transcriptPath, project] = await Promise.all([
         resolveTmuxPaneForPid(s.pid),
         findTranscriptPath(s.sessionId),
+        resolveProjectCached(s.cwd),
       ]);
       const loc: PaneLocation | undefined =
         pane ? paneLocations.get(pane.paneId) : undefined;
@@ -239,6 +306,7 @@ app.get("/api/sessions", async (_req, res) => {
         // up an in-flight prompt without waiting for the next hook.
         pending: att?.pending,
         waitingFor: s.waitingFor,
+        projectKey: project?.key ?? null,
       };
     }),
   );
@@ -246,29 +314,33 @@ app.get("/api/sessions", async (_req, res) => {
   // Pending rows: claude processes waiting on Claude's trust dialog (or
   // otherwise pre-init). Driving `1\r` from the rail lets the user clear
   // the gate without having to switch to tmux.
-  const pendingRows = pending
-    .filter((p) => !registeredPids.has(p.pid))
-    .map((p) => {
-      const loc = paneLocations.get(p.paneId);
-      const now = Date.now();
-      return {
-        pid: p.pid,
-        sessionId: p.sessionId,
-        cwd: p.cwd,
-        startedAt: now,
-        updatedAt: now,
-        version: "",
-        kind: "pending" as const,
-        status: "idle" as const,
-        hasTmuxPane: true,
-        tmuxLocation: loc ? formatLocation(loc) : null,
-        tmuxWindowName: loc?.windowName ?? null,
-        needsAttention: true,
-        lastEvent: "Pending",
-        lastEventAt: now,
-        lastEventMessage: "Waiting for trust confirmation",
-      };
-    });
+  const pendingRows = await Promise.all(
+    pending
+      .filter((p) => !registeredPids.has(p.pid))
+      .map(async (p) => {
+        const loc = paneLocations.get(p.paneId);
+        const now = Date.now();
+        const project = await resolveProjectCached(p.cwd);
+        return {
+          pid: p.pid,
+          sessionId: p.sessionId,
+          cwd: p.cwd,
+          startedAt: now,
+          updatedAt: now,
+          version: "",
+          kind: "pending" as const,
+          status: "idle" as const,
+          hasTmuxPane: true,
+          tmuxLocation: loc ? formatLocation(loc) : null,
+          tmuxWindowName: loc?.windowName ?? null,
+          needsAttention: true,
+          lastEvent: "Pending",
+          lastEventAt: now,
+          lastEventMessage: "Waiting for trust confirmation",
+          projectKey: project?.key ?? null,
+        };
+      }),
+  );
 
   res.json({ sessions: [...augmented, ...pendingRows] });
 });
@@ -572,6 +644,105 @@ function expandHome(p: string): string {
   if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
   return p;
 }
+
+// ---- Project endpoints --------------------------------------------------
+//
+// A "project" is the git repo containing one or more sessions' cwds (see
+// projectResolution.ts). Keys are absolute repo paths, URL-encoded on the
+// wire. We only expose projects the server has actually resolved from a
+// live session — clients never get to write into arbitrary paths.
+
+app.get("/api/projects", async (_req, res) => {
+  try {
+    // Resolve every live session's cwd into the cache, then collect the
+    // distinct projects from it. This also covers pending sessions so a
+    // project still shows up if its only session is mid-trust-prompt.
+    const [sessions, pending] = await Promise.all([
+      listLiveSessions(),
+      listPendingSessions(),
+    ]);
+    await Promise.all([
+      ...sessions.map((s) => resolveProjectCached(s.cwd)),
+      ...pending.map((p) => resolveProjectCached(p.cwd)),
+    ]);
+    const seen = new Set<string>();
+    const out: ProjectInfo[] = [];
+    for (const v of projectCache.values()) {
+      if (!v || seen.has(v.key)) continue;
+      seen.add(v.key);
+      const [exists, mtime] = await Promise.all([
+        planExists(v.root),
+        planMtime(v.root),
+      ]);
+      out.push({ ...v, planExists: exists, planMtime: mtime });
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ projects: out });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/projects/:key/plan", async (req, res) => {
+  const project = findKnownProject(req.params.key);
+  if (!project) {
+    res.status(404).json({ error: "project not found" });
+    return;
+  }
+  try {
+    if (!(await planExists(project.root))) {
+      res.json({ exists: false });
+      return;
+    }
+    const { content, mtimeMs } = await readPlan(project.root);
+    res.json({ exists: true, content, mtimeMs });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post("/api/projects/:key/capture", async (req, res) => {
+  const project = findKnownProject(req.params.key);
+  if (!project) {
+    res.status(404).json({ error: "project not found" });
+    return;
+  }
+  const body = (req.body ?? {}) as { text?: unknown };
+  if (typeof body.text !== "string" || body.text.trim().length === 0) {
+    res.status(400).json({ error: "text is required" });
+    return;
+  }
+  try {
+    await appendCapture(project.root, project.name, body.text);
+    const info = await projectInfoForKey(project.key);
+    res.json({ ok: true, project: info });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post("/api/projects/:key/install", async (req, res) => {
+  const project = findKnownProject(req.params.key);
+  if (!project) {
+    res.status(404).json({ error: "project not found" });
+    return;
+  }
+  try {
+    const created = await bootstrapPlanIfMissing(project.root, project.name);
+    const claudemdPath = path.join(project.root, CLAUDE_MD_FILENAME);
+    const claudemd = await applyManagedBlock(claudemdPath);
+    res.json({
+      ok: true,
+      plan: {
+        path: path.join(project.root, PLAN_FILENAME),
+        created,
+      },
+      claudemd: { path: claudemdPath, ...claudemd },
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // Periodic safety net for the fs.watch-based resolver above: while a
 // client has an SSE transcript stream open we get watch fires, but mobile

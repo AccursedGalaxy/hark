@@ -175,6 +175,35 @@ export interface RawSession {
   // header can show *what* the session is blocked on even before the matching
   // hook arrives.
   waitingFor?: string;
+  // Stable identifier of the project this session belongs to (the absolute
+  // path of the containing git repo root). `null` when the session's cwd
+  // isn't inside any repo — capture is disabled for those.
+  projectKey?: string | null;
+}
+
+// ---- Projects ----
+//
+// A project is the git repo containing a session's cwd. Hark derives this
+// per-session via `git rev-parse --show-toplevel`. The key is the absolute
+// path of the repo root — stable across sessions, URL-encoded in routes.
+// `name` is the basename, used purely for display.
+export interface ProjectInfo {
+  key: string;
+  root: string;
+  name: string;
+  // Whether PLAN.md exists on disk yet. Bootstrap writes the skeleton on
+  // first capture / first install — until then this is false and the rail
+  // can show a "set up" affordance.
+  planExists: boolean;
+  // PLAN.md mtime in ms, or null when the file doesn't exist. The rail
+  // refetches when this advances so other sessions' updates surface.
+  planMtime: number | null;
+}
+
+// Captures live as appended lines in PLAN.md's Inbox section. The wire
+// shape is intentionally trivial — the doc itself owns the formatting.
+export interface CaptureRequest {
+  text: string;
 }
 
 // Derived UI state. The backend's raw `status` plus the hook attention layer

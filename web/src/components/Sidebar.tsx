@@ -2,7 +2,16 @@ import { useMemo, useState } from "react";
 import type { SessionView } from "../hooks/useSessions";
 import { sessionLabel, tildeify } from "../lib/format";
 import { setTheme, type Theme, getActiveTheme } from "../lib/theme";
-import { BranchIcon, CloseIcon, PlusIcon, SearchIcon, SettingsIcon } from "./icons";
+import type { ProjectInfo } from "../lib/protocol";
+import {
+  BranchIcon,
+  CloseIcon,
+  FolderIcon,
+  PlusIcon,
+  SearchIcon,
+  SettingsIcon,
+  SparkIcon,
+} from "./icons";
 import { NewSessionButton } from "./NewSessionButton";
 import { SettingsPopover } from "./SettingsPopover";
 
@@ -24,6 +33,10 @@ export function Sidebar({
   onClose,
   showContext,
   onShowContext,
+  projects,
+  currentProject,
+  onPickProject,
+  onCapture,
 }: {
   sessions: SessionView[];
   current: string | null;
@@ -33,6 +46,10 @@ export function Sidebar({
   onClose: (id: string) => Promise<void>;
   showContext: boolean;
   onShowContext: (v: boolean) => void;
+  projects: ProjectInfo[];
+  currentProject: string | null;
+  onPickProject: (key: string | null) => void;
+  onCapture: () => void;
 }) {
   const [filter, setFilter] = useState("");
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -63,7 +80,59 @@ export function Sidebar({
     return { needs, idle };
   }, [filtered]);
 
-  const ordered = [...needs, ...idle];
+  const ordered = useMemo(() => [...needs, ...idle], [needs, idle]);
+
+  // Group sessions by projectKey, preserving the needs-first ordering inside
+  // each group. Sessions without a projectKey land in the trailing "no
+  // project" bucket; they're rendered as a flat list without a header so the
+  // rail doesn't show a confusing empty/orphan label at the bottom.
+  const { projectGroups, orphanSessions } = useMemo(() => {
+    const groups = new Map<string, SessionView[]>();
+    const orphans: SessionView[] = [];
+    for (const s of ordered) {
+      const key = s.projectKey ?? null;
+      if (!key) {
+        orphans.push(s);
+        continue;
+      }
+      const bucket = groups.get(key) ?? [];
+      bucket.push(s);
+      groups.set(key, bucket);
+    }
+
+    const projectByKey = new Map(projects.map((p) => [p.key, p] as const));
+    const orderedKeys: string[] = [];
+    const seen = new Set<string>();
+    for (const s of ordered) {
+      const k = s.projectKey;
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      orderedKeys.push(k);
+    }
+    // Surface projects that exist server-side but have no sessions yet, so
+    // the user can still click into PLAN.md from the rail.
+    for (const p of projects) {
+      if (!seen.has(p.key)) {
+        seen.add(p.key);
+        orderedKeys.push(p.key);
+      }
+    }
+
+    const result = orderedKeys.map((key) => {
+      const info = projectByKey.get(key);
+      const name =
+        info?.name ??
+        key.split("/").filter(Boolean).slice(-1)[0] ??
+        key;
+      return {
+        key,
+        name,
+        sessions: groups.get(key) ?? [],
+      };
+    });
+
+    return { projectGroups: result, orphanSessions: orphans };
+  }, [ordered, projects]);
 
   const handleClose = async (s: SessionView, ev: React.MouseEvent) => {
     ev.stopPropagation();
@@ -94,6 +163,15 @@ export function Sidebar({
           <span className="brand-dot"></span>
           hark
         </div>
+        <button
+          type="button"
+          className="rail-capture-btn"
+          onClick={onCapture}
+          title="Capture to project (Cmd/Ctrl+I)"
+          aria-label="Open capture modal"
+        >
+          <SparkIcon />
+        </button>
         <div className="brand-meta">
           <div className="theme-switch" role="tablist" aria-label="Theme">
             <button
@@ -166,7 +244,7 @@ export function Sidebar({
       </div>
 
       <div className="sessions">
-        {ordered.length === 0 ? (
+        {projectGroups.length === 0 && orphanSessions.length === 0 ? (
           <div
             style={{
               padding: "12px 14px",
@@ -178,16 +256,38 @@ export function Sidebar({
             No active sessions
           </div>
         ) : (
-          ordered.map((s) => (
-            <SessionRow
-              key={s.sessionId}
-              session={s}
-              active={s.sessionId === current}
-              closing={closing === s.sessionId}
-              onClick={() => onPick(s.sessionId)}
-              onClose={(e) => void handleClose(s, e)}
-            />
-          ))
+          <>
+            {projectGroups.map((g) => (
+              <div key={g.key} className="project-group">
+                <ProjectHeader
+                  name={g.name}
+                  count={g.sessions.length}
+                  active={currentProject === g.key}
+                  onClick={() => onPickProject(g.key)}
+                />
+                {g.sessions.map((s) => (
+                  <SessionRow
+                    key={s.sessionId}
+                    session={s}
+                    active={s.sessionId === current}
+                    closing={closing === s.sessionId}
+                    onClick={() => onPick(s.sessionId)}
+                    onClose={(e) => void handleClose(s, e)}
+                  />
+                ))}
+              </div>
+            ))}
+            {orphanSessions.map((s) => (
+              <SessionRow
+                key={s.sessionId}
+                session={s}
+                active={s.sessionId === current}
+                closing={closing === s.sessionId}
+                onClick={() => onPick(s.sessionId)}
+                onClose={(e) => void handleClose(s, e)}
+              />
+            ))}
+          </>
         )}
       </div>
 
@@ -216,6 +316,40 @@ export function Sidebar({
         onShowContext={onShowContext}
       />
     </aside>
+  );
+}
+
+function ProjectHeader({
+  name,
+  count,
+  active,
+  onClick,
+}: {
+  name: string;
+  count: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <div
+      className={"project-header" + (active ? " active" : "")}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      title={`Open ${name} PLAN`}
+    >
+      <span className="project-header-icn" aria-hidden>
+        <FolderIcon />
+      </span>
+      <span className="project-header-name">{name}</span>
+      <span className="project-header-count">{count}</span>
+    </div>
   );
 }
 

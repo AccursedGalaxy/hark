@@ -1416,3 +1416,229 @@
 
 /* assistant-line containing markdown should inherit color */
 .assistant-line.has-md { color: var(--fg-1); }
+
+/* ───── project group headers (sidebar) ───────────────── */
+.project-group {
+  margin-bottom: 6px;
+}
+.project-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 8px 14px;
+  margin: 8px 0 4px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--fg-1);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  transition: background .15s, color .15s;
+}
+.project-header:hover { background: oklch(from var(--ink-2) l c h / 0.5); color: var(--fg-0); }
+.project-header.active {
+  background: var(--accent-soft);
+  color: var(--fg-0);
+  box-shadow: inset 0 0 0 1px oklch(from var(--accent) l c h / 0.4);
+}
+.project-header.active::before {
+  content: "";
+  position: absolute; left: 4px; top: 8px; bottom: 8px; width: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+.project-header-icn {
+  display: inline-flex;
+  color: var(--fg-3);
+}
+.project-header.active .project-header-icn { color: var(--accent); }
+.project-header-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.project-header-count {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-3);
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
+/* Capture trigger inside .rail-head; sits next to the theme switch. */
+.rail-capture-btn {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--fg-2);
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  transition: background .15s, color .15s, border-color .15s;
+  margin-left: auto;
+}
+.rail-capture-btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: oklch(from var(--accent) l c h / 0.4);
+}
+.rail-head .brand-meta { margin-left: 8px; }
+
+/* ───── plan panel ────────────────────────────────── */
+.plan-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28px max(28px, min(8vw, 96px));
+}
+.plan-pane .md {
+  max-width: 880px;
+  margin: 0 auto;
+  color: var(--fg-1);
+  font-size: 14.5px;
+  line-height: 1.65;
+}
+.plan-body { display: contents; }
+
+.plan-status {
+  max-width: 880px;
+  margin: 0 auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.plan-error { color: var(--coral); }
+
+.plan-setup {
+  max-width: 720px;
+  margin: 0 auto;
+  background: var(--ink-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+  color: var(--fg-1);
+}
+.plan-setup h2 {
+  margin: 0 0 8px;
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 22px;
+  color: var(--fg-0);
+}
+.plan-setup p {
+  margin: 0 0 16px;
+  color: var(--fg-2);
+  line-height: 1.55;
+}
+.plan-setup code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--fg-1);
+}
+.plan-setup-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.app.is-narrow .plan-pane {
+  padding: 18px 16px 32px;
+}
+
+/* ───── capture modal ─────────────────────────────── */
+.capture-modal {
+  position: fixed;
+  top: 12vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 520px;
+  max-width: calc(100vw - 32px);
+  background: var(--ink-1);
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  box-shadow: var(--shadow-card);
+  padding: 18px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.capture-hint {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.capture-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.capture-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  width: 64px;
+}
+.capture-select {
+  flex: 1 1 auto;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--fg-1);
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: var(--sans);
+  outline: none;
+}
+.capture-select:focus { border-color: var(--accent); }
+.capture-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 110px;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--fg-0);
+  padding: 12px 14px;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  outline: none;
+  transition: border-color .15s, background .15s;
+}
+.capture-textarea:focus { border-color: var(--accent); background: var(--ink-2); }
+.capture-textarea:disabled { opacity: 0.6; }
+.capture-error {
+  color: var(--coral);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.capture-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.app.is-narrow .capture-modal {
+  top: auto;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  left: 8px;
+  right: 8px;
+  width: auto;
+  transform: none;
+  border-radius: 14px;
+}
