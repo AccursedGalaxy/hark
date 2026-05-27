@@ -5,4 +5,5 @@ stays bounded at 10. Newest first within this file too — append at the
 top when rotating. Git history is the real archive; this file is just
 the readable trail for cold starts that want more than 10.*
 
+- PWA manifest + spawn-session PID tracking for pending-row auto-focus (da1751f).
 - Task-list panel + native key-sequence delivery for AskUserQuestion (f06562b).
