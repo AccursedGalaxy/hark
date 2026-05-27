@@ -5,6 +5,11 @@
   color: var(--fg-1);
   font-size: 14.5px;
   line-height: 1.65;
+  /* On phones, an unbroken token (long URL, base64 blob, commit hash run)
+     would otherwise push the column wider than the viewport. `anywhere`
+     breaks inside the word as a last resort — normal word-boundary wrap
+     still kicks in first. */
+  overflow-wrap: anywhere;
 }
 
 .md > * + * {
@@ -87,6 +92,10 @@
   border-radius: 8px;
   padding: 12px;
   overflow-x: auto;
+  /* Without an explicit max-width the pre can grow past its column when
+     a single line is long and unbroken; clamp it so overflow-x activates
+     instead of pushing the transcript wider. */
+  max-width: 100%;
   font-family: var(--mono);
   font-size: 12.5px;
   line-height: 1.55;
@@ -99,11 +108,23 @@
   color: var(--fg-0);
 }
 
-/* Tables — Markdown supports them too. */
+/* Tables — Markdown supports them too. Each table is wrapped in
+   .md-table-wrap by Markdown.tsx so wide tables scroll horizontally
+   within their own row instead of pushing the transcript wider. */
+.md-table-wrap {
+  overflow-x: auto;
+  /* Compositor-friendly scroll on touch; harmless elsewhere. */
+  -webkit-overflow-scrolling: touch;
+  /* Match the rhythm of other block-level md children. */
+  max-width: 100%;
+}
 .md table {
   border-collapse: collapse;
   font-size: 13px;
   width: 100%;
+  /* When the table content is wider than the wrapper, let it size to
+     content so the wrapper's overflow-x kicks in. */
+  min-width: max-content;
 }
 .md th,
 .md td {

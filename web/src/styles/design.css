@@ -674,6 +674,7 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   display: flex; flex-direction: column; gap: 2px;
   max-height: min(420px, 50vh);
   overflow-y: auto;
+  overflow-x: hidden;
   background: var(--ink-0);
   border-bottom: 1px solid var(--line);
   box-shadow: 0 24px 40px -28px oklch(0 0 0 / 0.45);
@@ -749,9 +750,21 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  /* CSS gotcha: setting overflow-y:auto computes overflow-x to `auto` too
+     (when it would otherwise be `visible`). On touch that captures
+     left/right swipes as horizontal panning of the whole transcript
+     whenever any inner element (wide table, long code block) exceeds the
+     viewport. Pin it to `hidden` so only intentional internal scroll
+     containers (tables wrapped in .md-table-wrap, `.md pre`, `.tool-body
+     pre`) handle horizontal scroll. */
+  overflow-x: hidden;
   padding: 32px max(40px, min(8vw, 96px)) 48px;
   scroll-behavior: smooth;
   position: relative;
+  /* Establish a containing block for absolutely-positioned children
+     (`.transcript::before` aurora) and clamp inline-size so the grid
+     parent doesn't let us grow past the available column. */
+  min-width: 0;
 }
 .transcript::-webkit-scrollbar { width: 10px; }
 .transcript::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; }
@@ -1398,6 +1411,7 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   display: flex; flex-direction: column;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 .context-rail::-webkit-scrollbar { width: 8px; }
 .context-rail::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }

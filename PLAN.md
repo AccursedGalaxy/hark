@@ -37,6 +37,7 @@ or out of the doc.*
 section exists to answer "what just happened" for a cold start, not
 to be complete.*
 
+- Mobile horizontal-overflow fix: markdown tables wrap in a scroll container, `.md pre` clamped, transcript and slash menu pin `overflow-x: hidden` to defeat the implicit `auto` from `overflow-y`.
 - Sidebar ASKING pill no longer sticks on stale `status="waiting"`; `deriveState` requires a real pending payload (b3dc80e).
 - Bootstrap-from-codebase directive added to the CLAUDE.md managed block (7220b74).
 - Project-state feature: per-repo `PLAN.md`, capture shortcut, project grouping, idempotent `CLAUDE.md` block (5c34c1f).
