@@ -24,6 +24,8 @@ export const CLAUDE_MD_BLOCK = [
   HARK_BLOCK_START,
   "Read PLAN.md before anything else. PLAN.md is the only memory the next",
   "session has of this project — updates aren't tidying, they're the handoff.",
+  "If it's still the skeleton (sections show `(not yet written)` / `(none)`),",
+  "bootstrap it from the codebase before doing anything else.",
   "",
   "The italicized contract under each section is binding. Cadence:",
   "",

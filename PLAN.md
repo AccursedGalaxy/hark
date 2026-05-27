@@ -16,8 +16,8 @@ hark is a notification and remote-control hub for Claude Code sessions running o
 *Active threads being shipped right now. Hard cap: 3 items. One bullet
 per thread; one line of context allowed beneath it.*
 
-- **Project-state feature** — per-repo `PLAN.md`, capture shortcut (⌘/Ctrl+I), project grouping in the rail, idempotent `CLAUDE.md` managed block.
-  Built end-to-end (391 tests, build green), running locally; uncommitted pending manual UI verification.
+- **Bootstrap-from-codebase line in `CLAUDE.md` block** — closes the design gap surfaced 2026-05-27: an empty `PLAN.md` doesn't auto-populate because the contract says "as state changes," not "on first read of a skeleton."
+  Edit landed in `src/lib/projectConstants.ts` (5 lines); 391 tests green; uncommitted.
 
 ## Next
 
@@ -25,7 +25,6 @@ per thread; one line of context allowed beneath it.*
 it has become a dumping ground — flag it and force triage back into Now
 or out of the doc.*
 
-- **Bootstrap-from-codebase line in `CLAUDE.md` block** — closes the design gap surfaced 2026-05-27: an empty `PLAN.md` doesn't auto-populate because the contract says "as state changes," not "on first read of a skeleton." One line in `src/lib/projectConstants.ts`.
 - **Fix sidebar "Claude is waiting for your input" false positive** — the rail shows this on every live session once clicked. Likely an attention/promptKind clear that isn't firing on selection.
 - **Capture modal: image attachment** — drag-and-drop and Ctrl+V paste in the capture textarea, mirroring the session composer's upload flow.
 - **Passive "modified by another session" indicator** — `PlanPanel` shows a small dot when `planMtime` advanced since this view's last fetch. Designed-but-deferred during the project-state build.
@@ -38,6 +37,7 @@ or out of the doc.*
 section exists to answer "what just happened" for a cold start, not
 to be complete.*
 
+- Project-state feature: per-repo `PLAN.md`, capture shortcut, project grouping, idempotent `CLAUDE.md` block (5c34c1f).
 - Settings popover moved into the sidebar footer (d5bf559).
 - Context rail with per-message token accounting + cost metrics (1d4954a).
 - Hardware-keyboard detection so the composer doesn't double-trigger send (a2dcd78).
@@ -47,7 +47,6 @@ to be complete.*
 - AI-title support: Claude's `ai-title` row surfaced as the session label (7a3b844).
 - Smooth-scroll tool capsules into view when expanded (1c78ef4).
 - PWA manifest + spawn-session PID tracking for pending-row auto-focus (da1751f).
-- Task-list panel + native key-sequence delivery for AskUserQuestion (f06562b).
 
 ## Inbox
 
