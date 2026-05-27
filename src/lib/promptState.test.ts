@@ -241,7 +241,40 @@ describe("PromptState", () => {
       expect(state.snapshot().s1.pendingPermission).toBeDefined();
     });
 
-    it("resolves pending permission when a transcript event is newer than requestedAt", () => {
+    it("resolves pending permission when an assistant turn lands after requestedAt", () => {
+      // A new assistant message after the hook fired means CC moved past
+      // the permission (the user answered in the TUI, CC continued). Only
+      // assistant events count as resolution signals — user / queued
+      // prompts don't, since a user can type-ahead while CC is still
+      // paused on the permission.
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      const futureTs = new Date(Date.now() + 60_000).toISOString();
+      const broadcast = state.noteTranscriptEvents("s1", [
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: futureTs,
+          blocks: [{ type: "text", text: "Continuing past the prompt." }],
+        },
+      ]);
+      expect(broadcast).not.toBe(null);
+      expect(broadcast!.needsAttention).toBe(false);
+      expect(broadcast!.pendingPermission).toBeUndefined();
+      expect(broadcast!.promptKind).toBe(null);
+      expect(broadcast!.sessionId).toBe("s1");
+    });
+
+    it("a newer USER / queued event does NOT clear hook-origin pending", () => {
+      // Type-ahead while paused on a permission: the user queues a prompt
+      // in the composer. CC writes the queued_command (parsed as a `user`
+      // event) but the permission is still pending — the user hasn't
+      // answered it. Phase 2 used to clear in this case and broadcast
+      // `pending=undefined`, wiping the prompt on every connected client.
       state.record({
         session_id: "s1",
         hook_event_name: "PermissionRequest",
@@ -250,11 +283,8 @@ describe("PromptState", () => {
       });
       const futureTs = new Date(Date.now() + 60_000).toISOString();
       const broadcast = state.noteTranscriptEvents("s1", [userEvent(futureTs)]);
-      expect(broadcast).not.toBe(null);
-      expect(broadcast!.needsAttention).toBe(false);
-      expect(broadcast!.pendingPermission).toBeUndefined();
-      expect(broadcast!.promptKind).toBe(null);
-      expect(broadcast!.sessionId).toBe("s1");
+      expect(broadcast).toBe(null);
+      expect(state.snapshot().s1.pending).toBeDefined();
     });
 
     it("ignores events with unparseable timestamps", () => {
@@ -265,7 +295,12 @@ describe("PromptState", () => {
         tool_input: { command: "ls" },
       });
       const broadcast = state.noteTranscriptEvents("s1", [
-        { kind: "user", uuid: "u1", ts: "not-a-date", text: "x" },
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: "not-a-date",
+          blocks: [{ type: "text", text: "x" }],
+        },
       ]);
       expect(broadcast).toBe(null);
       expect(state.snapshot().s1.pendingPermission).toBeDefined();
@@ -860,6 +895,149 @@ describe("PromptState", () => {
       });
       expect(ev.cwd).toBe("/new/dir");
       expect(ev.needsAttention).toBe(false);
+    });
+  });
+
+  // ---- Multi-client: a second client opening a session stream must not
+  // wipe the pending prompt that the first client is still rendering. The
+  // server's stream endpoint replays the historical transcript through
+  // noteTranscriptEvents; that replay must not broadcast a state that
+  // strips `pending` for the other client.
+  describe("multi-client stream open", () => {
+    it("AskUserQuestion survives a historical replay (idempotent re-promote)", () => {
+      const askEvent: TranscriptEvent = {
+        kind: "assistant",
+        uuid: "a1",
+        ts: "2026-05-27T18:30:00.000Z",
+        blocks: [
+          {
+            type: "tool_use",
+            id: "use-ask-1",
+            name: "AskUserQuestion",
+            input: {
+              questions: [{ question: "Pick", options: [{ label: "A" }] }],
+            },
+          },
+        ],
+      };
+      // Client A: live watcher promotes the AskUserQuestion to pending.
+      const initial = state.noteTranscriptEvents("s1", [askEvent]);
+      expect(initial?.pending?.kind).toBe("ask_user_question");
+
+      // Desktop's auto-clear (viewing != answering): drop needs-attention,
+      // keep pending. This is what would already have happened before the
+      // phone connects.
+      state.dismissAttention("s1");
+      expect(state.snapshot().s1.pending?.kind).toBe("ask_user_question");
+
+      // Client B (phone) opens the transcript stream → server replays the
+      // whole historical transcript. The replay includes the same askEvent
+      // again. The broadcast must NOT strip `pending`.
+      const replayBroadcast = state.noteTranscriptEvents("s1", [askEvent]);
+      // Idempotent — no churn, no broadcast.
+      expect(replayBroadcast).toBe(null);
+      expect(state.snapshot().s1.pending?.kind).toBe("ask_user_question");
+    });
+
+    it("AskUserQuestion survives even when historical has older answered Ask entries", () => {
+      // Older answered AskUserQuestion that's no longer the live one.
+      const oldAsk: TranscriptEvent = {
+        kind: "assistant",
+        uuid: "a0",
+        ts: "2026-05-27T17:00:00.000Z",
+        blocks: [
+          {
+            type: "tool_use",
+            id: "use-ask-OLD",
+            name: "AskUserQuestion",
+            input: { questions: [] },
+          },
+        ],
+      };
+      const oldResult: TranscriptEvent = {
+        kind: "tool_result",
+        uuid: "r0",
+        ts: "2026-05-27T17:05:00.000Z",
+        toolUseId: "use-ask-OLD",
+        output: "answered",
+        isError: false,
+      };
+      // Live, unanswered AskUserQuestion.
+      const askEvent: TranscriptEvent = {
+        kind: "assistant",
+        uuid: "a1",
+        ts: "2026-05-27T18:30:00.000Z",
+        blocks: [
+          {
+            type: "tool_use",
+            id: "use-ask-NEW",
+            name: "AskUserQuestion",
+            input: { questions: [] },
+          },
+        ],
+      };
+      // First-client live watcher run.
+      state.noteTranscriptEvents("s1", [oldAsk, oldResult, askEvent]);
+      expect(state.snapshot().s1.pending).toBeDefined();
+      const sigBefore = state.snapshot().s1.pending;
+
+      // Second-client replay of the whole transcript.
+      const broadcast = state.noteTranscriptEvents("s1", [
+        oldAsk,
+        oldResult,
+        askEvent,
+      ]);
+      // The replay re-promotes the old + new entries; the FINAL state must
+      // still carry the live (NEW) pending so the phone renders the form.
+      expect(state.snapshot().s1.pending).toBeDefined();
+      expect(state.snapshot().s1.pending?.kind).toBe("ask_user_question");
+      if (state.snapshot().s1.pending?.kind === "ask_user_question") {
+        expect(
+          (state.snapshot().s1.pending as { toolUseId?: string }).toolUseId,
+        ).toBe("use-ask-NEW");
+      }
+      // If the replay churned, the broadcast must STILL carry pending so
+      // other connected clients don't wipe it locally.
+      if (broadcast) {
+        expect(broadcast.pending?.kind).toBe("ask_user_question");
+      }
+      // Sanity: state object identity may change but the shape matches.
+      expect(state.snapshot().s1.pending?.kind).toBe(sigBefore?.kind);
+    });
+
+    it("Bash permission with queued user events newer than requestedAt does NOT clear pending in historical replay", () => {
+      // Setup: Bash PermissionRequest hook recorded pending state.
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf /" },
+        tool_use_id: "use-bash-1",
+      });
+      const requestedAt = state.snapshot().s1.pending!.requestedAt;
+
+      // The transcript contains a queued user prompt typed AFTER the hook
+      // fired — the user is still waiting on the permission but typed
+      // ahead. (`Date.parse` of an ISO ts > requestedAt.)
+      const queuedTs = new Date(requestedAt + 5_000).toISOString();
+      const queued: TranscriptEvent = {
+        kind: "user",
+        uuid: "u-queued",
+        ts: queuedTs,
+        text: "go ahead",
+      };
+
+      // Phone connects → server replays historical including the queued
+      // user event. This currently triggers Phase 2 time-based resolution
+      // because the pending is hook-origin (not transcript-origin).
+      const broadcast = state.noteTranscriptEvents("s1", [queued]);
+
+      // If pending got cleared, the broadcast will carry pending=undefined
+      // and every connected client will wipe its local pending state.
+      expect(state.snapshot().s1.pending).toBeDefined();
+      if (broadcast) {
+        expect(broadcast.pending).toBeDefined();
+      }
     });
   });
 });

@@ -523,6 +523,17 @@ export class PromptState {
     // (2) Time-based resolution for hook-originated pendings only. Skip when
     // the live pending was set from a transcript tool_use (Ask/Plan) — its
     // own tool_use timestamp would otherwise instantly clear it.
+    //
+    // Only `assistant` events count as resolution signals: a new assistant
+    // turn after the hook fired means CC moved past the permission (the
+    // user answered in the TUI, CC continued). `user` / `system` / queued
+    // events with `ts > requestedAt` do NOT mean the permission is moot —
+    // a user can type-ahead a queued prompt while CC is still paused, and
+    // a second client opening the transcript stream would otherwise replay
+    // that queued event and broadcast `pending=undefined` to every
+    // connected client. `tool_result` is handled by Phase 1a above; this
+    // branch is the fallback for "CC continued without writing a matching
+    // tool_result" (unusual but observed in error paths).
     const att = this.bySession.get(sessionId);
     const pending = att?.pending;
     const isTranscriptOrigin =
@@ -533,6 +544,7 @@ export class PromptState {
       : undefined;
     if (requestedAt !== undefined) {
       for (const ev of events) {
+        if (ev.kind !== "assistant") continue;
         const tsMs = Date.parse(ev.ts ?? "");
         if (Number.isFinite(tsMs) && tsMs > requestedAt) {
           this.clear(sessionId);
