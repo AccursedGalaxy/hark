@@ -151,7 +151,7 @@
   margin: 0 auto;
   background: var(--ink-2);
   border: 1px solid var(--line-strong);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow-card);
   z-index: 8;
   overflow: hidden;
@@ -321,7 +321,7 @@
   min-width: 180px;
   background: var(--ink-2);
   border: 1px solid var(--line-strong);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 4px;
   box-shadow: var(--shadow-card);
   z-index: 8;
@@ -355,7 +355,7 @@
   width: min(720px, 92vw);
   background: var(--ink-1);
   border: 1px solid var(--line-strong);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   box-shadow: var(--shadow-card);
   padding: 18px;
   display: flex;
@@ -441,7 +441,7 @@
   place-items: center;
   background: var(--accent-soft);
   border: 2px dashed var(--accent);
-  border-radius: 18px;
+  border-radius: var(--radius-2xl);
   margin: 14px max(40px, min(8vw, 96px)) 18px;
   color: var(--accent);
   font-family: var(--mono);
@@ -473,7 +473,7 @@
   gap: 10px;
 }
 .pp-card {
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--ink-0);
   border: 1px solid var(--line);
   overflow: hidden;
@@ -670,7 +670,8 @@
   background: oklch(from var(--ink-0) l c h / 0.6);
   border: 1px solid var(--line);
   padding: 10px 12px;
-  transition: border-color .15s, background .15s;
+  transition: border-color var(--dur-hover) var(--ease-out-quart),
+              background var(--dur-hover) var(--ease-out-quart);
 }
 .pp-option label { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
 .pp-option input { margin-top: 3px; flex: none; accent-color: var(--accent); }
@@ -762,7 +763,7 @@
   width: 100%;
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: var(--radius-2xl);
   padding: 28px;
   box-shadow: var(--shadow-card);
   display: flex;
@@ -910,7 +911,7 @@
   max-width: calc(100vw - 32px);
   background: var(--ink-1);
   border: 1px solid var(--line-strong);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   box-shadow: var(--shadow-card);
   padding: 16px;
   z-index: 40;
@@ -942,9 +943,12 @@
   background: transparent;
   border: 0;
   cursor: pointer;
-  transition: background .15s, color .15s;
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart),
+              transform var(--dur-press) var(--ease-out-quart);
 }
 .settings-close:hover { background: var(--ink-2); color: var(--fg-0); }
+.settings-close:active { transform: scale(0.94); }
 .settings-panel h4 {
   margin: 0;
   font-family: var(--mono);
@@ -987,9 +991,11 @@
   border-radius: 8px;
   border: 2px solid transparent;
   cursor: pointer;
-  transition: transform .12s;
+  transition: transform var(--dur-hover) var(--ease-out-quart),
+              box-shadow var(--dur-hover) var(--ease-out-quart);
 }
-.accent-swatch:hover { transform: scale(1.06); }
+.accent-swatch:hover { transform: scale(1.04); }
+.accent-swatch:active { transform: scale(0.96); }
 .accent-swatch.on {
   border-color: var(--fg-0);
   box-shadow: 0 0 0 1px var(--fg-0);
@@ -1015,10 +1021,12 @@
   border-radius: 50%;
   top: 2px;
   left: 2px;
-  transition: left .15s ease, background .15s ease;
+  /* Animate the knob with transform (compositor-only), not `left` (layout). */
+  transition: transform var(--dur-hover) var(--ease-out-quart),
+              background var(--dur-hover) var(--ease-out-quart);
 }
 .tweaks-toggle-pill.on { background: var(--accent-soft); border-color: oklch(from var(--accent) l c h / 0.5); }
-.tweaks-toggle-pill.on::after { left: 22px; background: var(--accent); }
+.tweaks-toggle-pill.on::after { transform: translateX(20px); background: var(--accent); }
 
 .tweaks-label { color: var(--fg-1); font-size: 13px; }
 .tweaks-spacer { flex: 1; }
@@ -1230,7 +1238,7 @@
   padding-bottom: max(12px, env(safe-area-inset-bottom));
 }
 .app.is-narrow .composer {
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
 }
 .app.is-narrow .composer-top {
   padding: 6px 8px;
@@ -1276,7 +1284,7 @@
         the options list is long. */
 .app.is-narrow .question {
   padding: 14px 14px 12px;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   max-height: 60dvh;
   overflow-y: auto;
 }
@@ -1327,7 +1335,7 @@
   gap: 8px;
 }
 .app.is-narrow .pp-card {
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   max-height: 55dvh;
   display: flex;
   flex-direction: column;
@@ -1434,9 +1442,11 @@
   font-size: 12.5px;
   font-weight: 600;
   letter-spacing: -0.005em;
-  transition: background .15s, color .15s;
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart);
 }
 .project-header:hover { background: oklch(from var(--ink-2) l c h / 0.5); color: var(--fg-0); }
+.project-header:active { background: oklch(from var(--ink-2) l c h / 0.7); }
 .project-header.active {
   background: var(--accent-soft);
   color: var(--fg-0);
@@ -1480,7 +1490,10 @@
   color: var(--fg-2);
   background: var(--ink-2);
   border: 1px solid var(--line);
-  transition: background .15s, color .15s, border-color .15s;
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart),
+              border-color var(--dur-hover) var(--ease-out-quart),
+              transform var(--dur-press) var(--ease-out-quart);
   margin-left: auto;
 }
 .rail-capture-btn:hover {
@@ -1488,6 +1501,7 @@
   color: var(--accent);
   border-color: oklch(from var(--accent) l c h / 0.4);
 }
+.rail-capture-btn:active { transform: scale(0.94); }
 .rail-head .brand-meta { margin-left: 8px; }
 
 /* ───── plan panel ────────────────────────────────── */
@@ -1566,7 +1580,7 @@
   max-width: calc(100vw - 32px);
   background: var(--ink-1);
   border: 1px solid var(--line-strong);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   box-shadow: var(--shadow-card);
   padding: 18px;
   z-index: 40;
@@ -1618,7 +1632,8 @@
   font-size: 14px;
   line-height: 1.5;
   outline: none;
-  transition: border-color .15s, background .15s;
+  transition: border-color var(--dur-hover) var(--ease-out-quart),
+              background var(--dur-hover) var(--ease-out-quart);
 }
 .capture-textarea:focus { border-color: var(--accent); background: var(--ink-2); }
 .capture-textarea:disabled { opacity: 0.6; }
@@ -1640,5 +1655,165 @@
   right: 8px;
   width: auto;
   transform: none;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
+}
+
+/* ─────────────────────────────────────────────
+   Motion: entry animations, press feedback,
+   reduced-motion fallback.
+   ───────────────────────────────────────────── */
+
+/* Popover/dropdown entry: scale from origin + opacity. Never scale-from-
+   zero (banned by the design system); start at 0.96. transform-origin
+   anchors the scale at the side closest to the trigger. */
+@keyframes hark-pop-up {
+  from { opacity: 0; transform: scale(0.96) translateY(4px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0); }
+}
+@keyframes hark-pop-down {
+  from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0); }
+}
+/* Each modal/sheet keyframe ends at the element's resting transform so
+   it lands cleanly. The `translate(-50%, …)` parts have to be baked into
+   the keyframe because `transform` is one property — you can't mix
+   keyframe scale with a static centering translate. */
+@keyframes hark-settings-in {
+  /* .settings-panel resting transform: translate(-50%, -50%) */
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes hark-capture-in {
+  /* .capture-modal resting transform: translateX(-50%) */
+  from { opacity: 0; transform: translateX(-50%) translateY(-6px) scale(0.98); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0)    scale(1); }
+}
+@keyframes hark-capture-in-narrow {
+  /* .app.is-narrow .capture-modal resting transform: none.
+     Bottom-sheet feel: slide up + fade, no scale (anchored to bottom). */
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes hark-dialog-in {
+  /* .paste-dialog has no resting transform — it's centered by the
+     overlay's `place-items: center`. */
+  from { opacity: 0; transform: scale(0.97) translateY(6px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0); }
+}
+@keyframes hark-overlay-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Slash command menu: bottom-anchored above the composer; scales up. */
+.slash-menu {
+  transform-origin: bottom center;
+  animation: hark-pop-up var(--dur-menu) var(--ease-out-quart) both;
+}
+
+/* Composer attach menu: anchored above the attach button (left). */
+.composer-attach-menu {
+  transform-origin: bottom left;
+  animation: hark-pop-up var(--dur-menu) var(--ease-out-quart) both;
+}
+
+/* Settings panel: centered, scale from center. */
+.settings-panel {
+  transform-origin: center;
+  animation: hark-settings-in var(--dur-modal) var(--ease-out-expo) both;
+}
+
+/* Capture modal: docked from top on desktop, bottom on narrow. */
+.capture-modal {
+  transform-origin: center top;
+  animation: hark-capture-in var(--dur-modal) var(--ease-out-expo) both;
+}
+.app.is-narrow .capture-modal {
+  transform-origin: center bottom;
+  animation: hark-capture-in-narrow var(--dur-modal) var(--ease-out-expo) both;
+}
+
+/* Paste-as-file dialog: large centered modal, no baseline transform. */
+.paste-dialog {
+  transform-origin: center;
+  animation: hark-dialog-in var(--dur-modal) var(--ease-out-expo) both;
+}
+
+/* Overlay fades. Backdrop-filter is expensive; the fade hides that. */
+.settings-overlay,
+.paste-dialog-overlay {
+  animation: hark-overlay-in var(--dur-hover) var(--ease-out-quart) both;
+}
+
+/* Drop overlay (composer drag-and-drop) — fade in, not snap. */
+.composer-drop {
+  animation: hark-overlay-in var(--dur-hover) var(--ease-out-quart) both;
+}
+
+/* Conn banner — slide down + fade when it appears at the top. */
+@keyframes hark-banner-in {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+.conn-banner {
+  animation: hark-banner-in var(--dur-menu) var(--ease-out-quart) both;
+}
+
+/* Press feedback for the remaining interactive surfaces that the design
+   system missed. Compositor-only (transform), <100ms, no transition on
+   keyboard-initiated state (these are click/tap targets only). */
+.back-btn,
+.session-close,
+.attach-chip-remove,
+.composer-attach-btn,
+.composer-attach-item,
+.key-chip,
+.btn-custom,
+.pp-more,
+.pill,
+.tweaks-toggle button {
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart),
+              border-color var(--dur-hover) var(--ease-out-quart),
+              transform var(--dur-press) var(--ease-out-quart);
+}
+.back-btn:not(:disabled):active,
+.session-close:not(:disabled):active,
+.attach-chip-remove:not(:disabled):active,
+.composer-attach-btn:not(:disabled):active,
+.composer-attach-item:not(:disabled):active,
+.key-chip:not(:disabled):active,
+.btn-custom:not(:disabled):active,
+.pp-more:not(:disabled):active,
+.tweaks-toggle button:not(:disabled):active {
+  transform: scale(0.94);
+}
+.pill:not(:disabled):active { transform: scale(0.97); }
+
+/* Sidebar search input cleared icon, brand dot, etc. — purely decorative,
+   no motion needed.
+
+   Reduced motion: honor the OS preference. Live status pulses stay (they
+   convey state, not delight) but everything ornamental — pops, slides,
+   meter fills — collapses to instant. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* Keep the status/live pulses — they are signal, not motion-for-its-own-
+     sake. Override with their original durations. */
+  .dot.live, .dot.busy,
+  .status-chip .pulse,
+  .tool.running .led,
+  .q-tag .pulse,
+  .q-pointer .led,
+  .tasklist-task.now .check::after {
+    animation-duration: 1.4s !important;
+    animation-iteration-count: infinite !important;
+  }
 }

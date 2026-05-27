@@ -38,8 +38,54 @@
 
   --radius-sm: 6px;
   --radius:    10px;
-  --radius-lg: 14px;
+  --radius-md: 12px; /* menus, popovers, tool capsules */
+  --radius-lg: 14px; /* bubbles, narrow-mode modals */
+  --radius-2xl: 18px;/* full-size modals, composer, capture sheet */
   --radius-xl: 20px;
+
+  /* Spacing scale (4-step). Used wherever a layout has historically picked
+     a number out of the air — paddings inside cards, modal interiors, etc.
+     Existing 18/22 page-padding tokens (--pad-y/--pad-x) stay because they
+     parameterise the density tweak. */
+  --s-1: 4px;
+  --s-2: 6px;
+  --s-3: 8px;
+  --s-4: 10px;
+  --s-5: 12px;
+  --s-6: 14px;
+  --s-7: 18px;
+  --s-8: 22px;
+  --s-9: 28px;
+
+  /* Typography scale. Roles are spelled out — these are the sizes already
+     in use across the design, just named so they stop drifting. */
+  --t-display:   26px; /* serif italic, .q-title / large modal titles */
+  --t-display-sm:20px; /* serif italic, .pp-question-text */
+  --t-body:      14.5px;
+  --t-body-sm:   13px;
+  --t-meta:      12px;
+  --t-mono:      11.5px;
+  --t-mono-sm:   10.5px;
+  --t-eyebrow:   10px;  /* uppercase tracked labels */
+
+  /* Motion tokens. Emil rules: ease-out-quart is the default UI curve; we
+     never use the browser's default `ease` on UI animations because it's
+     too soft. ease-out-expo is a stronger variant for popovers/dropdowns
+     where we want a more confident settle. ease-spring adds a tiny
+     overshoot for press-up affordances. Linear stays only for real
+     progress bars (the upload tracker).
+
+     Durations: hover/state change → 120ms; menu/popover → 180ms; modal/
+     overlay → 220ms; the 300ms cap is reserved for meter fills only. */
+  --ease-out-quart: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-out-expo:  cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring:    cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  --dur-hover: 120ms;
+  --dur-press: 90ms;
+  --dur-menu:  180ms;
+  --dur-modal: 220ms;
+  --dur-meter: 300ms;
 
   --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
   --mono: "Geist Mono", ui-monospace, "JetBrains Mono", monospace;
@@ -233,6 +279,9 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   padding: 5px 10px;
   border-radius: 999px;
   color: var(--fg-3);
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart),
+              box-shadow var(--dur-hover) var(--ease-out-quart);
 }
 .theme-switch button.on {
   background: var(--ink-0);
@@ -253,7 +302,8 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   color: var(--fg-1);
   font-size: 13px;
   outline: none;
-  transition: border-color .15s, background .15s;
+  transition: border-color var(--dur-hover) var(--ease-out-quart),
+              background var(--dur-hover) var(--ease-out-quart);
   font-family: var(--sans);
 }
 .rail-search input:focus { border-color: var(--accent); background: var(--ink-2); }
@@ -279,13 +329,17 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   background: transparent;
   font-size: 13px;
   font-weight: 500;
-  transition: background .15s, border-color .15s, color .15s;
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              border-color var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart),
+              transform var(--dur-press) var(--ease-out-quart);
 }
 .new-btn:hover {
   background: var(--accent-soft);
   border-color: var(--accent);
   color: var(--fg-0);
 }
+.new-btn:active { transform: scale(0.98); }
 .new-btn .plus {
   width: 18px; height: 18px;
   display: grid; place-items: center;
@@ -318,9 +372,10 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   border-radius: var(--radius);
   cursor: pointer;
   margin-bottom: 2px;
-  transition: background .15s, transform .1s;
+  transition: background var(--dur-hover) var(--ease-out-quart);
 }
 .session:hover { background: oklch(from var(--ink-2) l c h / 0.55); }
+.session:active { background: oklch(from var(--ink-2) l c h / 0.75); }
 .session.active {
   background: linear-gradient(180deg, var(--accent-soft), oklch(from var(--accent) l c h / 0.04));
   box-shadow: inset 0 0 0 1px oklch(from var(--accent) l c h / 0.35);
@@ -408,7 +463,9 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   color: var(--fg-3);
   background: transparent;
   opacity: 0;
-  transition: opacity .15s, background .15s, color .15s;
+  transition: opacity var(--dur-hover) var(--ease-out-quart),
+              background var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart);
 }
 .session:hover .session-close,
 .session.active .session-close { opacity: 1; }
@@ -497,10 +554,14 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   display: grid; place-items: center;
   border-radius: 8px;
   color: var(--fg-2);
-  transition: background .15s, color .15s;
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart),
+              transform var(--dur-press) var(--ease-out-quart);
 }
 .icon-btn:hover { background: var(--ink-2); color: var(--fg-0); }
+.icon-btn:active { transform: scale(0.94); }
 .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.icon-btn:disabled:active { transform: none; }
 
 .icon-btn.danger:hover { background: var(--coral-soft); color: var(--coral); }
 
@@ -512,11 +573,17 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   color: var(--fg-1);
   font-size: 12.5px;
   border: 1px solid var(--line);
-  transition: background .15s, border-color .15s, color .15s;
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              border-color var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart),
+              filter var(--dur-hover) var(--ease-out-quart),
+              transform var(--dur-press) var(--ease-out-quart);
   font-family: var(--sans);
 }
 .btn:hover { background: var(--ink-3); border-color: var(--line-strong); color: var(--fg-0); }
+.btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:disabled:active { transform: none; }
 .btn.primary {
   background: var(--accent);
   color: oklch(0.18 0.012 250);
@@ -593,9 +660,11 @@ button, [role="button"], a, summary { touch-action: manipulation; }
 .tasklist-progress .bar > i {
   display: block; height: 100%;
   background: linear-gradient(90deg, var(--accent), oklch(from var(--accent) l c h / 0.55));
-  transition: width .3s ease;
+  /* Meter fill: width animation is intentional — this is a real progress
+     indicator, not UI chrome. Capped at --dur-meter. */
+  transition: width var(--dur-meter) var(--ease-out-quart);
 }
-.tasklist .chev { color: var(--fg-3); transition: transform .2s; }
+.tasklist .chev { color: var(--fg-3); transition: transform var(--dur-menu) var(--ease-out-quart); }
 .tasklist[data-open="true"] .chev { transform: rotate(90deg); }
 
 .tasklist-body {
@@ -629,7 +698,7 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   border-radius: 8px;
   font-size: 13px;
   color: var(--fg-1);
-  transition: background .1s;
+  transition: background var(--dur-hover) var(--ease-out-quart);
 }
 .tasklist-task:hover { background: oklch(from var(--ink-2) l c h / 0.5); }
 .tasklist-task .check {
@@ -747,7 +816,7 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   border-radius: 12px;
   background: linear-gradient(180deg, oklch(from var(--ink-2) l c h / 0.7), oklch(from var(--ink-2) l c h / 0.45));
   overflow: hidden;
-  transition: border-color .15s;
+  transition: border-color var(--dur-hover) var(--ease-out-quart);
 }
 .tool:hover { border-color: var(--line-strong); }
 .tool-head {
@@ -930,7 +999,8 @@ button, [role="button"], a, summary { touch-action: manipulation; }
 .chev {
   width: 16px; height: 16px; display: grid; place-items: center;
   color: var(--fg-3);
-  transition: transform .2s ease, color .15s;
+  transition: transform var(--dur-menu) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart);
 }
 .tool[data-open="true"] .chev { transform: rotate(90deg); color: var(--fg-1); }
 
@@ -1027,7 +1097,8 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   cursor: pointer;
   text-align: left;
   width: 100%;
-  transition: background .15s, border-color .15s;
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              border-color var(--dur-hover) var(--ease-out-quart);
   font-family: var(--sans);
 }
 .q-pointer:hover { background: oklch(from var(--accent) l c h / 0.18); }
@@ -1122,7 +1193,9 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   border: 1px solid var(--line);
   text-align: left;
   cursor: pointer;
-  transition: border-color .15s, background .15s, transform .08s;
+  transition: border-color var(--dur-hover) var(--ease-out-quart),
+              background var(--dur-hover) var(--ease-out-quart),
+              transform var(--dur-press) var(--ease-out-quart);
   font: inherit;
   color: inherit;
   min-width: 0;
@@ -1132,7 +1205,7 @@ button, [role="button"], a, summary { touch-action: manipulation; }
 .q-opt .body { grid-column: 2; }
 .q-opt .key  { grid-row: 1 / span 2; align-self: start; }
 .q-opt:hover { border-color: oklch(from var(--accent) l c h / 0.5); background: oklch(from var(--ink-0) l c h / 0.85); }
-.q-opt:active { transform: translateY(1px); }
+.q-opt:active { transform: scale(0.99); }
 .q-opt.selected {
   border-color: var(--accent);
   background: linear-gradient(180deg, var(--accent-soft), oklch(from var(--accent) l c h / 0.02));
@@ -1205,9 +1278,12 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   max-width: 880px; margin: 0 auto;
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: var(--radius-2xl);
   box-shadow: var(--shadow-card);
-  transition: border-color .15s;
+  /* Hard-specified property list; never `transition: all`. The focus
+     ring also animates because the box-shadow is part of the focus state. */
+  transition: border-color var(--dur-hover) var(--ease-out-quart),
+              box-shadow var(--dur-hover) var(--ease-out-quart);
   position: relative;
 }
 
@@ -1234,9 +1310,13 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   background: oklch(from var(--ink-0) l c h / 0.7);
   border: 1px solid var(--line);
   color: var(--fg-2);
-  transition: background .15s, color .15s, border-color .15s;
+  transition: background var(--dur-hover) var(--ease-out-quart),
+              color var(--dur-hover) var(--ease-out-quart),
+              border-color var(--dur-hover) var(--ease-out-quart),
+              transform var(--dur-press) var(--ease-out-quart);
 }
 .chip:hover { background: oklch(from var(--ink-3) l c h / 0.9); color: var(--fg-0); }
+.chip:not(:disabled):active { transform: scale(0.96); }
 .chip svg { color: var(--fg-3); }
 .chip:hover svg { color: var(--fg-1); }
 .chip.warn { color: var(--amber); border-color: oklch(from var(--amber) l c h / 0.35); background: var(--amber-soft); }
@@ -1283,13 +1363,16 @@ button, [role="button"], a, summary { touch-action: manipulation; }
 .send {
   width: 36px; height: 36px;
   display: grid; place-items: center;
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--accent);
   color: oklch(0.16 0.012 250);
-  transition: filter .15s, opacity .15s;
+  transition: filter var(--dur-hover) var(--ease-out-quart),
+              opacity var(--dur-hover) var(--ease-out-quart),
+              transform var(--dur-press) var(--ease-out-quart);
   flex: none;
 }
 .send:hover { filter: brightness(1.06); }
+.send:not(:disabled):active { transform: scale(0.94); }
 .send:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .composer-foot {
@@ -1395,7 +1478,8 @@ button, [role="button"], a, summary { touch-action: manipulation; }
 .ctx-meter > i {
   display: block; height: 100%; border-radius: 999px;
   background: linear-gradient(90deg, var(--jade), oklch(from var(--jade) l c h / 0.55));
-  transition: width 320ms ease;
+  /* Real meter — width animation is intentional. Capped at --dur-meter. */
+  transition: width var(--dur-meter) var(--ease-out-quart);
 }
 .ctx-meter.tone-jade  > i { background: linear-gradient(90deg, var(--jade), oklch(from var(--jade) l c h / 0.55)); }
 .ctx-meter.tone-amber > i { background: linear-gradient(90deg, var(--amber), oklch(from var(--amber) l c h / 0.55)); }
@@ -1537,7 +1621,7 @@ button, [role="button"], a, summary { touch-action: manipulation; }
 }
 .ctx-meta-toggle:hover { color: var(--fg-1); }
 .ctx-meta-chev {
-  display: inline-flex; transition: transform 160ms ease;
+  display: inline-flex; transition: transform var(--dur-menu) var(--ease-out-quart);
 }
 .ctx-meta-chev.open { transform: rotate(90deg); }
 .ctx-meta-id {
