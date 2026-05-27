@@ -152,6 +152,10 @@ body {
 
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
 a { color: var(--accent); }
+/* Per-element touch-action so each tap target opts out of iOS double-tap
+   zoom and the residual tap delay — more reliable than the body-level
+   declaration, which some Safari versions ignore inside scrollers. */
+button, [role="button"], a, summary { touch-action: manipulation; }
 
 /* ───── layout ───────────────────────────── */
 .app {
@@ -1315,9 +1319,9 @@ a { color: var(--accent); }
 .context-rail::-webkit-scrollbar { width: 8px; }
 .context-rail::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
 
-.ctx-section { padding: 16px 18px; border-bottom: 1px solid var(--line); }
+.ctx-section { padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .ctx-section h4 {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
   color: var(--fg-3); font-weight: 500;
   display: flex; align-items: center; gap: 8px;
@@ -1345,7 +1349,202 @@ a { color: var(--accent); }
   font-family: var(--mono); font-size: 12px; color: var(--fg-1);
 }
 .ctx-file .pp { color: var(--fg-3); }
-.ctx-file .dl { margin-left: auto; font-size: 10.5px; color: var(--fg-3); }
+.ctx-file .dl,
+.ctx-file-dl { margin-left: auto; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3); }
+.ctx-file-dl.tone-amber { color: var(--amber); }
+.ctx-file-dl.tone-indigo { color: var(--indigo); }
+.ctx-file-dl.tone-jade { color: var(--jade); }
+
+/* ── Hero: context window meter ──────────────────────────────── */
+.ctx-hero h4 { justify-content: space-between; }
+.ctx-model-badge {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.02em;
+  text-transform: lowercase; padding: 2px 8px; border-radius: 999px;
+  background: var(--ink-2); border: 1px solid var(--line);
+  color: var(--fg-1);
+}
+.ctx-model-badge.tone-jade   { color: var(--jade); border-color: oklch(from var(--jade) l c h / 0.35); }
+.ctx-model-badge.tone-amber  { color: var(--amber); border-color: oklch(from var(--amber) l c h / 0.35); }
+.ctx-model-badge.tone-coral  { color: var(--coral); border-color: oklch(from var(--coral) l c h / 0.45); }
+
+.ctx-meter-row {
+  display: flex; align-items: baseline; gap: 10px;
+  margin-top: 2px;
+}
+.ctx-meter-num {
+  font-family: var(--serif); font-style: italic; font-size: 36px;
+  line-height: 1; color: var(--fg-0);
+}
+.ctx-meter-of {
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--fg-3);
+}
+.ctx-meter-pct {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 12.5px; font-weight: 500;
+}
+.ctx-meter-pct.tone-jade  { color: var(--jade); }
+.ctx-meter-pct.tone-amber { color: var(--amber); }
+.ctx-meter-pct.tone-coral { color: var(--coral); }
+
+.ctx-meter {
+  height: 8px; background: var(--ink-2); border-radius: 999px;
+  margin-top: 12px; overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.ctx-meter > i {
+  display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--jade), oklch(from var(--jade) l c h / 0.55));
+  transition: width 320ms ease;
+}
+.ctx-meter.tone-jade  > i { background: linear-gradient(90deg, var(--jade), oklch(from var(--jade) l c h / 0.55)); }
+.ctx-meter.tone-amber > i { background: linear-gradient(90deg, var(--amber), oklch(from var(--amber) l c h / 0.55)); }
+.ctx-meter.tone-coral > i { background: linear-gradient(90deg, var(--coral), oklch(from var(--coral) l c h / 0.55)); }
+
+.ctx-flag {
+  margin-top: 10px; font-family: var(--mono); font-size: 11px;
+  padding: 6px 9px; border-radius: 6px;
+  background: oklch(from var(--coral) l c h / 0.1);
+  color: var(--coral);
+  border: 1px solid oklch(from var(--coral) l c h / 0.25);
+}
+.ctx-flag.tone-amber {
+  color: var(--amber);
+  background: oklch(from var(--amber) l c h / 0.1);
+  border-color: oklch(from var(--amber) l c h / 0.25);
+}
+
+/* ── Tile grid (cost, cache hit, turns…) ─────────────────────── */
+.ctx-tiles {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+}
+.ctx-tile {
+  padding: 8px 10px;
+  background: oklch(from var(--ink-2) l c h / 0.55);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  display: flex; flex-direction: column; gap: 3px;
+  min-width: 0;
+}
+.ctx-tile-val {
+  font-family: var(--mono); font-size: 18px; font-weight: 500;
+  color: var(--fg-0); line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+.ctx-tile-val.accent {
+  font-family: var(--serif); font-style: italic; font-size: 26px; font-weight: 400;
+  letter-spacing: 0;
+}
+.ctx-tile-lbl {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--fg-3);
+}
+.ctx-tile.tone-jade  { border-color: oklch(from var(--jade) l c h / 0.32); }
+.ctx-tile.tone-jade  .ctx-tile-val { color: var(--jade); }
+.ctx-tile.tone-amber { border-color: oklch(from var(--amber) l c h / 0.32); }
+.ctx-tile.tone-amber .ctx-tile-val { color: var(--amber); }
+.ctx-tile.tone-coral { border-color: oklch(from var(--coral) l c h / 0.32); }
+.ctx-tile.tone-coral .ctx-tile-val { color: var(--coral); }
+.ctx-tile.tone-indigo{ border-color: oklch(from var(--indigo) l c h / 0.32); }
+.ctx-tile.tone-indigo.ctx-tile-val { color: var(--indigo); }
+
+.ctx-subline {
+  margin-top: 10px; font-family: var(--mono); font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* ── Token-mix band ──────────────────────────────────────────── */
+.ctx-bands { margin-top: 12px; }
+.ctx-band {
+  display: flex; gap: 2px;
+  height: 6px; border-radius: 999px; overflow: hidden;
+  background: var(--ink-2);
+}
+.ctx-band .seg { display: block; height: 100%; min-width: 0; }
+.ctx-band .seg.tone-jade   { background: var(--jade); }
+.ctx-band .seg.tone-amber  { background: var(--amber); }
+.ctx-band .seg.tone-indigo { background: var(--indigo); }
+
+.ctx-band-legend {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+  font-family: var(--mono); font-size: 10px; color: var(--fg-2);
+}
+.ctx-band-legend > span {
+  display: flex; align-items: center; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctx-band-legend .lbl { color: var(--fg-3); margin-right: 4px; }
+.ctx-band-legend .val { color: var(--fg-1); }
+.ctx-band-legend .dot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 999px;
+  margin-right: 5px; flex: 0 0 auto;
+}
+.ctx-band-legend .dot.tone-jade   { background: var(--jade); }
+.ctx-band-legend .dot.tone-amber  { background: var(--amber); }
+.ctx-band-legend .dot.tone-indigo { background: var(--indigo); }
+
+/* ── Tool histogram ─────────────────────────────────────────── */
+.ctx-hist {
+  list-style: none; padding: 0; margin: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.ctx-hist li {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr) auto;
+  align-items: center; gap: 10px;
+  font-family: var(--mono); font-size: 11.5px;
+}
+.ctx-hist-name {
+  color: var(--fg-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ctx-hist-bar {
+  height: 5px; background: var(--ink-2); border-radius: 999px;
+  overflow: hidden; box-shadow: inset 0 0 0 1px var(--line);
+}
+.ctx-hist-bar > i {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, var(--accent), oklch(from var(--accent) l c h / 0.5));
+  border-radius: 999px;
+}
+.ctx-hist-n {
+  color: var(--fg-2); font-variant-numeric: tabular-nums;
+  min-width: 22px; text-align: right;
+}
+
+.ctx-h4-count {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 10px;
+  padding: 1px 7px; border-radius: 999px;
+  background: var(--ink-2); border: 1px solid var(--line);
+  color: var(--fg-2);
+}
+
+/* ── Errors section ─────────────────────────────────────────── */
+.ctx-errors .ctx-tile { background: oklch(from var(--coral) l c h / 0.06); }
+
+/* ── Collapsible session-meta block ─────────────────────────── */
+.ctx-meta { border-bottom: none; }
+.ctx-meta-toggle {
+  appearance: none; border: 0; background: transparent;
+  width: 100%; padding: 0;
+  display: flex; align-items: center; gap: 8px;
+  color: var(--fg-3); cursor: pointer;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.ctx-meta-toggle:hover { color: var(--fg-1); }
+.ctx-meta-chev {
+  display: inline-flex; transition: transform 160ms ease;
+}
+.ctx-meta-chev.open { transform: rotate(90deg); }
+.ctx-meta-id {
+  margin-left: auto;
+  color: var(--fg-3);
+  font-size: 11px; letter-spacing: 0;
+}
 
 /* visual treat: subtle aurora behind transcript */
 .transcript::before {

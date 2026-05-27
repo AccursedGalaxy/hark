@@ -681,6 +681,10 @@ export function Composer({
             value={text}
             placeholder={placeholderText}
             disabled={disabled || lockedByQuestion}
+            // Hint to iOS / Android soft keyboards: show a "send"-style
+            // return key. Doesn't change our hardware-keyboard Enter
+            // handling, just relabels the on-screen key.
+            enterKeyHint="send"
             onChange={(e) => {
               setText(e.target.value);
               setCaret(e.target.selectionStart);

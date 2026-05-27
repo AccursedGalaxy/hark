@@ -7,6 +7,7 @@ import {
   indexToolResults,
   parseLine,
   parseTranscript,
+  parseUsage,
   readSessionTitle,
   ToolNameIndex,
 } from "./transcript.js";
@@ -806,5 +807,100 @@ describe("indexToolResults", () => {
 
   it("returns an empty map when there are no tool_results", () => {
     expect(indexToolResults(parseTranscript(assistantText))).toEqual(new Map());
+  });
+});
+
+describe("parseUsage", () => {
+  it("maps the Anthropic usage shape to our typed view", () => {
+    const raw = {
+      input_tokens: 12,
+      output_tokens: 480,
+      cache_creation_input_tokens: 23_874,
+      cache_read_input_tokens: 1_000_000,
+      server_tool_use: { web_search_requests: 2, web_fetch_requests: 1 },
+    };
+    expect(parseUsage(raw)).toEqual({
+      inputTokens: 12,
+      outputTokens: 480,
+      cacheCreationInputTokens: 23_874,
+      cacheReadInputTokens: 1_000_000,
+      webSearchRequests: 2,
+      webFetchRequests: 1,
+    });
+  });
+
+  it("defaults missing fields to 0 so totals never NaN", () => {
+    expect(parseUsage({ input_tokens: 10 })).toEqual({
+      inputTokens: 10,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+      webSearchRequests: 0,
+      webFetchRequests: 0,
+    });
+  });
+
+  it("returns undefined for non-object input (synthesised rows)", () => {
+    expect(parseUsage(undefined)).toBeUndefined();
+    expect(parseUsage(null)).toBeUndefined();
+    expect(parseUsage("")).toBeUndefined();
+  });
+});
+
+describe("assistant usage/model/stopReason on parseLine", () => {
+  const assistantWithUsage = JSON.stringify({
+    type: "assistant",
+    uuid: "au1",
+    timestamp: "2026-05-25T17:00:00.000Z",
+    message: {
+      role: "assistant",
+      model: "claude-opus-4-7",
+      stop_reason: "tool_use",
+      content: [{ type: "text", text: "ok" }],
+      usage: {
+        input_tokens: 6,
+        output_tokens: 393,
+        cache_creation_input_tokens: 23_874,
+        cache_read_input_tokens: 59_792_790,
+      },
+    },
+  });
+
+  it("attaches model, stop_reason and parsed usage", () => {
+    const ev = parseLine(assistantWithUsage);
+    expect(ev?.kind).toBe("assistant");
+    if (ev?.kind !== "assistant") return;
+    expect(ev.model).toBe("claude-opus-4-7");
+    expect(ev.stopReason).toBe("tool_use");
+    expect(ev.usage?.outputTokens).toBe(393);
+    expect(ev.usage?.cacheReadInputTokens).toBe(59_792_790);
+  });
+
+  it("flags API error rows and carries retryAttempt", () => {
+    const errRow = JSON.stringify({
+      type: "assistant",
+      uuid: "ae1",
+      timestamp: "2026-05-25T17:00:00.000Z",
+      isApiErrorMessage: true,
+      retryAttempt: 2,
+      message: { role: "assistant", content: [{ type: "text", text: "" }] },
+    });
+    const ev = parseLine(errRow);
+    if (ev?.kind !== "assistant") throw new Error("expected assistant");
+    expect(ev.isApiError).toBe(true);
+    expect(ev.retryAttempt).toBe(2);
+  });
+
+  it("omits usage on synthesised rows that never reached the API", () => {
+    const synth = JSON.stringify({
+      type: "assistant",
+      uuid: "as1",
+      timestamp: "2026-05-25T17:00:00.000Z",
+      message: { role: "assistant", model: "<synthetic>", content: [] },
+    });
+    const ev = parseLine(synth);
+    if (ev?.kind !== "assistant") throw new Error("expected assistant");
+    expect(ev.usage).toBeUndefined();
+    expect(ev.model).toBe("<synthetic>");
   });
 });

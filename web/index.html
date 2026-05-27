@@ -3,17 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <!--
-      maximum-scale=1 + user-scalable=no prevents iOS Safari from zooming in
-      when an input/textarea is focused, and disables the pinch-to-zoom that
-      otherwise interferes with our own scroll containers. The composer
-      textarea also uses 16px font-size on coarse-pointer devices as a
-      second layer of zoom-prevention.
+      Auto-zoom on focused inputs is prevented by giving them font-size:16px
+      on coarse-pointer devices (see design.css). Apple has ignored
+      maximum-scale and user-scalable since iOS 10 and both flag in WCAG
+      audits, so we don't ship them.
     -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0a0a0a" />
     <meta name="color-scheme" content="dark light" />
 
     <!-- iOS PWA / "Add to Home Screen" -->

@@ -209,6 +209,19 @@ export type ContentBlock =
   | { type: "thinking"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown };
 
+// Per-message token accounting Claude Code persists on every assistant row.
+// Drives the context-rail meter, cost estimates, and cache-hit ratio.
+// All counts are non-negative integers. Fields not reported by older Claude
+// Code versions default to 0 so consumers can sum without nullish checks.
+export interface MessageUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  webSearchRequests: number;
+  webFetchRequests: number;
+}
+
 // Typed view of the raw `toolUseResult` field Claude Code writes alongside
 // each tool_result entry. Only tools whose structure pays off in rendering get
 // a dedicated shape; everything else falls through as `raw` so nothing is
@@ -291,9 +304,31 @@ export interface ToolResultEvent {
   meta?: ToolResultMeta;
 }
 
+export interface AssistantEvent {
+  kind: "assistant";
+  uuid: string;
+  ts: string;
+  blocks: ContentBlock[];
+  // Model id Claude Code recorded for this turn (e.g. "claude-opus-4-7").
+  // Sessions can switch models mid-conversation, so this is per-message.
+  model?: string;
+  // Token accounting. Undefined for synthetic/error rows that never reached
+  // the API; otherwise always present (zeroed fields are fine to display).
+  usage?: MessageUsage;
+  // Anthropic stop_reason: "tool_use" | "end_turn" | "max_tokens" |
+  // "stop_sequence" | "pause_turn" | string (kept open for future values).
+  stopReason?: string;
+  // Set when Claude Code marks the row as an API failure (rate limit,
+  // auth, server error). Pairs with `apiErrorStatus` on the raw row.
+  isApiError?: boolean;
+  // 1-indexed retry attempt for transient failures. Undefined on the
+  // primary attempt.
+  retryAttempt?: number;
+}
+
 export type TranscriptEvent =
   | { kind: "user"; uuid: string; ts: string; text: string }
-  | { kind: "assistant"; uuid: string; ts: string; blocks: ContentBlock[] }
+  | AssistantEvent
   | ToolResultEvent
   | { kind: "system"; uuid: string; ts: string; text: string };
 

@@ -1,21 +1,37 @@
 import fs from "node:fs/promises";
 import type {
   ContentBlock,
+  MessageUsage,
   ToolResultEvent,
   ToolResultMeta,
   TranscriptEvent,
 } from "../shared/protocol.js";
 
-export type { ContentBlock, ToolResultEvent, ToolResultMeta, TranscriptEvent };
+export type {
+  ContentBlock,
+  MessageUsage,
+  ToolResultEvent,
+  ToolResultMeta,
+  TranscriptEvent,
+};
 
 type RawEntry = {
   type?: string;
   uuid?: string;
   timestamp?: string;
   isMeta?: boolean;
+  // Claude Code marks transient API failures with `isApiErrorMessage: true`.
+  // Surfaced on assistant events so the rail can render a retries pill.
+  isApiErrorMessage?: boolean;
+  retryAttempt?: number;
   message?: {
     role?: string;
     content?: unknown;
+    // Anthropic-shaped fields on assistant rows. Only the bits we surface
+    // are typed; the rest stays unknown.
+    model?: unknown;
+    stop_reason?: unknown;
+    usage?: unknown;
   };
   // Sibling to `message`. Carries the structured tool-output shape Claude
   // Code records alongside each tool_result. Type is `unknown` because the
@@ -90,6 +106,24 @@ function stringifyContent(content: unknown): string {
       .join("");
   }
   return JSON.stringify(content);
+}
+
+// Pull token counts off the Anthropic-shaped `usage` object Claude Code
+// persists on every assistant row. Missing fields default to 0 so callers
+// can sum without nullish checks. Returns undefined only when the input is
+// not an object at all (synthesised rows where the API never ran).
+export function parseUsage(raw: unknown): MessageUsage | undefined {
+  const obj = asObject(raw);
+  if (!obj) return undefined;
+  const serverToolUse = asObject(obj.server_tool_use);
+  return {
+    inputTokens: asNumber(obj.input_tokens),
+    outputTokens: asNumber(obj.output_tokens),
+    cacheCreationInputTokens: asNumber(obj.cache_creation_input_tokens),
+    cacheReadInputTokens: asNumber(obj.cache_read_input_tokens),
+    webSearchRequests: asNumber(serverToolUse?.web_search_requests),
+    webFetchRequests: asNumber(serverToolUse?.web_fetch_requests),
+  };
 }
 
 function parseAssistantBlocks(content: unknown): ContentBlock[] {
@@ -411,11 +445,24 @@ export function parseLine(line: string): TranscriptEvent | null {
     return parseToolResultUser(entry) ?? parseMultiContentUser(entry);
   }
   if (entry.type === "assistant") {
+    const msg = entry.message;
+    const usage = parseUsage(msg?.usage);
+    const model = typeof msg?.model === "string" ? msg.model : undefined;
+    const stopReason =
+      typeof msg?.stop_reason === "string" ? msg.stop_reason : undefined;
+    const isApiError = entry.isApiErrorMessage === true || undefined;
+    const retryAttempt =
+      typeof entry.retryAttempt === "number" ? entry.retryAttempt : undefined;
     return {
       kind: "assistant",
       uuid: entry.uuid ?? "",
       ts: entry.timestamp ?? "",
-      blocks: parseAssistantBlocks(entry.message?.content),
+      blocks: parseAssistantBlocks(msg?.content),
+      ...(model ? { model } : {}),
+      ...(usage ? { usage } : {}),
+      ...(stopReason ? { stopReason } : {}),
+      ...(isApiError ? { isApiError } : {}),
+      ...(retryAttempt !== undefined ? { retryAttempt } : {}),
     };
   }
   // Queued user prompts: when the user types into the composer while the
