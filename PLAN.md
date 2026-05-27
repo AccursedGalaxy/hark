@@ -16,8 +16,7 @@ hark is a notification and remote-control hub for Claude Code sessions running o
 *Active threads being shipped right now. Hard cap: 3 items. One bullet
 per thread; one line of context allowed beneath it.*
 
-- **Sidebar ASKING false positive** — `deriveState` was treating any `status="waiting"` as `wait`, so stale session.json values kept the pill stuck. Tightened to require a backing `pending`/`pendingPermission` (b3dc80e).
-  392 tests green; needs rebuild + restart of `dist/server.js` to verify against the live repro.
+- (none)
 
 ## Next
 
@@ -25,6 +24,7 @@ per thread; one line of context allowed beneath it.*
 it has become a dumping ground — flag it and force triage back into Now
 or out of the doc.*
 
+- **Sidebar Live/Idle dot color collision** — both render in the same green; Live's pulse is the only distinguisher. Re-tone Idle (and verify across every preset in the Settings color picker, since it's load-bearing for "is this session running?").
 - **Pending prompt disappears on second client** — observed 2026-05-27: desktop client showed a question, opening hark on the phone made the question vanish even though the underlying CC tmux session still had it pending. Likely the desktop's auto-clear is broadcasting a state that strips `pending` from other clients' attention map. Server's `dismissAttention` is supposed to keep pending; check the broadcast payload.
 - **Capture modal: image attachment** — drag-and-drop and Ctrl+V paste in the capture textarea, mirroring the session composer's upload flow.
 - **Passive "modified by another session" indicator** — `PlanPanel` shows a small dot when `planMtime` advanced since this view's last fetch. Designed-but-deferred during the project-state build.
@@ -37,6 +37,7 @@ or out of the doc.*
 section exists to answer "what just happened" for a cold start, not
 to be complete.*
 
+- Sidebar ASKING pill no longer sticks on stale `status="waiting"`; `deriveState` requires a real pending payload (b3dc80e).
 - Bootstrap-from-codebase directive added to the CLAUDE.md managed block (7220b74).
 - Project-state feature: per-repo `PLAN.md`, capture shortcut, project grouping, idempotent `CLAUDE.md` block (5c34c1f).
 - Settings popover moved into the sidebar footer (d5bf559).
@@ -46,7 +47,6 @@ to be complete.*
 - Question / prompt cards optimized for narrow viewports (96782d0).
 - Narrow-layout overflow fix in the transcript view (b5731ac).
 - AI-title support: Claude's `ai-title` row surfaced as the session label (7a3b844).
-- Smooth-scroll tool capsules into view when expanded (1c78ef4).
 
 ## Inbox
 
