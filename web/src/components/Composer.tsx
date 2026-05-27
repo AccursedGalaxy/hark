@@ -398,6 +398,7 @@ export function Composer({
   const sendKey = (k: string) => sendKeySequence([k]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    noteKeyForHardwareDetection(e);
     if (slashMenu.onKeyDown(e)) return;
     if (e.key === "Enter" && !e.shiftKey && shouldSendOnEnter()) {
       e.preventDefault();
@@ -806,18 +807,46 @@ function isTouch() {
   );
 }
 
+// Module-level latch: once we observe a keydown with characteristics that
+// only a hardware keyboard can produce (modifier keys, function keys, Tab,
+// arrows, Escape), remember it for the rest of the session and let Enter
+// submit from then on. The visualViewport heuristic below is the
+// first-keypress fallback for plain Enter on iPad PWAs.
+let sawHardwareKeyboard = false;
+function noteKeyForHardwareDetection(e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean }) {
+  if (sawHardwareKeyboard) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) {
+    sawHardwareKeyboard = true;
+    return;
+  }
+  if (
+    e.key === "Tab" ||
+    e.key === "Escape" ||
+    e.key === "ArrowUp" ||
+    e.key === "ArrowDown" ||
+    e.key === "ArrowLeft" ||
+    e.key === "ArrowRight" ||
+    (e.key.length > 1 && e.key.startsWith("F") && /^F\d+$/.test(e.key))
+  ) {
+    sawHardwareKeyboard = true;
+  }
+}
+
 // Whether pressing Enter (without Shift) should submit instead of inserting
 // a newline. Desktop / mouse devices always submit. On a touch device we
-// only submit when there is no on-screen keyboard visible — that's the
-// signal that the user is typing on a hardware keyboard (e.g. iPad +
-// Magic Keyboard), where Enter-to-send is the expected behavior.
+// submit when a hardware keyboard is detected — either because we've seen
+// a hardware-only key in this session, or because `any-pointer: fine`
+// reports a trackpad/mouse alongside the touch screen (e.g. iPad + Magic
+// Keyboard), or because no on-screen keyboard is currently visible.
 function shouldSendOnEnter() {
   if (typeof window === "undefined") return true;
-  if (!window.matchMedia("(pointer: coarse)").matches) return true;
+  if (window.matchMedia("(pointer: fine)").matches) return true;
+  if (sawHardwareKeyboard) return true;
+  if (window.matchMedia("(any-pointer: fine)").matches) return true;
   const vv = window.visualViewport;
   if (!vv) return false;
   const softKeyboardGap = window.innerHeight - (vv.height + vv.offsetTop);
-  return softKeyboardGap <= 8;
+  return softKeyboardGap < 100;
 }
 
 function formatSize(bytes: number): string {

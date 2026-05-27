@@ -195,6 +195,9 @@ a { color: var(--accent); }
 
 .rail-head {
   padding: 18px 18px 12px;
+  /* iOS standalone (Add to Home Screen) overlays the page with the
+     status bar (clock/battery/icons). Push the brand row below it. */
+  padding-top: max(18px, calc(env(safe-area-inset-top) + 6px));
   display: flex;
   align-items: center;
   gap: 10px;
@@ -436,10 +439,13 @@ a { color: var(--accent); }
 }
 
 .topbar {
-  flex: 0 0 58px;
-  height: 58px;
+  flex: 0 0 auto;
+  /* min-height instead of fixed height so the bar can grow to clear the
+     iOS standalone status bar overlay via padding-top. */
+  min-height: 58px;
   display: flex; align-items: center; gap: 14px;
   padding: 0 22px;
+  padding-top: env(safe-area-inset-top);
   border-bottom: 1px solid var(--line);
   background: var(--ink-0);
   z-index: 5;
