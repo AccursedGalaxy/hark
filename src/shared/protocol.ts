@@ -219,7 +219,11 @@ export function deriveState(s: RawSession): SessionState {
   // header flashes OFFLINE while Claude is actively blocked on the user.
   if (s.needsAttention) return "wait";
   if (s.status === "busy") return "busy";
-  if (s.status === "waiting") return "wait";
+  // `status="waiting"` alone is not enough: Claude Code writes it when a
+  // prompt opens, but if the user answers directly in the TUI the field can
+  // sit stale on disk. Require an actual pending payload from the attention
+  // layer before showing the ASKING pill — otherwise the rail gets stuck.
+  if (s.status === "waiting" && (s.pending || s.pendingPermission)) return "wait";
   if (typeof s.status === "string") return "idle";
   return "dead";
 }

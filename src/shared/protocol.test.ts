@@ -30,8 +30,27 @@ describe("deriveState", () => {
     expect(deriveState(baseSession({ status: "idle" }))).toBe("idle");
   });
 
-  it("status='waiting' → 'wait' (Claude Code is blocked on a TUI prompt)", () => {
-    expect(deriveState(baseSession({ status: "waiting" }))).toBe("wait");
+  it("status='waiting' with a real pending prompt → 'wait'", () => {
+    expect(
+      deriveState(
+        baseSession({
+          status: "waiting",
+          pending: {
+            kind: "oauth",
+            message: "Authorize on desktop",
+            requestedAt: 1,
+          },
+        }),
+      ),
+    ).toBe("wait");
+  });
+
+  it("status='waiting' alone → 'idle' (stale 'waiting' the user already answered in the TUI)", () => {
+    // Claude Code writes status='waiting' to session.json when it prompts,
+    // but if the user answers directly in the TUI, that field can sit stale.
+    // Without a backing pending payload, treat it as idle so the rail's
+    // ASKING pill doesn't get stuck.
+    expect(deriveState(baseSession({ status: "waiting" }))).toBe("idle");
   });
 
   it("unknown status string → 'idle' (not 'dead')", () => {
