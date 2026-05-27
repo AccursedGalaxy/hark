@@ -7,7 +7,6 @@ import { TaskListPanel } from "./components/TaskListPanel";
 import { TopBar } from "./components/TopBar";
 import { Transcript } from "./components/Transcript";
 import { TrustPrompt } from "./components/TrustPrompt";
-import { TweaksPanel } from "./components/TweaksPanel";
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { useSessions } from "./hooks/useSessions";
 import { sessionLabel, tildeify } from "./lib/format";
@@ -115,6 +114,11 @@ export default function App() {
             refresh();
           }}
           onClose={closeSession}
+          showContext={showContext}
+          onShowContext={(v) => {
+            setShowContext(v);
+            setContextRail(v);
+          }}
         />
       )}
 
@@ -129,6 +133,11 @@ export default function App() {
             refresh();
           }}
           onClose={closeSession}
+          showContext={showContext}
+          onShowContext={(v) => {
+            setShowContext(v);
+            setContextRail(v);
+          }}
         />
       )}
 
@@ -211,14 +220,6 @@ export default function App() {
       {ctxVisible && currentSession && (
         <ContextRail session={currentSession} events={events} />
       )}
-
-      <TweaksPanel
-        showContext={showContext}
-        onShowContext={(v) => {
-          setShowContext(v);
-          setContextRail(v);
-        }}
-      />
     </div>
   );
 }

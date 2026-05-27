@@ -4,6 +4,7 @@ import { sessionLabel, tildeify } from "../lib/format";
 import { setTheme, type Theme, getActiveTheme } from "../lib/theme";
 import { BranchIcon, CloseIcon, PlusIcon, SearchIcon, SettingsIcon } from "./icons";
 import { NewSessionButton } from "./NewSessionButton";
+import { SettingsPopover } from "./SettingsPopover";
 
 // Map our 4-state model to the design's 4 status badges:
 //   busy → LIVE, wait → ASKING, idle → IDLE, dead → OFFLINE
@@ -21,6 +22,8 @@ export function Sidebar({
   attentionCount,
   onSpawned,
   onClose,
+  showContext,
+  onShowContext,
 }: {
   sessions: SessionView[];
   current: string | null;
@@ -28,11 +31,14 @@ export function Sidebar({
   attentionCount: number;
   onSpawned: (pid: number | null) => void;
   onClose: (id: string) => Promise<void>;
+  showContext: boolean;
+  onShowContext: (v: boolean) => void;
 }) {
   const [filter, setFilter] = useState("");
   const [spawnOpen, setSpawnOpen] = useState(false);
   const [theme, setLocalTheme] = useState<Theme>(() => getActiveTheme());
   const [closing, setClosing] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -195,11 +201,20 @@ export function Sidebar({
           className="icon-btn"
           style={{ marginLeft: "auto" }}
           title="Settings"
-          aria-label="Settings"
+          aria-label="Open settings"
+          aria-expanded={settingsOpen}
+          onClick={() => setSettingsOpen(true)}
         >
           <SettingsIcon />
         </button>
       </div>
+
+      <SettingsPopover
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        showContext={showContext}
+        onShowContext={onShowContext}
+      />
     </aside>
   );
 }

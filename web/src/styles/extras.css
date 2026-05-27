@@ -893,48 +893,59 @@
   color: var(--fg-2);
 }
 
-/* ───── tweaks panel ─────────────────────────────── */
-.tweaks-fab {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  width: 40px;
-  height: 40px;
-  border-radius: 999px;
-  background: var(--ink-2);
-  border: 1px solid var(--line-strong);
-  color: var(--fg-1);
-  display: grid;
-  place-items: center;
-  z-index: 30;
-  box-shadow: var(--shadow-card);
-  transition: background .15s, color .15s, transform .15s;
-}
-.tweaks-fab:hover { background: var(--ink-3); color: var(--fg-0); transform: translateY(-2px); }
-
-.tweaks-overlay {
+/* ───── settings popover ─────────────────────────── */
+.settings-overlay {
   position: fixed;
   inset: 0;
-  background: oklch(0 0 0 / 0.4);
+  background: oklch(0 0 0 / 0.45);
   z-index: 35;
   backdrop-filter: blur(2px);
 }
-.tweaks-panel {
+.settings-panel {
   position: fixed;
-  bottom: 70px;
-  right: 20px;
-  width: 280px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 320px;
+  max-width: calc(100vw - 32px);
   background: var(--ink-1);
   border: 1px solid var(--line-strong);
   border-radius: 16px;
   box-shadow: var(--shadow-card);
-  padding: 14px;
+  padding: 16px;
   z-index: 40;
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
-.tweaks-panel h4 {
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.settings-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--fg-0);
+}
+.settings-close {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--fg-3);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.settings-close:hover { background: var(--ink-2); color: var(--fg-0); }
+.settings-panel h4 {
   margin: 0;
   font-family: var(--mono);
   font-size: 10px;
@@ -1371,16 +1382,6 @@
 .app.is-narrow .composer-error {
   margin-left: 10px;
   margin-right: 10px;
-}
-
-/* Tweaks FAB — keep it clear of the home indicator in standalone mode */
-.app.is-narrow .tweaks-fab {
-  bottom: max(20px, calc(env(safe-area-inset-bottom) + 8px));
-  right: max(16px, calc(env(safe-area-inset-right) + 8px));
-}
-.app.is-narrow .tweaks-panel {
-  right: max(16px, calc(env(safe-area-inset-right) + 8px));
-  bottom: max(70px, calc(env(safe-area-inset-bottom) + 58px));
 }
 
 /* Conn banner — push under the notch when in standalone mode */
