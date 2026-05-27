@@ -407,7 +407,11 @@ button, [role="button"], a, summary { touch-action: manipulation; }
 }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); flex: none; }
 .dot.live, .dot.busy { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); animation: pulse 2.2s ease-in-out infinite; }
-.dot.idle    { background: var(--jade); }
+/* Idle reads as a hollow jade ring rather than a filled jade dot. With a
+   jade-accent preset, a filled idle dot would collide with the (also-
+   filled) live dot — only the pulse animation would distinguish them.
+   Form-based difference works across every accent. */
+.dot.idle    { background: transparent; box-shadow: inset 0 0 0 1.5px var(--jade); }
 .dot.waiting, .dot.wait { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
 .dot.error, .dot.dead { background: var(--coral); }
 

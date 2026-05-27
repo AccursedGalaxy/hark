@@ -24,7 +24,6 @@ per thread; one line of context allowed beneath it.*
 it has become a dumping ground — flag it and force triage back into Now
 or out of the doc.*
 
-- **Sidebar Live/Idle dot color collision** — both render in the same green; Live's pulse is the only distinguisher. Re-tone Idle (and verify across every preset in the Settings color picker, since it's load-bearing for "is this session running?").
 - **Capture modal: image attachment** — drag-and-drop and Ctrl+V paste in the capture textarea, mirroring the session composer's upload flow.
 - **Passive "modified by another session" indicator** — `PlanPanel` shows a small dot when `planMtime` advanced since this view's last fetch. Designed-but-deferred during the project-state build.
 - **Web Push** — service worker + VAPID for closed-app mobile notifications. Last open item from the original Phase 2+ list.
@@ -36,6 +35,7 @@ or out of the doc.*
 section exists to answer "what just happened" for a cold start, not
 to be complete.*
 
+- Sidebar Live/Idle dot collision resolved: Idle is now a hollow jade ring (inset box-shadow), so it stays distinct from Live across every accent preset — including jade-accent, where both would otherwise be the same filled green.
 - Pending prompt no longer disappears on a second client: `noteTranscriptEvents` Phase 2 only fires on `assistant` events, so a queued-prompt `user` event with `ts > requestedAt` (replayed when any client opens the transcript stream) can no longer broadcast `pending=undefined` to every connected client.
 - Mobile horizontal-overflow fix: markdown tables wrap in a scroll container, `.md pre` clamped, transcript and slash menu pin `overflow-x: hidden` to defeat the implicit `auto` from `overflow-y`.
 - Sidebar ASKING pill no longer sticks on stale `status="waiting"`; `deriveState` requires a real pending payload (b3dc80e).
