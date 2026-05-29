@@ -16,14 +16,45 @@ export interface SpawnInput {
 // users whose PATH additions live in .zshrc (the common case) end up with
 // only `.zprofile`'s PATH and `claude` isn't found, causing the window
 // to auto-close on spawn.
+// Single-quote a value for the *login* shell (layer 2), escaping embedded
+// quotes: ' → '\''. The result is escaped a second time for the outer
+// `sh -c` layer (layer 1) by buildLoginShellCommand.
+function shSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+export interface LoginShellOpts {
+  // Env assignments applied to the exec'd command, INSIDE the login shell so
+  // they take effect after rc files have run. Values are single-quoted.
+  env?: Record<string, string>;
+  // A directory prepended to PATH. Written as PATH='<dir>':$PATH so the login
+  // shell expands $PATH (the rc-loaded PATH) at exec time — that's why it must
+  // stay unquoted, unlike `env` values. Used to put the `hark` CLI on the
+  // head/worker's PATH.
+  pathPrepend?: string;
+}
+
 export function buildLoginShellCommand(
   claudeCommand: string,
   shell: string,
+  opts: LoginShellOpts = {},
 ): string {
-  // Single-quote the inner command and escape any embedded single quotes:
-  // ' → '\''. Keeps complex commands (e.g., `claude --resume <id>`) safe.
-  const escaped = claudeCommand.replace(/'/g, "'\\''");
-  return `exec ${shell} -ilc 'exec ${escaped}'`;
+  // Build the login shell's (layer-2) command line: env assignments, then the
+  // exec. PATH first so a prepended hark bin dir wins over rc-set entries.
+  const assigns: string[] = [];
+  if (opts.pathPrepend) {
+    assigns.push(`PATH=${shSingleQuote(opts.pathPrepend)}:$PATH`);
+  }
+  for (const [k, v] of Object.entries(opts.env ?? {})) {
+    assigns.push(`${k}=${shSingleQuote(v)}`);
+  }
+  const prefix = assigns.length > 0 ? `${assigns.join(" ")} ` : "";
+  const inner = `${prefix}exec ${claudeCommand}`;
+  // Single-quote the whole inner command and escape any embedded single quotes
+  // for the outer `sh -c` layer. Keeps complex commands (flags, env, quoted
+  // values) safe across both shell layers.
+  const escaped = inner.replace(/'/g, "'\\''");
+  return `exec ${shell} -ilc '${escaped}'`;
 }
 
 // -P -F '#{pane_pid}' makes tmux print the PID of the new pane's process,
@@ -147,10 +178,19 @@ export interface SpawnResult {
 export async function spawnClaudeSession(opts: {
   cwd: string;
   command?: string;
+  // Env vars injected into the spawned session (orchestration head/workers
+  // pass HARK_ORCH_ID / HARK_ROLE / HARK_API so the `hark` CLI auto-targets
+  // the run). See LoginShellOpts.
+  env?: Record<string, string>;
+  // Directory prepended to PATH (puts the `hark` CLI on the session's PATH).
+  pathPrepend?: string;
 }): Promise<SpawnResult> {
   const userShell = os.userInfo().shell || "/bin/sh";
   const inner = opts.command ?? "claude";
-  const command = buildLoginShellCommand(inner, userShell);
+  const command = buildLoginShellCommand(inner, userShell, {
+    env: opts.env,
+    pathPrepend: opts.pathPrepend,
+  });
   const sessions = await listSessions();
   const target = pickSpawnTarget(sessions);
 

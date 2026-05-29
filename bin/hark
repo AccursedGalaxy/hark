@@ -1,0 +1,66 @@
+#!/usr/bin/env node
+// The `hark` CLI runner — the head's action surface (see docs/orchestration-head.md).
+// Thin by design: all logic (arg parsing → request spec, response → text) lives
+// in src/lib/orch/cli.ts and is unit-tested; this file only does fetch + IO.
+//
+// It imports the COMPILED helpers from ../dist (relative to this file, so it
+// works from any cwd). Run `npm run build` before spawning orchestration
+// sessions. The orchestrator prepends this dir to the session's PATH and sets
+// HARK_ORCH_ID / HARK_ROLE / HARK_API, so `hark …` just works inside the head.
+import { planCommand, renderResponse, envFromProcess } from "../dist/lib/orch/cli.js";
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const env = envFromProcess(process.env);
+  const plan = planCommand(argv, env);
+
+  if (plan.kind === "message") {
+    process.stdout.write(plan.text + "\n");
+    return 0;
+  }
+  if (plan.kind === "error") {
+    process.stderr.write(`hark: ${plan.message}\n`);
+    return 2;
+  }
+
+  const { method, path, body } = plan.request;
+  const headers = { "content-type": "application/json" };
+  if (env.role) headers["x-hark-role"] = env.role;
+
+  let res;
+  try {
+    res = await fetch(env.api + path, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) {
+    process.stderr.write(`hark: cannot reach ${env.api} (${e.message})\n`);
+    return 1;
+  }
+
+  const text = await res.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!res.ok) {
+    const msg = data && data.error ? data.error : `HTTP ${res.status}`;
+    process.stderr.write(`hark: ${msg}\n`);
+    return 1;
+  }
+
+  process.stdout.write(renderResponse(plan.render, data) + "\n");
+  return 0;
+}
+
+main().then(
+  (code) => process.exit(code),
+  (e) => {
+    process.stderr.write(`hark: ${e && e.stack ? e.stack : e}\n`);
+    process.exit(1);
+  },
+);

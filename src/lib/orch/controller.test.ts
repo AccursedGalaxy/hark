@@ -6,12 +6,14 @@ import { OrchStore } from "./store.js";
 import { Orchestrator } from "./orchestrator.js";
 import {
   AutonomyController,
+  buildHeadNotification,
   buildNudge,
   decideAutonomyAction,
   metricsFromTranscript,
   scanMarkers,
   transcriptText,
   type AutonomyState,
+  type HeadNotification,
 } from "./controller.js";
 import {
   BLOCKED_MARKER,
@@ -170,6 +172,30 @@ describe("buildNudge", () => {
     const n = buildNudge();
     expect(n).toContain(DONE_MARKER);
     expect(n).toContain(BLOCKED_MARKER);
+  });
+});
+
+describe("buildHeadNotification", () => {
+  it("carries role, agentId, branch, marker, diffstat, commits, summary", () => {
+    const note: HeadNotification = {
+      role: "coder",
+      agentId: "agent-2",
+      branch: "hark/ship/coder-a",
+      marker: "done",
+      summary: "Implemented the parser; tests green.",
+      diffstat: "2 files +30/-4",
+      commitCount: 3,
+    };
+    const text = buildHeadNotification(note);
+    expect(text).toContain("coder");
+    expect(text).toContain("agent-2");
+    expect(text).toContain("hark/ship/coder-a");
+    expect(text.toLowerCase()).toContain("done");
+    expect(text).toContain("2 files +30/-4");
+    expect(text).toContain("3");
+    expect(text).toContain("Implemented the parser");
+    // It must NOT instruct the head to read the transcript (context discipline).
+    expect(text.toLowerCase()).not.toContain("transcript");
   });
 });
 
@@ -337,5 +363,183 @@ describe("AutonomyController.onAgentSignal", () => {
     const o = await store.getOrchestration(orchId);
     expect(o!.agents[0].metrics.inputTokens).toBe(500);
     expect(o!.agents[0].metrics.turns).toBe(1);
+  });
+});
+
+// ---- head-session model ----------------------------------------------------
+
+interface HeadSend {
+  text: string;
+}
+
+function makeHeadAwareController(opts: {
+  ready: boolean;
+  transcript?: TranscriptEvent[];
+  headTranscript?: TranscriptEvent[];
+  headReady?: boolean;
+}) {
+  const sent: Sent[] = [];
+  const headSent: HeadSend[] = [];
+  const controller = new AutonomyController({
+    store,
+    orchestrator,
+    readTranscript: async (sessionId) =>
+      (sessionId === "sess-head" ? opts.headTranscript : opts.transcript) ?? [],
+    sendText: async (agent, text) => {
+      sent.push({ agentId: agent.id, text });
+    },
+    sessionReady: async () => opts.ready,
+    headReady: async () => opts.headReady ?? opts.ready,
+    sendToHead: async (_orch, text) => {
+      headSent.push({ text });
+    },
+    agentGitSummary: async () => ({ diffstat: "1 file +5/-0", commitCount: 2 }),
+    now: () => 1_000_000,
+  });
+  return { controller, sent, headSent };
+}
+
+async function makeOrchWithHead(): Promise<string> {
+  const o = await store.createOrchestration({
+    name: "Ship login",
+    goal: "Add OAuth",
+    projectRoot: "/home/u/app",
+    projectName: "app",
+    baseRef: "main",
+  });
+  await store.setHead(o.id, {
+    sessionId: "sess-head",
+    pid: 999,
+    worktreeDir: "/wt/head",
+    branch: "hark/ship-login/head",
+  });
+  return o.id;
+}
+
+describe("AutonomyController head notifications", () => {
+  it("notifies the head when a worker hits a marker", async () => {
+    const orchId = await makeOrchWithHead();
+    const agent = await store.addAgent(orchId, {
+      role: "coder",
+      branch: "hark/ship-login/coder-1",
+      worktreeDir: "/wt/coder",
+      sessionId: "sess-coder",
+      lifecycle: "running",
+    });
+    await store.updateAgent(orchId, agent!.id, (a) => (a.briefedAt = 1));
+
+    const { controller, headSent } = makeHeadAwareController({
+      ready: true,
+      transcript: [
+        {
+          kind: "assistant",
+          uuid: "a",
+          ts: "t",
+          blocks: [{ type: "text", text: `Implemented it.\n${DONE_MARKER}` }],
+        },
+      ],
+    });
+
+    await controller.onAgentSignal(orchId, agent!.id, { stopped: true });
+
+    expect(headSent).toHaveLength(1);
+    expect(headSent[0].text).toContain("coder");
+    expect(headSent[0].text.toLowerCase()).toContain("done");
+    expect(headSent[0].text).toContain("1 file +5/-0");
+
+    const events = await store.readEvents(orchId);
+    expect(events.some((e) => e.kind === "head_notified")).toBe(true);
+  });
+
+  it("does not re-notify the head on a stable (non-transition) tick", async () => {
+    const orchId = await makeOrchWithHead();
+    const agent = await store.addAgent(orchId, {
+      role: "coder",
+      branch: "hark/ship-login/coder-1",
+      worktreeDir: "/wt/coder",
+      sessionId: "sess-coder",
+      lifecycle: "done", // already terminal
+    });
+    await store.updateAgent(orchId, agent!.id, (a) => (a.briefedAt = 1));
+    const { controller, headSent } = makeHeadAwareController({
+      ready: true,
+      transcript: [
+        {
+          kind: "assistant",
+          uuid: "a",
+          ts: "t",
+          blocks: [{ type: "text", text: `done.\n${DONE_MARKER}` }],
+        },
+      ],
+    });
+    await controller.onAgentSignal(orchId, agent!.id, { stopped: false });
+    expect(headSent).toHaveLength(0);
+  });
+});
+
+describe("AutonomyController.onHeadSignal", () => {
+  it("delivers the head briefing once, when the head session is ready", async () => {
+    const orchId = await makeOrchWithHead();
+    const { controller, headSent } = makeHeadAwareController({
+      ready: true,
+      headTranscript: [],
+    });
+    await controller.onHeadSignal(orchId, { stopped: false });
+    expect(headSent).toHaveLength(1);
+    expect(headSent[0].text.toLowerCase()).toContain("head");
+
+    const o = await store.getOrchestration(orchId);
+    expect(o!.head!.briefedAt).toBe(1_000_000);
+
+    // Idempotent — a second tick doesn't re-brief.
+    await controller.onHeadSignal(orchId, { stopped: false });
+    expect(headSent).toHaveLength(1);
+  });
+
+  it("completes the orchestration when the head emits DONE", async () => {
+    const orchId = await makeOrchWithHead();
+    await store.updateHead(orchId, (h) => (h.briefedAt = 1));
+    const { controller } = makeHeadAwareController({
+      ready: true,
+      headTranscript: [
+        {
+          kind: "assistant",
+          uuid: "a",
+          ts: "t",
+          blocks: [{ type: "text", text: `Mission accomplished.\n${DONE_MARKER}` }],
+        },
+      ],
+    });
+    await controller.onHeadSignal(orchId, { stopped: true });
+    const o = await store.getOrchestration(orchId);
+    expect(o!.status).toBe("completed");
+  });
+
+  it("refreshes head metrics from its transcript", async () => {
+    const orchId = await makeOrchWithHead();
+    await store.updateHead(orchId, (h) => (h.briefedAt = 1));
+    const { controller } = makeHeadAwareController({
+      ready: true,
+      headTranscript: [
+        {
+          kind: "assistant",
+          uuid: "a",
+          ts: "t",
+          blocks: [{ type: "text", text: "coordinating" }],
+          usage: {
+            inputTokens: 800,
+            outputTokens: 60,
+            cacheCreationInputTokens: 0,
+            cacheReadInputTokens: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+          },
+        },
+      ],
+    });
+    await controller.onHeadSignal(orchId, { stopped: false });
+    const o = await store.getOrchestration(orchId);
+    expect(o!.head!.metrics.inputTokens).toBe(800);
+    expect(o!.head!.metrics.turns).toBe(1);
   });
 });

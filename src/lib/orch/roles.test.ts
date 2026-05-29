@@ -6,6 +6,7 @@ import {
   HANDOFF_MARKER,
   ROLES,
   buildAgentBriefing,
+  buildHeadBriefing,
   type AgentRole,
 } from "./roles.js";
 
@@ -74,5 +75,58 @@ describe("buildAgentBriefing", () => {
       const b = buildAgentBriefing({ role, ...base });
       expect(b).toContain(`**${ROLES[role].title}**`);
     }
+  });
+
+  it("surfaces the dispatched task when the head provides one", () => {
+    const without = buildAgentBriefing({ role: "coder", ...base });
+    expect(without).not.toContain("## Your task");
+
+    const withTask = buildAgentBriefing({
+      role: "coder",
+      ...base,
+      task: "Implement the dependsOn worktree derivation",
+    });
+    expect(withTask).toContain("## Your task");
+    expect(withTask).toContain("Implement the dependsOn worktree derivation");
+  });
+});
+
+describe("buildHeadBriefing", () => {
+  const ctx = {
+    orchestrationName: "Ship login",
+    goal: "Add OAuth login end-to-end",
+    branch: "hark/ship-login/head",
+    worktreeDir: "/home/u/.hark/worktrees/app/orch-1/head",
+  };
+
+  it("establishes the head role, goal, and orchestration-scoped DONE", () => {
+    const b = buildHeadBriefing(ctx);
+    expect(b.toLowerCase()).toContain("head");
+    expect(b).toContain("Add OAuth login end-to-end");
+    expect(b).toContain(ctx.worktreeDir);
+    // The head's DONE means the whole orchestration is done, not one agent.
+    expect(b).toContain(DONE_MARKER);
+  });
+
+  it("teaches the hark CLI action surface", () => {
+    const b = buildHeadBriefing(ctx);
+    expect(b).toContain("hark orch status");
+    expect(b).toContain("hark agent spawn");
+    expect(b).toContain("hark agent send");
+    expect(b).toContain("hark agent diff");
+    expect(b).toContain("hark agent brief");
+  });
+
+  it("lists the role palette the head can draw from", () => {
+    const b = buildHeadBriefing(ctx);
+    for (const role of AGENT_ROLES) {
+      expect(b.toLowerCase()).toContain(role);
+    }
+  });
+
+  it("states the context-discipline constraint (lead, not a reader)", () => {
+    const b = buildHeadBriefing(ctx);
+    expect(b.toLowerCase()).toContain("summaries");
+    expect(b.toLowerCase()).toContain("lead");
   });
 });

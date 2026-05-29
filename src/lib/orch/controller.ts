@@ -8,7 +8,9 @@ import type { Orchestrator } from "./orchestrator.js";
 import type {
   AgentLifecycle,
   AgentMetrics,
+  AgentRole,
   OrchAgent,
+  Orchestration,
   TranscriptEvent,
 } from "../../shared/protocol.js";
 
@@ -171,6 +173,47 @@ export function decideAutonomyAction(s: AutonomyState): AutonomyAction {
   return { type: "none" };
 }
 
+// ---- Head notifications -----------------------------------------------------
+
+// The inbound message the head receives when a worker hits a marker. Carries
+// only the summary + diffstat + commit count — NEVER the transcript — so the
+// head can decide the next step without blowing its context budget (the
+// make-or-break constraint of the head model).
+export interface HeadNotification {
+  role: AgentRole;
+  agentId: string;
+  branch: string;
+  marker: MarkerKind;
+  summary: string;
+  diffstat: string;
+  commitCount: number;
+}
+
+const MARKER_VERB: Record<MarkerKind, string> = {
+  done: "reported DONE",
+  blocked: "is BLOCKED and needs a decision",
+  handoff: "HANDED OFF its work",
+};
+
+// Render a worker→head notification as the text typed into the head's session.
+// Compact and action-oriented: it tells the head what happened and points at
+// the lean CLI for detail — deliberately never says "read the transcript".
+export function buildHeadNotification(n: HeadNotification): string {
+  const lines: string[] = [];
+  lines.push(
+    `[worker update] ${n.role} (${n.agentId}) on \`${n.branch}\` ${MARKER_VERB[n.marker]}.`,
+  );
+  const stat = n.diffstat && n.diffstat.trim().length > 0 ? n.diffstat : "no diff yet";
+  lines.push(`diff: ${stat} · ${n.commitCount} commit${n.commitCount === 1 ? "" : "s"}`);
+  if (n.summary.trim().length > 0) {
+    lines.push(`summary: ${n.summary.trim()}`);
+  }
+  lines.push(
+    `Decide the next step. Use \`hark orch status\` for the team, or \`hark agent diff ${n.agentId} --full\` only if a judgment needs it.`,
+  );
+  return lines.join("\n");
+}
+
 // The message sent when nudging an agent that stopped without finishing.
 export function buildNudge(): string {
   return [
@@ -192,6 +235,18 @@ export interface ControllerDeps {
   sendText: (agent: OrchAgent, text: string) => Promise<void>;
   // Whether the agent's session is registered and past its trust prompt.
   sessionReady: (agent: OrchAgent) => Promise<boolean>;
+  // ---- head-session model (all optional; absent → headless behavior) ----
+  // Deliver text to the orchestration's head session (briefing, worker
+  // notifications). Absent for legacy headless records / tests without a head.
+  sendToHead?: (orch: Orchestration, text: string) => Promise<void>;
+  // Whether the head session is registered and past its trust prompt.
+  headReady?: (orch: Orchestration) => Promise<boolean>;
+  // Compact git summary for a worker branch vs base — diffstat + commit count.
+  // Used to enrich the worker→head notification without reading any transcript.
+  agentGitSummary?: (
+    orch: Orchestration,
+    agent: OrchAgent,
+  ) => Promise<{ diffstat: string; commitCount: number }>;
   now?: () => number;
   maxNudges?: number;
 }
@@ -236,6 +291,7 @@ export class AutonomyController {
     }
 
     const nudges = await this.countNudges(orchId, agentId);
+    const prevLifecycle = agent.lifecycle;
     const action = decideAutonomyAction({
       lifecycle: agent.lifecycle,
       sessionReady,
@@ -247,7 +303,117 @@ export class AutonomyController {
     });
 
     await this.perform(orch.id, agent, action);
+
+    // Head-session model: when a worker actually TRANSITIONS to a state the
+    // head must act on (done/blocked/review), forward a compact notification to
+    // the head. Gated on a real transition so the reconcile tick can't spam the
+    // head every 3s while an agent sits blocked.
+    if (
+      action.type === "set_lifecycle" &&
+      action.lifecycle !== prevLifecycle &&
+      (action.lifecycle === "done" ||
+        action.lifecycle === "blocked" ||
+        action.lifecycle === "review") &&
+      orch.head &&
+      this.deps.sendToHead
+    ) {
+      await this.notifyHead(orch, agent, scan);
+    }
+
     return action;
+  }
+
+  // Build and deliver a worker→head notification. The git summary is best-
+  // effort (a coordination nicety, not correctness): if it can't be computed
+  // the notification still goes out with an empty diffstat.
+  private async notifyHead(
+    orch: Orchestration,
+    agent: OrchAgent,
+    scan: MarkerScan,
+  ): Promise<void> {
+    if (!orch.head || !this.deps.sendToHead) return;
+    let diffstat = "";
+    let commitCount = 0;
+    if (this.deps.agentGitSummary) {
+      try {
+        const s = await this.deps.agentGitSummary(orch, agent);
+        diffstat = s.diffstat;
+        commitCount = s.commitCount;
+      } catch {
+        /* best-effort */
+      }
+    }
+    const text = buildHeadNotification({
+      role: agent.role,
+      agentId: agent.id,
+      branch: agent.branch,
+      marker: (scan.kind ?? "done") as MarkerKind,
+      summary: scan.summary,
+      diffstat,
+      commitCount,
+    });
+    await this.deps.sendToHead(orch, text);
+    await this.deps.store.appendEvent({
+      ts: this.now(),
+      orchestrationId: orch.id,
+      agentId: agent.id,
+      kind: "head_notified",
+      message: `head notified: ${agent.role} → ${scan.kind ?? "update"}`,
+      data: { marker: scan.kind },
+    });
+  }
+
+  // The head's counterpart to onAgentSignal. The head is a coordinator, not a
+  // worker, so it is NEVER nudged: it legitimately waits between worker events.
+  // This only (1) delivers the head briefing once its session is ready, (2)
+  // keeps head metrics fresh, and (3) interprets a head DONE marker as the
+  // ORCHESTRATION being complete (Sharp Edge 6 — head markers are orch-scoped).
+  async onHeadSignal(
+    orchId: string,
+    _opts: { stopped: boolean },
+  ): Promise<void> {
+    const orch = await this.deps.store.getOrchestration(orchId);
+    if (!orch?.head) return;
+    const head = orch.head;
+
+    // Metrics + marker scan (only once the session has registered).
+    let scan: MarkerScan = { kind: null, summary: "" };
+    if (head.sessionId) {
+      const events = await this.deps.readTranscript(head.sessionId);
+      scan = scanMarkers(transcriptText(events));
+      const tm = metricsFromTranscript(events);
+      await this.deps.store.updateHead(orchId, (h) => {
+        h.metrics.inputTokens = tm.inputTokens;
+        h.metrics.outputTokens = tm.outputTokens;
+        h.metrics.cacheReadTokens = tm.cacheReadTokens;
+        h.metrics.cacheCreationTokens = tm.cacheCreationTokens;
+        h.metrics.turns = tm.turns;
+      });
+    }
+
+    // Deliver the head briefing once, when ready and not yet briefed.
+    if (head.briefedAt == null && this.deps.sendToHead && this.deps.headReady) {
+      const ready = await this.deps.headReady(orch);
+      if (ready) {
+        await this.deps.sendToHead(orch, this.deps.orchestrator.headBriefingFor(orch));
+        await this.deps.store.updateHead(orchId, (h) => {
+          h.briefedAt = this.now();
+        });
+        await this.deps.store.appendEvent({
+          ts: this.now(),
+          orchestrationId: orchId,
+          kind: "checkpoint",
+          message: "head briefing delivered",
+          data: { kind: "head_briefing" },
+        });
+        return;
+      }
+    }
+
+    // A head DONE closes the whole orchestration.
+    if (scan.kind === "done" && orch.status === "active") {
+      await this.deps.store.setStatus(orchId, "completed");
+    }
   }
 
   private async perform(
@@ -326,6 +492,23 @@ export class AutonomyController {
       a.metrics.cacheReadTokens = tm.cacheReadTokens;
       a.metrics.cacheCreationTokens = tm.cacheCreationTokens;
       a.metrics.turns = tm.turns;
+    });
+  }
+
+  // Refresh the head's token/turn metrics from its transcript without making
+  // any decision or typing anything. Safe to call on every reconcile tick even
+  // with active autonomy off, so the dashboard's head card stays current.
+  async refreshHeadMetrics(orchId: string): Promise<void> {
+    const orch = await this.deps.store.getOrchestration(orchId);
+    if (!orch?.head?.sessionId) return;
+    const events = await this.deps.readTranscript(orch.head.sessionId);
+    const tm = metricsFromTranscript(events);
+    await this.deps.store.updateHead(orchId, (h) => {
+      h.metrics.inputTokens = tm.inputTokens;
+      h.metrics.outputTokens = tm.outputTokens;
+      h.metrics.cacheReadTokens = tm.cacheReadTokens;
+      h.metrics.cacheCreationTokens = tm.cacheCreationTokens;
+      h.metrics.turns = tm.turns;
     });
   }
 

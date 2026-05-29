@@ -59,6 +59,12 @@ export function worktreeBranchName(
   return `hark/${slugify(orchSlug)}/${slugify(role)}-${slugify(agentShortId)}`;
 }
 
+// The head's branch. One per orchestration, namespaced like the workers but
+// with a fixed `head` leaf so it's obvious which ref is the coordinator's.
+export function worktreeHeadBranch(orchSlug: string): string {
+  return `hark/${slugify(orchSlug)}/head`;
+}
+
 // ---- Pure argv builders -----------------------------------------------------
 
 // `git -C <repoRoot> worktree add -b <branch> <path> <baseRef>` — create a new
@@ -112,6 +118,65 @@ export function buildBranchDeleteArgs(
   force: boolean,
 ): string[] {
   return ["-C", repoRoot, "branch", force ? "-D" : "-d", branch];
+}
+
+// `git -C <repo> diff [--stat] <base>...<branch>`. The three-dot form diffs
+// the branch against the merge-base, so it shows only the branch's OWN changes
+// (not unrelated commits that landed on base since) — exactly what the head
+// wants when judging a worker's work. `full` emits the patch; otherwise --stat.
+export function buildDiffArgs(
+  repoRoot: string,
+  baseRef: string,
+  branch: string,
+  full: boolean,
+): string[] {
+  const args = ["-C", repoRoot, "diff"];
+  if (!full) args.push("--stat");
+  args.push(`${baseRef}...${branch}`);
+  return args;
+}
+
+// `git -C <repo> diff --shortstat <base>...<branch>` — the one-line summary
+// formatShortstat compacts for the head notification / status view.
+export function buildShortstatArgs(
+  repoRoot: string,
+  baseRef: string,
+  branch: string,
+): string[] {
+  return ["-C", repoRoot, "diff", "--shortstat", `${baseRef}...${branch}`];
+}
+
+// `git -C <repo> rev-list --count <base>..<branch>` — commits on branch since
+// base (two-dot: ahead-count, the natural "how many commits did this worker
+// make" number).
+export function buildRevListCountArgs(
+  repoRoot: string,
+  baseRef: string,
+  branch: string,
+): string[] {
+  return ["-C", repoRoot, "rev-list", "--count", `${baseRef}..${branch}`];
+}
+
+// `git -C <repo> log --oneline -n 20 <base>..<branch>` — recent commits on the
+// worker branch, compact.
+export function buildLogArgs(
+  repoRoot: string,
+  baseRef: string,
+  branch: string,
+): string[] {
+  return ["-C", repoRoot, "log", "--oneline", "-n", "20", `${baseRef}..${branch}`];
+}
+
+// Reduce `git diff --shortstat` output to a compact token like "2 files +30/-4".
+// Returns "" when there were no changes (empty output).
+export function formatShortstat(shortstat: string): string {
+  const line = shortstat.trim();
+  if (!line) return "";
+  const files = /(\d+) files? changed/.exec(line)?.[1] ?? "0";
+  const ins = /(\d+) insertions?\(\+\)/.exec(line)?.[1] ?? "0";
+  const del = /(\d+) deletions?\(-\)/.exec(line)?.[1] ?? "0";
+  const fileWord = files === "1" ? "file" : "files";
+  return `${files} ${fileWord} +${ins}/-${del}`;
 }
 
 // ---- Parsing ----------------------------------------------------------------
@@ -269,4 +334,56 @@ export async function deleteBranch(opts: {
   await runGit(
     buildBranchDeleteArgs(opts.repoRoot, opts.branch, opts.force ?? false),
   );
+}
+
+// Worker branch vs base, as text. `full` returns the patch; otherwise --stat.
+// Used by the `hark agent diff` endpoint.
+export async function diffBranch(opts: {
+  repoRoot: string;
+  baseRef: string;
+  branch: string;
+  full?: boolean;
+}): Promise<string> {
+  return runGit(
+    buildDiffArgs(opts.repoRoot, opts.baseRef, opts.branch, opts.full ?? false),
+  );
+}
+
+// Recent commits on the worker branch (compact). Used by `hark agent log`.
+export async function logBranch(opts: {
+  repoRoot: string;
+  baseRef: string;
+  branch: string;
+}): Promise<string> {
+  return runGit(buildLogArgs(opts.repoRoot, opts.baseRef, opts.branch));
+}
+
+// Compact diffstat + commit count for a worker branch — the figures that go
+// into `hark orch status` and the worker→head notification. Best-effort: a
+// branch with no commits / a bad ref yields { diffstat: "", commitCount: 0 }.
+export async function branchGitSummary(opts: {
+  repoRoot: string;
+  baseRef: string;
+  branch: string;
+}): Promise<{ diffstat: string; commitCount: number }> {
+  let diffstat = "";
+  let commitCount = 0;
+  try {
+    const ss = await runGit(
+      buildShortstatArgs(opts.repoRoot, opts.baseRef, opts.branch),
+    );
+    diffstat = formatShortstat(ss);
+  } catch {
+    /* no diff / bad ref — leave empty */
+  }
+  try {
+    const out = await runGit(
+      buildRevListCountArgs(opts.repoRoot, opts.baseRef, opts.branch),
+    );
+    const n = Number(out.trim());
+    if (Number.isFinite(n)) commitCount = n;
+  } catch {
+    /* leave 0 */
+  }
+  return { diffstat, commitCount };
 }

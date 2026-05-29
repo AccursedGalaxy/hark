@@ -50,3 +50,30 @@ export function correlateAgentSessions(
 export function liveSessionIdSet(live: LiveSessionRef[]): Set<string> {
   return new Set(live.map((s) => s.sessionId));
 }
+
+export interface HeadSessionLink {
+  orchId: string;
+  sessionId: string;
+}
+
+// The head's counterpart to correlateAgentSessions: for every active
+// orchestration whose head has a pid but not yet a session id, find the live
+// session sharing its pid so the reconcile loop can backfill it. The head
+// lives on Orchestration.head (not agents[]), so it needs its own pass.
+export function correlateHeadSessions(
+  orchestrations: Orchestration[],
+  live: LiveSessionRef[],
+): HeadSessionLink[] {
+  const byPid = new Map<number, string>();
+  for (const s of live) byPid.set(s.pid, s.sessionId);
+
+  const links: HeadSessionLink[] = [];
+  for (const orch of orchestrations) {
+    if (orch.status !== "active") continue;
+    const head = orch.head;
+    if (!head || head.sessionId || head.pid == null) continue;
+    const sessionId = byPid.get(head.pid);
+    if (sessionId) links.push({ orchId: orch.id, sessionId });
+  }
+  return links;
+}

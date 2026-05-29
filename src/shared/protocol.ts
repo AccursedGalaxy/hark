@@ -325,6 +325,41 @@ export interface OrchAgent {
   briefedAt?: number;
   // Set when lifecycle is "blocked" — the question the agent is waiting on.
   blockedReason?: string;
+  // The specific task the head dispatched this worker (head-session model).
+  // Undefined for legacy cold-team agents (their charter is the whole goal).
+  // Threaded into the briefing so the worker knows what slice it owns.
+  task?: string;
+  // Id of an upstream agent this worker's work derives from. Reserved for the
+  // handoff-time worktree derivation (PLAN inbox item); carried here so the
+  // head can express dependencies at spawn time.
+  dependsOn?: string;
+  metrics: AgentMetrics;
+}
+
+// The head (foreman) of an orchestration in the head-session model: one Claude
+// Code session, in its own worktree, that decomposes the goal, spawns workers
+// on demand, harvests their branches, and talks to the user in natural
+// language. It is NOT an entry in `agents[]` — living on Orchestration.head
+// directly is what keeps it exempt from the worker nudge loop (which iterates
+// `agents[]`) and makes its markers orchestration-scoped, not agent-scoped.
+//
+// Optional on Orchestration so legacy "headless" records (created before the
+// head model, or by the back-compat createTeam path) keep working unchanged —
+// every consumer guards on `head` being present.
+export interface OrchHead {
+  // Claude Code session id once the head process registers (past its trust
+  // prompt); null until then. PID is captured at spawn for correlation.
+  sessionId: string | null;
+  pid: number | null;
+  // The head's own isolated worktree (clean tree for git/gh; reads every
+  // worker branch via the shared object store) and the branch checked out.
+  worktreeDir: string;
+  branch: string;
+  // When the head briefing was delivered (the bootstrap message). Undefined
+  // until then; its presence is how the controller avoids re-briefing.
+  briefedAt?: number;
+  // The head accrues real coordination cost and is metered like a worker
+  // (Sharp Edge 8) so it's visible, not hidden.
   metrics: AgentMetrics;
 }
 
@@ -347,6 +382,9 @@ export interface Orchestration {
   createdAt: number;
   updatedAt: number;
   agents: OrchAgent[];
+  // The coordinating head session (head-session model). Undefined for legacy
+  // headless records — consumers guard on its presence.
+  head?: OrchHead;
 }
 
 // Append-only event log entry. Decisions, checkpoints, blocks, handoffs,
@@ -357,6 +395,10 @@ export type OrchEventKind =
   | "orchestration_status"
   | "agent_spawned"
   | "agent_lifecycle"
+  // Head-session model: the head session was spawned for an orchestration.
+  | "head_spawned"
+  // A worker marker was forwarded to the head as an inbound notification.
+  | "head_notified"
   | "decision"
   | "checkpoint"
   | "blocked"
@@ -390,6 +432,43 @@ export interface OrchestrationSummary {
   totalTurns: number;
   totalInterventions: number;
   totalAutonomyMs: number;
+}
+
+// ---- Head-session CLI status view (GET /orchestrations/:id/status) ----
+//
+// The lean, one-line-per-agent shape the `hark orch status` command renders.
+// Deliberately compact (context discipline — the head works from summaries,
+// never transcripts): no transcripts, diffstat as a short string, the last
+// marker summary truncated. Computed server-side so the CLI stays a thin
+// formatter.
+export interface AgentStatusLine {
+  id: string;
+  role: AgentRole;
+  lifecycle: AgentLifecycle;
+  branch: string;
+  // Compact `git diff --shortstat base...branch`, e.g. "2 files +30/-4", or ""
+  // when there's nothing committed yet / the diff couldn't be computed.
+  diffstat: string;
+  turns: number;
+  tokens: number;
+  task?: string;
+}
+
+export interface HeadStatusLine {
+  branch: string;
+  sessionId: string | null;
+  briefed: boolean;
+  turns: number;
+  tokens: number;
+}
+
+export interface OrchStatusView {
+  id: string;
+  name: string;
+  goal: string;
+  status: OrchestrationStatus;
+  head?: HeadStatusLine;
+  agents: AgentStatusLine[];
 }
 
 // ---- Transcript events (exactly what /api/sessions/:id/transcript returns) ----

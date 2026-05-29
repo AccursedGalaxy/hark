@@ -124,6 +124,10 @@ export interface BriefingContext {
   // This agent's isolated branch and worktree directory.
   branch: string;
   worktreeDir: string;
+  // The specific task the head dispatched this worker (head-session model).
+  // When present it scopes the work tighter than the orchestration goal —
+  // "implement X", not "deliver the whole feature".
+  task?: string;
   // Optional upstream context — e.g. the Researcher's brief handed to the
   // Coder, or the Coder's summary handed to the Reviewer.
   upstream?: string;
@@ -156,6 +160,15 @@ export function buildAgentBriefing(ctx: BriefingContext): string {
   );
   for (const d of def.definitionOfDone) lines.push(`- ${d}`);
 
+  if (ctx.task && ctx.task.trim().length > 0) {
+    lines.push("");
+    lines.push("## Your task");
+    lines.push(
+      "The head dispatched you this specific slice of the mission. Scope your work to it:",
+    );
+    lines.push(ctx.task.trim());
+  }
+
   if (ctx.upstream && ctx.upstream.trim().length > 0) {
     lines.push("");
     lines.push("## Upstream context");
@@ -175,6 +188,101 @@ export function buildAgentBriefing(ctx: BriefingContext): string {
   );
   lines.push(
     `- If your output needs to be handed to another role, end with \`${HANDOFF_MARKER}\` on its own line, preceded by the handoff summary that role will need.`,
+  );
+
+  return lines.join("\n");
+}
+
+// ---- Head briefing ----------------------------------------------------------
+
+export interface HeadBriefingContext {
+  orchestrationName: string;
+  // The mission the whole orchestration is driving toward.
+  goal: string;
+  // The head's own isolated branch + worktree (clean tree for git/gh).
+  branch: string;
+  worktreeDir: string;
+}
+
+// The first message the head session receives. The head is a foreman, not a
+// worker: it decomposes the goal, spawns workers on demand from the role
+// palette, harvests their branches, and reports to the user in natural
+// language. Three things make or break it and are stated explicitly:
+//   - the action surface (the `hark` CLI it acts through),
+//   - context discipline (it works from summaries, never slurps transcripts),
+//   - that its DONE marker closes the *orchestration*, not an agent.
+export function buildHeadBriefing(ctx: HeadBriefingContext): string {
+  const lines: string[] = [];
+
+  lines.push(
+    `You are the **head** (foreman) of a hark orchestration. You coordinate a team of worker agents and talk to the user in natural language — you do not do the implementation work yourself.`,
+  );
+  lines.push("");
+  lines.push(`Orchestration: ${ctx.orchestrationName}`);
+  lines.push(`Mission goal: ${ctx.goal}`);
+  lines.push("");
+  lines.push(
+    `You work in your own ISOLATED git worktree at ${ctx.worktreeDir}, on branch \`${ctx.branch}\`. ` +
+      `It is a clean checkout: run \`git\`/\`gh\` from here to inspect, merge, or open PRs against any worker branch (all branches share one object store).`,
+  );
+
+  lines.push("");
+  lines.push("## Your mandate");
+  lines.push(
+    "1. **Decompose** the goal into concrete, independent tasks.",
+  );
+  lines.push(
+    "2. **Dispatch** each task to a worker you spawn on demand — pick the role and how many. Hand one worker a feature and point another at testing *its* branch; never spawn two workers to do the same thing.",
+  );
+  lines.push(
+    "3. **Harvest** finished work: when a worker reports DONE/HANDOFF/BLOCKED you are notified with its branch, diffstat, and a summary. Judge the result, resolve branch collisions, decide what is worth a PR.",
+  );
+  lines.push(
+    "4. **Report** to the user in plain language — status, decisions, what landed. The user steers you anytime; re-read live state rather than trusting your memory of it.",
+  );
+
+  lines.push("");
+  lines.push("## The role palette");
+  lines.push(
+    "Workers are charters you draw from, not a fixed roster. Spawn what the task needs, skip what it doesn't:",
+  );
+  for (const role of AGENT_ROLES) {
+    lines.push(`- **${ROLES[role].title}** — ${ROLES[role].summary}`);
+  }
+
+  lines.push("");
+  lines.push("## Action surface — the `hark` CLI");
+  lines.push(
+    "You act through a thin CLI (already on your PATH; it auto-targets this orchestration via env). Use Bash to run it:",
+  );
+  lines.push("```");
+  lines.push("hark orch status                 # one compact line per agent: role/lifecycle/branch/diffstat/turns");
+  lines.push('hark agent spawn <role> --task "…" [--depends-on <agentId>]   # spawn a worker with a specific charter; prints its agentId');
+  lines.push('hark agent send <agentId> "…"    # steer / message a worker');
+  lines.push("hark agent diff <agentId> [--stat|--full]   # worker branch vs base (--stat default)");
+  lines.push("hark agent log <agentId>         # recent commits on the worker branch");
+  lines.push('hark agent brief <agentId> "<task>"   # assign the worker its next task');
+  lines.push("```");
+  lines.push(
+    "For pull requests, run `git`/`gh` directly from your worktree. First check an `origin` remote and authed `gh` exist; if not, stop at \"branch ready, here is the diff\" and tell the user.",
+  );
+
+  lines.push("");
+  lines.push("## Context discipline (make-or-break)");
+  lines.push(
+    "You are a lead, not a reader. Work from summaries; pull detail only when a decision needs it. Do NOT read worker transcripts. `hark orch status` and the notifications you receive are deliberately compact — use `hark agent diff --full` only to settle a specific judgment (e.g. a branch collision), and scope it tight. If you slurp full transcripts you will run out of context and the orchestration dies.",
+  );
+
+  lines.push("");
+  lines.push("## Turn-taking");
+  lines.push(
+    "Steering a worker takes minutes of its think time. After dispatching, tell the user \"dispatched — I'll report when it lands\" and stop; you will be woken by a notification when the worker hits a marker. Do not busy-poll.",
+  );
+
+  lines.push("");
+  lines.push("## Closing the orchestration");
+  lines.push(
+    `When the mission goal is fully met and you have reported the outcome, end your final message with the exact token \`${DONE_MARKER}\` on its own line, preceded by a short summary. Your \`${DONE_MARKER}\` closes the whole **orchestration** (not a single agent) — only emit it when the goal is genuinely done.`,
   );
 
   return lines.join("\n");

@@ -30,12 +30,25 @@ import { Orchestrator } from "./lib/orch/orchestrator.js";
 import { AutonomyController } from "./lib/orch/controller.js";
 import {
   correlateAgentSessions,
+  correlateHeadSessions,
   type LiveSessionRef,
 } from "./lib/orch/correlation.js";
-import { addWorktree, removeWorktree } from "./lib/orch/worktree.js";
+import {
+  addWorktree,
+  branchGitSummary,
+  diffBranch,
+  logBranch,
+  removeWorktree,
+} from "./lib/orch/worktree.js";
+import { clearTrust } from "./lib/orch/trust.js";
 import { summarizeOrchestration } from "./lib/orch/summary.js";
+import { buildStatusView } from "./lib/orch/statusView.js";
 import { AGENT_ROLES } from "./lib/orch/roles.js";
-import type { AgentRole, OrchAgent } from "./shared/protocol.js";
+import type {
+  AgentRole,
+  OrchAgent,
+  Orchestration,
+} from "./shared/protocol.js";
 import { applyManagedBlock } from "./lib/claudemdBlock.js";
 import { appendCapture } from "./lib/projectCapture.js";
 import {
@@ -266,11 +279,20 @@ const promptState = new PromptState();
 // orchestrator wires it to real git-worktree isolation and the existing tmux
 // spawn path so each agent is a normal Claude Code session in its own branch.
 const orchStore = new OrchStore();
+// The hark CLI lives at <repo>/bin/hark; __dirname is dist/ after build (or
+// src/ under tsx) — ../bin resolves to <repo>/bin in both. Prepended to the
+// head/worker session PATH so `hark …` just works inside them.
+const ORCH_API_BASE = process.env.HARK_API || `http://localhost:${port}`;
+const ORCH_CLI_BIN_DIR = path.join(__dirname, "..", "bin");
 const orchestrator = new Orchestrator({
   store: orchStore,
+  apiBase: ORCH_API_BASE,
+  cliBinDir: ORCH_CLI_BIN_DIR,
   addWorktree,
   removeWorktree,
-  spawnSession: ({ cwd, command }) => spawnClaudeSession({ cwd, command }),
+  clearTrust,
+  spawnSession: ({ cwd, command, env, pathPrepend }) =>
+    spawnClaudeSession({ cwd, command, env, pathPrepend }),
 });
 
 // Active autonomy (auto-delivering briefings + self-review nudges to live
@@ -283,17 +305,35 @@ const ORCH_AUTONOMY = process.env.HARK_ORCH_AUTONOMY === "1";
 // Resolve the tmux pane for an orchestration agent and deliver text through
 // the hardened send path. Prefers the registered session id; falls back to the
 // spawn-time pid before the session has registered.
-async function sendToAgent(agent: OrchAgent, text: string): Promise<void> {
+// Resolve the tmux pane for a session id (preferred) or spawn-time pid, then
+// deliver text through the hardened send path. Shared by workers and the head.
+async function sendToSession(
+  sessionId: string | null,
+  pid: number | null,
+  label: string,
+  text: string,
+): Promise<void> {
   let pane: { socket: string; paneId: string } | null = null;
-  if (agent.sessionId) {
-    const resolved = await resolveSessionPane(agent.sessionId);
+  if (sessionId) {
+    const resolved = await resolveSessionPane(sessionId);
     pane = resolved?.pane ?? null;
   }
-  if (!pane && agent.pid != null && isAlive(agent.pid)) {
-    pane = await resolveTmuxPaneForPid(agent.pid);
+  if (!pane && pid != null && isAlive(pid)) {
+    pane = await resolveTmuxPaneForPid(pid);
   }
-  if (!pane) throw new Error("agent session has no live tmux pane");
+  if (!pane) throw new Error(`${label} has no live tmux pane`);
   await sendInput(pane.socket, pane.paneId, { text, submit: true });
+}
+
+async function sendToAgent(agent: OrchAgent, text: string): Promise<void> {
+  await sendToSession(agent.sessionId, agent.pid, "agent session", text);
+}
+
+// Deliver text to an orchestration's head session (briefing, worker
+// notifications). Throws if the head is absent / has no live pane.
+async function sendToHead(orch: Orchestration, text: string): Promise<void> {
+  if (!orch.head) throw new Error("orchestration has no head");
+  await sendToSession(orch.head.sessionId, orch.head.pid, "head session", text);
 }
 
 const orchController = new AutonomyController({
@@ -315,6 +355,18 @@ const orchController = new AutonomyController({
     const live = await listLiveSessions();
     return live.some((s) => s.sessionId === agent.sessionId);
   },
+  sendToHead,
+  headReady: async (orch) => {
+    if (!orch.head?.sessionId) return false;
+    const live = await listLiveSessions();
+    return live.some((s) => s.sessionId === orch.head!.sessionId);
+  },
+  agentGitSummary: (orch, agent) =>
+    branchGitSummary({
+      repoRoot: orch.projectRoot,
+      baseRef: orch.baseRef,
+      branch: agent.branch,
+    }),
 });
 
 type HookSubscriber = (ev: HookBroadcast) => void;
@@ -422,15 +474,19 @@ app.post("/api/hook", (req, res) => {
     const evName = (req.body?.hook_event_name ?? "") as string;
     const sid = (req.body?.session_id ?? "") as string;
     if (ORCH_AUTONOMY && sid && (evName === "Stop" || evName === "SubagentStop")) {
-      void findAgentForSession(sid)
-        .then((found) =>
-          found
-            ? orchController.onAgentSignal(found.orchId, found.agentId, {
-                stopped: true,
-              })
-            : undefined,
-        )
-        .catch(() => {});
+      void (async () => {
+        const found = await findOrchRoleForSession(sid);
+        if (!found) return;
+        // Head markers are orchestration-scoped (onHeadSignal); worker markers
+        // are agent-scoped (onAgentSignal, which also notifies the head).
+        if (found.isHead) {
+          await orchController.onHeadSignal(found.orchId, { stopped: true });
+        } else if (found.agentId) {
+          await orchController.onAgentSignal(found.orchId, found.agentId, {
+            stopped: true,
+          });
+        }
+      })().catch(() => {});
     }
     res.json({ ok: true });
   } catch (err) {
@@ -866,7 +922,6 @@ app.post("/api/orchestrations", async (req, res) => {
     goal?: unknown;
     projectKey?: unknown;
     baseRef?: unknown;
-    roles?: unknown;
   };
   if (typeof body.name !== "string" || body.name.trim().length === 0) {
     res.status(400).json({ error: "name is required" });
@@ -885,23 +940,16 @@ app.post("/api/orchestrations", async (req, res) => {
     res.status(404).json({ error: "project not found" });
     return;
   }
-  // Validate requested roles against the known set; default to the full team.
-  const known = new Set<AgentRole>(AGENT_ROLES);
-  const roles: AgentRole[] = Array.isArray(body.roles)
-    ? body.roles.filter((r): r is AgentRole => known.has(r as AgentRole))
-    : [...AGENT_ROLES];
-  if (roles.length === 0) {
-    res.status(400).json({ error: "no valid roles requested" });
-    return;
-  }
+  // Head-session model: create the record and spawn the head; the head then
+  // decomposes the goal and spawns workers on demand. No role chips — the head
+  // draws from the role palette itself.
   try {
-    const result = await orchestrator.createTeam({
+    const result = await orchestrator.createWithHead({
       name: body.name,
       goal: body.goal,
       projectRoot: project.root,
       projectName: project.name,
       baseRef: typeof body.baseRef === "string" ? body.baseRef : undefined,
-      roles,
     });
     res.json({ ok: true, ...result });
   } catch (err) {
@@ -923,9 +971,154 @@ app.post("/api/orchestrations/:id/teardown", async (req, res) => {
   }
 });
 
-// User-initiated briefing delivery — send an agent its role briefing through
-// the tmux send path and mark it running. Always available (even with active
-// autonomy off) so the human stays in control of when an agent starts.
+// Lean status view for the `hark orch status` command (and the dashboard):
+// one line per agent + the head, with a freshly-computed diffstat. No
+// transcripts — context discipline.
+app.get("/api/orchestrations/:id/status", async (req, res) => {
+  const orch = await orchStore.getOrchestration(req.params.id);
+  if (!orch) {
+    res.status(404).json({ error: "orchestration not found" });
+    return;
+  }
+  try {
+    const diffstats: Record<string, string> = {};
+    await Promise.all(
+      orch.agents.map(async (a) => {
+        const s = await branchGitSummary({
+          repoRoot: orch.projectRoot,
+          baseRef: orch.baseRef,
+          branch: a.branch,
+        });
+        diffstats[a.id] = s.diffstat;
+      }),
+    );
+    res.json(buildStatusView(orch, diffstats));
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// (Re-)spawn the head for an orchestration. The create path already spawns the
+// head; this is for explicit re-spawn (e.g. after a crash) and idempotency.
+app.post("/api/orchestrations/:id/head", async (req, res) => {
+  const orch = await orchStore.getOrchestration(req.params.id);
+  if (!orch) {
+    res.status(404).json({ error: "orchestration not found" });
+    return;
+  }
+  if (orch.head && orch.head.pid != null && isAlive(orch.head.pid)) {
+    res.json({ ok: true, head: orch.head, alreadyRunning: true });
+    return;
+  }
+  try {
+    const head = await orchestrator.spawnHead(orch.id);
+    res.json({ ok: true, head });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Head-only: spawn a worker with a specific task. Gated by the x-hark-role
+// header the CLI sets from HARK_ROLE — a worker (role != head) can't spawn its
+// own sub-team and fork-bomb the host (Sharp Edge 5).
+app.post("/api/orchestrations/:id/agents", async (req, res) => {
+  if (req.get("x-hark-role") !== "head") {
+    res.status(403).json({ error: "only the head may spawn workers" });
+    return;
+  }
+  const orch = await orchStore.getOrchestration(req.params.id);
+  if (!orch) {
+    res.status(404).json({ error: "orchestration not found" });
+    return;
+  }
+  const body = (req.body ?? {}) as {
+    role?: unknown;
+    task?: unknown;
+    dependsOn?: unknown;
+  };
+  const known = new Set<AgentRole>(AGENT_ROLES);
+  if (typeof body.role !== "string" || !known.has(body.role as AgentRole)) {
+    res.status(400).json({ error: `role must be one of: ${AGENT_ROLES.join(", ")}` });
+    return;
+  }
+  try {
+    const agent = await orchestrator.spawnAgent(orch.id, body.role as AgentRole, {
+      task: typeof body.task === "string" ? body.task : undefined,
+      dependsOn: typeof body.dependsOn === "string" ? body.dependsOn : undefined,
+    });
+    res.json({ ok: true, agent });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Steer a worker — deliver a free-text message via the tmux send path.
+app.post("/api/orchestrations/:id/agents/:agentId/send", async (req, res) => {
+  const orch = await orchStore.getOrchestration(req.params.id);
+  const agent = orch?.agents.find((a) => a.id === req.params.agentId);
+  if (!orch || !agent) {
+    res.status(404).json({ error: "agent not found" });
+    return;
+  }
+  const text = (req.body as { text?: unknown })?.text;
+  if (typeof text !== "string" || text.trim().length === 0) {
+    res.status(400).json({ error: "text is required" });
+    return;
+  }
+  try {
+    await sendToAgent(agent, text);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Worker branch vs base — diffstat (?mode=stat, default) or full patch
+// (?mode=full). The head uses --full only when a judgment needs it.
+app.get("/api/orchestrations/:id/agents/:agentId/diff", async (req, res) => {
+  const orch = await orchStore.getOrchestration(req.params.id);
+  const agent = orch?.agents.find((a) => a.id === req.params.agentId);
+  if (!orch || !agent) {
+    res.status(404).json({ error: "agent not found" });
+    return;
+  }
+  try {
+    const diff = await diffBranch({
+      repoRoot: orch.projectRoot,
+      baseRef: orch.baseRef,
+      branch: agent.branch,
+      full: req.query.mode === "full",
+    });
+    res.json({ diff });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Recent commits on a worker branch (compact).
+app.get("/api/orchestrations/:id/agents/:agentId/log", async (req, res) => {
+  const orch = await orchStore.getOrchestration(req.params.id);
+  const agent = orch?.agents.find((a) => a.id === req.params.agentId);
+  if (!orch || !agent) {
+    res.status(404).json({ error: "agent not found" });
+    return;
+  }
+  try {
+    const log = await logBranch({
+      repoRoot: orch.projectRoot,
+      baseRef: orch.baseRef,
+      branch: agent.branch,
+    });
+    res.json({ log });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Briefing / re-briefing delivery. With no body it sends the agent its role
+// briefing and marks it running (user-initiated start, works regardless of the
+// autonomy flag). With { task } it assigns the worker its next task — the
+// `hark agent brief` path the head drives.
 app.post(
   "/api/orchestrations/:id/agents/:agentId/brief",
   async (req, res) => {
@@ -939,7 +1132,30 @@ app.post(
       res.status(404).json({ error: "agent not found" });
       return;
     }
+    const task = (req.body as { task?: unknown })?.task;
+    const hasTask = typeof task === "string" && task.trim().length > 0;
     try {
+      if (hasTask) {
+        // Re-brief: record the new task and deliver it (keeps the worker's
+        // existing context — this is a steer, not a fresh charter).
+        await orchStore.updateAgent(orch.id, agent.id, (a) => {
+          a.task = task as string;
+        });
+        await sendToAgent(
+          agent,
+          `New task from the head — focus on this next:\n${(task as string).trim()}`,
+        );
+        await orchStore.appendEvent({
+          ts: Date.now(),
+          orchestrationId: orch.id,
+          agentId: agent.id,
+          kind: "checkpoint",
+          message: `re-briefed ${agent.role} with a new task`,
+          data: { kind: "rebrief" },
+        });
+        res.json({ ok: true });
+        return;
+      }
       await sendToAgent(agent, orchestrator.briefingFor(orch, agent));
       await orchStore.updateAgent(orch.id, agent.id, (a) => {
         a.briefedAt = Date.now();
@@ -962,12 +1178,15 @@ app.post(
   },
 );
 
-// Map a live session id back to its orchestration agent (active only).
-async function findAgentForSession(
+// Map a live session id back to its orchestration role (active only). Either a
+// worker agent (agentId set) or the head (isHead true) — the Stop-hook path
+// routes to onAgentSignal vs onHeadSignal accordingly.
+async function findOrchRoleForSession(
   sessionId: string,
-): Promise<{ orchId: string; agentId: string } | null> {
+): Promise<{ orchId: string; agentId?: string; isHead?: boolean } | null> {
   for (const o of await orchStore.listOrchestrations()) {
     if (o.status !== "active") continue;
+    if (o.head?.sessionId === sessionId) return { orchId: o.id, isHead: true };
     const a = o.agents.find((x) => x.sessionId === sessionId);
     if (a) return { orchId: o.id, agentId: a.id };
   }
@@ -987,20 +1206,37 @@ async function reconcileOrchestrations(): Promise<void> {
     sessionId: s.sessionId,
     pid: s.pid,
   }));
-  // 1. Backfill registered sessions onto their agents.
+  // 1. Backfill registered sessions onto their agents and the head.
   for (const link of correlateAgentSessions(active, liveRefs)) {
     await orchStore.updateAgent(link.orchId, link.agentId, (a) => {
       a.sessionId = link.sessionId;
     });
   }
+  for (const link of correlateHeadSessions(active, liveRefs)) {
+    await orchStore.updateHead(link.orchId, (h) => {
+      h.sessionId = link.sessionId;
+    });
+  }
 
   // 2. Per agent: refresh metrics always; let the controller drive briefing
-  //    delivery for ready agents when autonomy is enabled.
+  //    delivery for ready agents (and worker→head notifications) when autonomy
+  //    is enabled. The head is driven separately (it's not in agents[]).
   for (const o of active) {
     for (const agent of o.agents) {
       await orchController.refreshMetrics(o.id, agent.id);
       if (ORCH_AUTONOMY) {
         await orchController.onAgentSignal(o.id, agent.id, { stopped: false });
+      }
+    }
+    if (o.head) {
+      // onHeadSignal refreshes head metrics on every tick and (under autonomy)
+      // delivers the head briefing + interprets a head DONE as orch-complete.
+      // With autonomy off we still want fresh head metrics for the dashboard,
+      // so call it either way — it only types keystrokes when ORCH_AUTONOMY.
+      if (ORCH_AUTONOMY) {
+        await orchController.onHeadSignal(o.id, { stopped: false });
+      } else {
+        await orchController.refreshHeadMetrics(o.id);
       }
     }
   }

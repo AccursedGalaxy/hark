@@ -1,14 +1,27 @@
 import { describe, it, expect } from "vitest";
 import {
   correlateAgentSessions,
+  correlateHeadSessions,
   liveSessionIdSet,
   type LiveSessionRef,
 } from "./correlation.js";
 import {
   emptyAgentMetrics,
   type OrchAgent,
+  type OrchHead,
   type Orchestration,
 } from "../../shared/protocol.js";
+
+function head(over: Partial<OrchHead>): OrchHead {
+  return {
+    sessionId: null,
+    pid: null,
+    worktreeDir: "/wt/head",
+    branch: "hark/o/head",
+    metrics: emptyAgentMetrics(),
+    ...over,
+  };
+}
 
 function agent(over: Partial<OrchAgent>): OrchAgent {
   return {
@@ -92,6 +105,28 @@ describe("correlateAgentSessions", () => {
       }),
     ];
     expect(correlateAgentSessions(orchs, live)).toEqual([]);
+  });
+});
+
+describe("correlateHeadSessions", () => {
+  it("links a head to its live session by pid", () => {
+    const orchs = [orch({ head: head({ pid: 100 }) })];
+    expect(correlateHeadSessions(orchs, live)).toEqual([
+      { orchId: "orch-1", sessionId: "sess-aaa" },
+    ]);
+  });
+
+  it("skips heads already linked, headless orchs, and inactive orchs", () => {
+    expect(
+      correlateHeadSessions([orch({ head: head({ pid: 100, sessionId: "sess-aaa" }) })], live),
+    ).toEqual([]);
+    expect(correlateHeadSessions([orch({})], live)).toEqual([]);
+    expect(
+      correlateHeadSessions(
+        [orch({ status: "archived", head: head({ pid: 100 }) })],
+        live,
+      ),
+    ).toEqual([]);
   });
 });
 

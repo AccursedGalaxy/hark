@@ -97,6 +97,39 @@ describe("buildLoginShellCommand", () => {
       "exec /bin/sh -ilc 'exec echo '\\''hi'\\'''",
     );
   });
+
+  it("injects env assignments before the inner exec (single-quoted values)", () => {
+    const out = buildLoginShellCommand(
+      "claude --permission-mode auto",
+      "/bin/bash",
+      { env: { HARK_ORCH_ID: "orch-1", HARK_ROLE: "head" } },
+    );
+    // Env assignments live INSIDE the login shell's command so they apply to
+    // the exec'd claude, after rc files have run.
+    expect(out).toBe(
+      `exec /bin/bash -ilc 'HARK_ORCH_ID='\\''orch-1'\\'' HARK_ROLE='\\''head'\\'' exec claude --permission-mode auto'`,
+    );
+  });
+
+  it("prepends to PATH leaving $PATH unquoted so the login shell expands it", () => {
+    const out = buildLoginShellCommand("claude", "/bin/bash", {
+      pathPrepend: "/opt/hark/bin",
+    });
+    expect(out).toBe(
+      `exec /bin/bash -ilc 'PATH='\\''/opt/hark/bin'\\'':$PATH exec claude'`,
+    );
+  });
+
+  it("escapes single quotes inside env values", () => {
+    const out = buildLoginShellCommand("claude", "/bin/sh", {
+      env: { K: "a'b" },
+    });
+    // The value's quote is escaped for the inner (login) shell, then the whole
+    // line is escaped again for the outer sh -c layer.
+    expect(out).toContain("K=");
+    expect(out.startsWith("exec /bin/sh -ilc '")).toBe(true);
+    expect(out.endsWith("'")).toBe(true);
+  });
 });
 
 describe("pickSpawnTarget", () => {

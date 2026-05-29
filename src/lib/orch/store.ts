@@ -10,6 +10,7 @@ import {
   type OrchEvent,
   type Orchestration,
   type OrchestrationStatus,
+  type OrchHead,
 } from "../../shared/protocol.js";
 
 // File-backed persistence for orchestrations. Mirrors hark's "everything is a
@@ -272,6 +273,46 @@ export class OrchStore {
       });
     }
     return a;
+  }
+
+  // ---- Head (head-session model) ------------------------------------------
+
+  // Record the coordinating head on an orchestration. The head lives on the
+  // record directly (not in agents[]) so it's exempt from the worker nudge
+  // loop and its markers are orchestration-scoped. Logs head_spawned.
+  async setHead(
+    orchId: string,
+    head: Omit<OrchHead, "metrics"> & { metrics?: OrchHead["metrics"] },
+  ): Promise<Orchestration | null> {
+    const full: OrchHead = { ...head, metrics: head.metrics ?? emptyAgentMetrics() };
+    const updated = await this.updateOrchestration(orchId, (o) => {
+      o.head = full;
+    });
+    if (updated) {
+      await this.appendEvent({
+        ts: Date.now(),
+        orchestrationId: orchId,
+        kind: "head_spawned",
+        message: `head session spawned on ${full.branch}`,
+        data: { worktreeDir: full.worktreeDir, branch: full.branch },
+      });
+    }
+    return updated;
+  }
+
+  // Read-modify-write the head under the per-id lock. Returns the updated head,
+  // or null if the orchestration has no head. Mirrors updateAgent.
+  async updateHead(
+    orchId: string,
+    mutate: (h: OrchHead) => void,
+  ): Promise<OrchHead | null> {
+    let result: OrchHead | null = null;
+    await this.updateOrchestration(orchId, (o) => {
+      if (!o.head) return;
+      mutate(o.head);
+      result = o.head;
+    });
+    return result;
   }
 
   // Append one event to the orchestration's JSONL log. O_APPEND keeps

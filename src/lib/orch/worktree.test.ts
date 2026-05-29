@@ -1,13 +1,19 @@
 import { describe, it, expect } from "vitest";
 import {
   buildBranchDeleteArgs,
+  buildDiffArgs,
+  buildLogArgs,
+  buildRevListCountArgs,
+  buildShortstatArgs,
   buildWorktreeAddArgs,
   buildWorktreeListArgs,
   buildWorktreePruneArgs,
   buildWorktreeRemoveArgs,
+  formatShortstat,
   parseWorktreeList,
   slugify,
   worktreeBranchName,
+  worktreeHeadBranch,
   worktreePath,
 } from "./worktree.js";
 
@@ -21,6 +27,79 @@ describe("slugify", () => {
   it("never returns empty (git refuses empty ref segments)", () => {
     expect(slugify("")).toBe("x");
     expect(slugify("!!!")).toBe("x");
+  });
+});
+
+describe("worktreeHeadBranch", () => {
+  it("namespaces the head branch under the orch with a fixed head leaf", () => {
+    expect(worktreeHeadBranch("Ship Login")).toBe("hark/ship-login/head");
+  });
+});
+
+describe("git inspection builders (head reads worker branches vs base)", () => {
+  it("builds a three-dot diff so it shows only the branch's own changes", () => {
+    expect(buildDiffArgs("/repo", "main", "hark/o/coder-a", false)).toEqual([
+      "-C",
+      "/repo",
+      "diff",
+      "--stat",
+      "main...hark/o/coder-a",
+    ]);
+    // --full drops --stat to emit the full patch.
+    expect(buildDiffArgs("/repo", "main", "hark/o/coder-a", true)).toEqual([
+      "-C",
+      "/repo",
+      "diff",
+      "main...hark/o/coder-a",
+    ]);
+  });
+
+  it("builds a shortstat diff and a commit-count rev-list", () => {
+    expect(buildShortstatArgs("/repo", "main", "br")).toEqual([
+      "-C",
+      "/repo",
+      "diff",
+      "--shortstat",
+      "main...br",
+    ]);
+    expect(buildRevListCountArgs("/repo", "main", "br")).toEqual([
+      "-C",
+      "/repo",
+      "rev-list",
+      "--count",
+      "main..br",
+    ]);
+  });
+
+  it("builds a compact one-line-per-commit log", () => {
+    expect(buildLogArgs("/repo", "main", "br")).toEqual([
+      "-C",
+      "/repo",
+      "log",
+      "--oneline",
+      "-n",
+      "20",
+      "main..br",
+    ]);
+  });
+});
+
+describe("formatShortstat", () => {
+  it("reduces git --shortstat output to a compact token", () => {
+    expect(
+      formatShortstat(" 2 files changed, 30 insertions(+), 4 deletions(-)\n"),
+    ).toBe("2 files +30/-4");
+    expect(formatShortstat(" 1 file changed, 5 insertions(+)\n")).toBe(
+      "1 file +5/-0",
+    );
+    expect(formatShortstat(" 1 file changed, 3 deletions(-)\n")).toBe(
+      "1 file +0/-3",
+    );
+  });
+
+  it("returns empty string when there are no changes", () => {
+    expect(formatShortstat("")).toBe("");
+    expect(formatShortstat("\n")).toBe("");
   });
 });
 
