@@ -958,13 +958,14 @@ export class AutonomyController {
   // any decision or sending anything. Safe to call on a tick regardless of
   // whether active autonomy (briefing/nudging) is enabled, so the dashboard
   // stays current either way.
-  // Returns the freshly-computed sample (tokens/turns/cost/model) so the
-  // reconcile loop can feed the metrics DB without re-reading the transcript;
-  // null when there's no session yet to read.
+  // Returns the freshly-computed sample (tokens/turns/cost/model) AND the raw
+  // transcript events it read, so the reconcile loop can feed BOTH the
+  // token_samples time-series and the turns/tool_calls capture without
+  // re-reading the transcript; null when there's no session yet to read.
   async refreshMetrics(
     orchId: string,
     agentId: string,
-  ): Promise<TranscriptMetrics | null> {
+  ): Promise<{ metrics: TranscriptMetrics; events: TranscriptEvent[] } | null> {
     const orch = await this.deps.store.getOrchestration(orchId);
     const agent = orch?.agents.find((a) => a.id === agentId);
     if (!agent?.sessionId) return null;
@@ -978,13 +979,16 @@ export class AutonomyController {
       a.metrics.costUsd = tm.costUsd;
       a.metrics.turns = tm.turns;
     });
-    return tm;
+    return { metrics: tm, events };
   }
 
   // Refresh the head's token/turn metrics from its transcript without making
   // any decision or typing anything. Safe to call on every reconcile tick even
   // with active autonomy off, so the dashboard's head card stays current.
-  async refreshHeadMetrics(orchId: string): Promise<TranscriptMetrics | null> {
+  // Returns the sample + raw events (see refreshMetrics) for DB ingest.
+  async refreshHeadMetrics(
+    orchId: string,
+  ): Promise<{ metrics: TranscriptMetrics; events: TranscriptEvent[] } | null> {
     const orch = await this.deps.store.getOrchestration(orchId);
     if (!orch?.head?.sessionId) return null;
     const events = await this.deps.readTranscript(orch.head.sessionId);
@@ -997,7 +1001,7 @@ export class AutonomyController {
       h.metrics.costUsd = tm.costUsd;
       h.metrics.turns = tm.turns;
     });
-    return tm;
+    return { metrics: tm, events };
   }
 
   // Count the self-review nudges already sent to an agent, from the event log.
