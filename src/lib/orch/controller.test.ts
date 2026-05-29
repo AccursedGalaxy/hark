@@ -17,6 +17,10 @@ import {
   DEFAULT_NO_PROGRESS_TOOL_CALLS,
   DEFAULT_HARD_TURN_CEILING,
   DEFAULT_HARD_TOKEN_CEILING,
+  buildJudgeActivityView,
+  buildStuckJudgePrompt,
+  parseJudgeVerdict,
+  summarizeToolCall,
   finalMarkerText,
   leanSummary,
   markerForLifecycle,
@@ -1050,8 +1054,13 @@ function makeBreakerController(opts: {
   noProgressToolCalls?: number;
   hardTurnCeiling?: number;
   hardTokenCeiling?: number;
+  // The stuck-judge stub: given the prompt, return raw stdout. Omit to leave the
+  // judge unwired (no-progress keeps its immediate-block behavior). Throw to
+  // simulate a subprocess error/timeout.
+  judge?: (prompt: string) => Promise<string> | string;
 }) {
   const escalations: { agentId: string; reason: string }[] = [];
+  const judgePrompts: string[] = [];
   const controller = new AutonomyController({
     store,
     orchestrator,
@@ -1062,6 +1071,12 @@ function makeBreakerController(opts: {
     escalateToHuman: async (_o, a, reason) => {
       escalations.push({ agentId: a.id, reason });
     },
+    runStuckJudge: opts.judge
+      ? async (prompt) => {
+          judgePrompts.push(prompt);
+          return await opts.judge!(prompt);
+        }
+      : undefined,
     runawayLimit: opts.limit,
     noProgressTurns: opts.noProgressTurns,
     noProgressToolCalls: opts.noProgressToolCalls,
@@ -1069,7 +1084,7 @@ function makeBreakerController(opts: {
     hardTokenCeiling: opts.hardTokenCeiling,
     now: () => 1_000_000,
   });
-  return { controller, escalations };
+  return { controller, escalations, judgePrompts };
 }
 
 describe("AutonomyController.checkCircuitBreaker", () => {
@@ -1216,12 +1231,14 @@ describe("AutonomyController.checkCircuitBreaker", () => {
   });
 
   it("ships sane defaults for the new triggers (catch the spiral, leave headroom)", () => {
-    // No-progress bounds well below the observed 147-turn spiral.
+    // No-progress bounds well below the observed 147-turn spiral. The bounds
+    // were deliberately relaxed (turns→100) to give the stuck-judge ample
+    // runway; the turns and tool-calls bounds are now tuned independently (no
+    // calls≥turns coupling), so each is just checked for a sane standalone range.
     expect(DEFAULT_NO_PROGRESS_TURNS).toBeLessThan(147);
     expect(DEFAULT_NO_PROGRESS_TURNS).toBeGreaterThanOrEqual(20);
-    expect(DEFAULT_NO_PROGRESS_TOOL_CALLS).toBeGreaterThanOrEqual(
-      DEFAULT_NO_PROGRESS_TURNS,
-    );
+    expect(DEFAULT_NO_PROGRESS_TOOL_CALLS).toBeLessThan(147);
+    expect(DEFAULT_NO_PROGRESS_TOOL_CALLS).toBeGreaterThanOrEqual(20);
     // Hard ceiling above the no-progress bound (so the no-progress trigger
     // normally fires first) but below the observed 7.6M-token miss.
     expect(DEFAULT_HARD_TURN_CEILING).toBeGreaterThan(DEFAULT_NO_PROGRESS_TURNS);
@@ -1252,6 +1269,297 @@ describe("AutonomyController.checkCircuitBreaker", () => {
     // The breaker escalation IS the wake — the guard is set so the reconcile
     // loop's generic wake-up won't escalate the same trip a second time.
     expect(a.headWokeAt).toBe(1_000_000);
+  });
+});
+
+// ---- Stuck-judge (Trigger-2 gating) ----------------------------------------
+
+const readTurn = (file: string): TranscriptEvent => ({
+  kind: "assistant",
+  uuid: "u",
+  ts: "t",
+  blocks: [
+    { type: "tool_use", id: "x", name: "Read", input: { file_path: file } },
+  ],
+});
+
+describe("summarizeToolCall", () => {
+  it("renders Bash as its command, file/search tools as their target", () => {
+    expect(
+      summarizeToolCall({ type: "tool_use", id: "1", name: "Bash", input: { command: "npm test" } }),
+    ).toBe("Bash(npm test)");
+    expect(
+      summarizeToolCall({ type: "tool_use", id: "1", name: "Read", input: { file_path: "src/a.ts" } }),
+    ).toBe("Read(src/a.ts)");
+    expect(
+      summarizeToolCall({ type: "tool_use", id: "1", name: "Grep", input: { pattern: "foo" } }),
+    ).toBe("Grep(foo)");
+  });
+
+  it("falls back to the tool name when there's no recognised target; empty for non-tool", () => {
+    expect(
+      summarizeToolCall({ type: "tool_use", id: "1", name: "Weird", input: {} }),
+    ).toBe("Weird");
+    expect(summarizeToolCall({ type: "text", text: "hi" })).toBe("");
+  });
+});
+
+describe("buildJudgeActivityView", () => {
+  it("renders one line per recent turn: tool calls + a text snippet", () => {
+    const events: TranscriptEvent[] = [
+      readTurn("src/a.ts"),
+      {
+        kind: "assistant",
+        uuid: "u",
+        ts: "t",
+        blocks: [
+          { type: "text", text: "Now editing the controller." },
+          { type: "tool_use", id: "y", name: "Edit", input: { file_path: "src/b.ts" } },
+        ],
+      },
+    ];
+    const view = buildJudgeActivityView(events);
+    expect(view).toContain("Read(src/a.ts)");
+    expect(view).toContain("Edit(src/b.ts)");
+    expect(view).toContain("Now editing the controller.");
+  });
+
+  it("keeps only the last maxTurns turns (bounded — never the whole transcript)", () => {
+    const events: TranscriptEvent[] = Array.from({ length: 30 }, (_, i) =>
+      readTurn(`src/f${i}.ts`),
+    );
+    const view = buildJudgeActivityView(events, { maxTurns: 5 });
+    expect(view).toContain("src/f29.ts");
+    expect(view).not.toContain("src/f10.ts");
+    expect(view.split("\n")).toHaveLength(5);
+  });
+});
+
+describe("parseJudgeVerdict", () => {
+  it("parses a bare JSON line", () => {
+    expect(
+      parseJudgeVerdict('{"verdict":"progressing","reason":"reading new files"}'),
+    ).toEqual({ verdict: "progressing", reason: "reading new files" });
+  });
+
+  it("parses JSON wrapped in prose / a code fence", () => {
+    const out =
+      'Here is my answer:\n```json\n{"verdict": "stuck", "reason": "re-running greps"}\n```\n';
+    expect(parseJudgeVerdict(out)).toEqual({
+      verdict: "stuck",
+      reason: "re-running greps",
+    });
+  });
+
+  it("returns null on no JSON, an unknown verdict, or empty stdout", () => {
+    expect(parseJudgeVerdict("no json here")).toBeNull();
+    expect(parseJudgeVerdict('{"verdict":"confused"}')).toBeNull();
+    expect(parseJudgeVerdict("")).toBeNull();
+  });
+});
+
+describe("decideCircuitBreaker: trigger tag + flagged window", () => {
+  const base = {
+    signature: null,
+    repeatCount: 0,
+    progressKey: "1:x",
+    diffKey: "x",
+    turns: 50,
+    toolCalls: 50,
+    tokens: 0,
+    limit: 1000,
+    noProgressTurns: 1000,
+    noProgressToolCalls: 1000,
+    hardTurnCeiling: 10_000,
+    hardTokenCeiling: 9_000_000_000,
+  };
+  const flaggedPrior = {
+    signature: "",
+    progressKey: "1:x",
+    baseline: 0,
+    diffKey: "x",
+    progressTurns: 0,
+    progressToolCalls: 0,
+    flaggedAt: 123,
+    flaggedReason: "spin",
+  };
+
+  it("carries flaggedAt/Reason forward while the committed diff is unchanged", () => {
+    const d = decideCircuitBreaker({ ...base, prior: flaggedPrior });
+    expect(d.snapshot.flaggedAt).toBe(123);
+    expect(d.snapshot.flaggedReason).toBe("spin");
+  });
+
+  it("drops the flag the moment the committed diff moves (window reset = recovery)", () => {
+    const d = decideCircuitBreaker({ ...base, diffKey: "y", prior: flaggedPrior });
+    expect(d.snapshot.flaggedAt).toBeUndefined();
+    expect(d.snapshot.flaggedReason).toBeUndefined();
+  });
+
+  it("tags the hard-ceiling trigger", () => {
+    const d = decideCircuitBreaker({ ...base, turns: 99_999, prior: undefined });
+    expect(d.tripped).toBe(true);
+    expect(d.trigger).toBe("hard_ceiling");
+  });
+});
+
+describe("AutonomyController.checkCircuitBreaker stuck-judge", () => {
+  // The motivating regression: a worker reading distinct files for many turns
+  // with no commit must be judged progressing and NOT killed.
+  it("no-progress + judge says progressing → NOT killed, window re-armed", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    const { controller, judgePrompts } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: "", commitCount: 0 }), // never commits
+      limit: 1000, // signature trigger off
+      noProgressTurns: 5,
+      judge: () =>
+        '{"verdict":"progressing","reason":"reading 7 distinct files toward the task"}',
+    });
+
+    probes.push(readTurn("a.ts"), readTurn("b.ts"));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false); // opens window
+    for (const f of ["c", "d", "e", "f", "g", "h"]) probes.push(readTurn(`${f}.ts`));
+    // Trigger-2 fires, but the judge says progressing → not killed.
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+    expect(judgePrompts).toHaveLength(1);
+    expect(judgePrompts[0]).toContain("Read(a.ts)");
+
+    const a = (await store.getOrchestration(orchId))!.agents.find((x) => x.id === agentId)!;
+    expect(a.lifecycle).toBe("running");
+    expect(a.breaker?.flaggedReason).toBeUndefined();
+    // Window re-armed to the current turn count (8 turns observed).
+    expect(a.breaker?.progressTurns).toBe(8);
+  });
+
+  it("no-progress + judge says stuck → flagged (still running), PM woken once", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    await store.setHead(orchId, {
+      sessionId: "sess-head",
+      pid: 9,
+      worktreeDir: "/wt/head",
+      branch: "head",
+    });
+    const probes: TranscriptEvent[] = [];
+    const { controller, escalations, judgePrompts } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: "", commitCount: 0 }),
+      limit: 1000,
+      noProgressTurns: 5,
+      judge: () => '{"verdict":"stuck","reason":"re-running varied greps, no new info"}',
+    });
+
+    probes.push(bashTurn("grep a src"), bashTurn("grep b src"));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false); // opens window
+    for (const w of ["c", "d", "e", "f", "g", "h"]) probes.push(bashTurn(`grep ${w} src`));
+    // Trigger-2 fires; judge says stuck → flag, NOT kill.
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+
+    let a = (await store.getOrchestration(orchId))!.agents.find((x) => x.id === agentId)!;
+    expect(a.lifecycle).toBe("running"); // NOT blocked — kept alive for the PM
+    expect(a.breaker?.flaggedReason).toContain("re-running varied greps");
+    expect(a.breaker?.flaggedAt).toBe(1_000_000);
+    expect(escalations).toHaveLength(1); // PM woken (see statusView.test for the surfaced flag)
+
+    // A subsequent tick (still no diff) must NOT re-judge or kill — once per window.
+    probes.push(bashTurn("grep i src"));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+    expect(judgePrompts).toHaveLength(1); // not re-judged
+    a = (await store.getOrchestration(orchId))!.agents.find((x) => x.id === agentId)!;
+    expect(a.lifecycle).toBe("running");
+  });
+
+  it("no-progress + judge error/timeout → blocks (fail safe)", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    const { controller } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: "", commitCount: 0 }),
+      limit: 1000,
+      noProgressTurns: 5,
+      judge: () => {
+        throw new Error("judge timed out");
+      },
+    });
+
+    probes.push(bashTurn("grep a src"), bashTurn("grep b src"));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+    for (const w of ["c", "d", "e", "f", "g", "h"]) probes.push(bashTurn(`grep ${w} src`));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(true); // blocked
+
+    const a = (await store.getOrchestration(orchId))!.agents.find((x) => x.id === agentId)!;
+    expect(a.lifecycle).toBe("blocked");
+    expect(a.blockedReason).toContain("no committed-diff progress");
+  });
+
+  it("no-progress + unparseable judge answer → blocks (fail safe)", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    const { controller } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: "", commitCount: 0 }),
+      limit: 1000,
+      noProgressTurns: 5,
+      judge: () => "I cannot decide.",
+    });
+
+    probes.push(bashTurn("grep a src"), bashTurn("grep b src"));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+    for (const w of ["c", "d", "e", "f", "g", "h"]) probes.push(bashTurn(`grep ${w} src`));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(true);
+    expect(
+      (await store.getOrchestration(orchId))!.agents.find((x) => x.id === agentId)!.lifecycle,
+    ).toBe("blocked");
+  });
+
+  it("the SIGNATURE trigger is NEVER gated on the judge (immediate kill)", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    const { controller, judgePrompts } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: "", commitCount: 0 }),
+      limit: 3, // signature trigger live
+      noProgressTurns: 1000, // no-progress off
+      // Judge wired, but a signature trip must not consult it.
+      judge: () => '{"verdict":"progressing","reason":"should be ignored"}',
+    });
+
+    probes.push(bashTurn("recover-check-1"), bashTurn("recover-check-2"));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+    for (let n = 3; n <= 8; n++) probes.push(bashTurn(`recover-check-${n}`));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(true);
+    expect(judgePrompts).toHaveLength(0); // judge never consulted
+    expect(
+      (await store.getOrchestration(orchId))!.agents.find((x) => x.id === agentId)!.lifecycle,
+    ).toBe("blocked");
+  });
+
+  it("the HARD CEILING is NEVER gated on the judge (immediate kill)", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    let commits = 0;
+    const { controller, judgePrompts } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: `${commits} files`, commitCount: commits }),
+      limit: 1000,
+      noProgressTurns: 1000,
+      noProgressToolCalls: 100000,
+      hardTurnCeiling: 4,
+      judge: () => '{"verdict":"progressing","reason":"should be ignored"}',
+    });
+
+    let tripped = false;
+    for (let t = 1; t <= 4; t++) {
+      probes.push(bashTurn(`step-${String.fromCharCode(96 + t)}`));
+      commits++;
+      tripped = await controller.checkCircuitBreaker(orchId, agentId);
+    }
+    expect(tripped).toBe(true);
+    expect(judgePrompts).toHaveLength(0);
+    expect(
+      (await store.getOrchestration(orchId))!.agents.find((x) => x.id === agentId)!.lifecycle,
+    ).toBe("blocked");
   });
 });
 
