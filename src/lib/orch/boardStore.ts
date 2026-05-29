@@ -344,11 +344,14 @@ export class BoardStore {
   constructor(dbPath: string = defaultBoardDbPath(), now: () => number = Date.now) {
     this.db = new DatabaseSync(dbPath);
     this.now = now;
-    this.db.exec("PRAGMA journal_mode = WAL");
-    // Concurrent writers WAIT for the lock rather than failing with
-    // SQLITE_BUSY — the half of the append-integrity property that survives two
-    // processes (or worker threads) appending at once.
+    // busy_timeout FIRST, before any other statement: concurrent writers WAIT
+    // for the lock rather than failing with SQLITE_BUSY. This must precede the
+    // `journal_mode = WAL` switch — flipping the journal mode needs a momentary
+    // lock, so a connection opened while another holds a write tx would fail at
+    // that pragma if the timeout weren't already armed. (Half of the
+    // append-integrity property: surviving two processes/threads at once.)
     this.db.exec("PRAGMA busy_timeout = 5000");
+    this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = OFF");
     // Evolve the file forward to the current schema (never rebuild it). Must run
     // AFTER journal_mode is set (WAL can't be switched inside a transaction).

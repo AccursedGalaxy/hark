@@ -3,11 +3,15 @@ import { Worker } from "node:worker_threads";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   BoardStore,
+  MIGRATIONS,
   SCHEMA_VERSION,
   newTaskId,
   parseFieldAssignments,
+  runMigrations,
+  type Migration,
 } from "./boardStore.js";
 
 // ---- Field parsing (pure) --------------------------------------------------
@@ -74,6 +78,122 @@ describe("BoardStore schema", () => {
       expect(t?.title).toBe("persisted");
       expect(t?.status).toBe("ready");
       b.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---- Schema migration: the source-of-truth durability promise --------------
+
+describe("schema migrations", () => {
+  // SF-1: a schema bump must EVOLVE an existing board.db, not rebuild it. Seed a
+  // db at v1 with real rows + history, then run a v2 migration (an ALTER that
+  // adds a column) against the SAME file. The rows + events must survive intact,
+  // the new column must be present, and user_version must advance to 2.
+  it("a v1->v2 bump evolves an existing db with real rows, losing no data", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hark-board-migrate-"));
+    const file = join(dir, "board.db");
+    try {
+      // Seed v1 with genuine data through the normal store API (rows + events).
+      const v1 = new BoardStore(file);
+      expect(v1.schemaVersion()).toBe(1);
+      v1.setTask("task-1", { title: "durable", status: "ready", assignee: "coder" });
+      v1.setTask("task-2", { title: "second", status: "in-progress" });
+      v1.setTask("task-1", { status: "review" }); // a second event on task-1
+      v1.close();
+
+      // A synthetic forward migration to v2: add a column WITHOUT touching rows.
+      const addLabels: Migration = {
+        to: 2,
+        up: (db) => db.exec("ALTER TABLE tasks ADD COLUMN labels TEXT"),
+      };
+
+      // Run the full ordered list (v1 is skipped — already applied; v2 runs).
+      const raw = new DatabaseSync(file);
+      raw.exec("PRAGMA journal_mode = WAL");
+      raw.exec("PRAGMA busy_timeout = 5000");
+      runMigrations(raw, [...MIGRATIONS, addLabels]);
+
+      // Version advanced.
+      const ver = raw.prepare("PRAGMA user_version").get() as { user_version: number };
+      expect(ver.user_version).toBe(2);
+      // New shape present.
+      const cols = (raw.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map(
+        (c) => c.name,
+      );
+      expect(cols).toContain("labels");
+      // Old rows survived byte-for-byte (the migration touched only the schema).
+      const t1 = raw.prepare("SELECT * FROM tasks WHERE id = ?").get("task-1") as Record<
+        string,
+        unknown
+      >;
+      expect(t1.title).toBe("durable");
+      expect(t1.status).toBe("review");
+      expect(t1.assignee).toBe("coder");
+      expect(t1.labels).toBeNull(); // new column defaults to null on existing rows
+      // History survived too — created + the status change.
+      const events = raw
+        .prepare("SELECT * FROM task_events WHERE task_id = ? ORDER BY id")
+        .all("task-1") as { kind: string }[];
+      expect(events.map((e) => e.kind)).toEqual(["created", "set"]);
+      raw.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A migration body that throws must leave the version (and the data) exactly
+  // where it was — user_version never leads the data, so a failed bump is safe
+  // to retry after the bug is fixed.
+  it("a failing migration rolls back and does not advance the version", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hark-board-migfail-"));
+    const file = join(dir, "board.db");
+    try {
+      const v1 = new BoardStore(file);
+      v1.setTask("task-1", { title: "keep me" });
+      v1.close();
+
+      const boom: Migration = {
+        to: 2,
+        up: (db) => {
+          db.exec("ALTER TABLE tasks ADD COLUMN half_done TEXT");
+          throw new Error("migration blew up mid-way");
+        },
+      };
+
+      const raw = new DatabaseSync(file);
+      raw.exec("PRAGMA journal_mode = WAL");
+      raw.exec("PRAGMA busy_timeout = 5000");
+      expect(() => runMigrations(raw, [...MIGRATIONS, boom])).toThrow(/blew up/);
+
+      // Rolled back: version still 1, the half-added column is gone, row intact.
+      const ver = raw.prepare("PRAGMA user_version").get() as { user_version: number };
+      expect(ver.user_version).toBe(1);
+      const cols = (raw.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map(
+        (c) => c.name,
+      );
+      expect(cols).not.toContain("half_done");
+      const t1 = raw.prepare("SELECT * FROM tasks WHERE id = ?").get("task-1") as {
+        title: string;
+      };
+      expect(t1.title).toBe("keep me");
+      raw.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A db whose version is AHEAD of the build's newest migration is a hard error:
+  // an old build must refuse to open a newer source-of-truth file, not mangle it.
+  it("refuses to open a db newer than the build understands", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hark-board-newer-"));
+    const file = join(dir, "board.db");
+    try {
+      const raw = new DatabaseSync(file);
+      raw.exec("PRAGMA user_version = 999");
+      expect(() => runMigrations(raw, MIGRATIONS)).toThrow(/never downgrade/);
+      raw.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -209,8 +329,8 @@ const APPENDER = `
 const { workerData, parentPort } = require('node:worker_threads');
 const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(workerData.dbPath);
-db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA busy_timeout = 5000');
+db.exec('PRAGMA journal_mode = WAL');
 const stmt = db.prepare(
   'INSERT INTO task_events (task_id, ts, kind, message, data_json) VALUES (?, ?, ?, ?, ?)'
 );

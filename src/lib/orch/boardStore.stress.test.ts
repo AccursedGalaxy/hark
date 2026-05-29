@@ -5,6 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BoardStore } from "./boardStore.js";
 
+// A dedicated ESM worker that runs the ACTUAL setTask/link transaction code (via
+// the tsx loader) in its own OS thread, so the concurrency tests below exercise
+// the genuine read-modify-write — not a raw-SQL re-implementation. Unlike the
+// append-path workers (which only INSERT, so inline raw SQL suffices), a
+// lost-update test must run the real code to prove the transaction stops the
+// race. It is a separate file (not an inline eval worker) because tsx only
+// rewrites the nested `.js`→`.ts` imports in ESM mode.
+const RMW_WORKER_URL = new URL("./boardStoreRmwWorker.ts", import.meta.url);
+
 // ADVERSARIAL stress tests for the two load-bearing board properties. These sit
 // ON TOP of boardStore.test.ts (the coder's happy-path coverage): they exist to
 // BREAK the properties, not confirm them. A reconciliation / silent-drop layer
@@ -180,8 +189,8 @@ const APPENDER = `
 const { workerData, parentPort } = require('node:worker_threads');
 const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(workerData.dbPath);
-db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA busy_timeout = 5000');
+db.exec('PRAGMA journal_mode = WAL');
 const stmt = db.prepare(
   'INSERT INTO task_events (task_id, ts, kind, message, data_json) VALUES (?, ?, ?, ?, ?)'
 );
@@ -297,6 +306,124 @@ describe("task_events under heavy concurrency — adversarial", () => {
           .map((e) => (e.data as { i: number }).i);
         expect(mine).toEqual(Array.from({ length: K }, (_, i) => i));
       }
+      check.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ============================================================================
+// PROPERTY 3 — read-modify-write under CONCURRENCY: no lost update (SF-2)
+// ============================================================================
+
+function runRmwWorkers(
+  dbPath: string,
+  jobs: Array<{
+    op: "set" | "link";
+    taskId: string;
+    field?: string;
+    value: string;
+  }>,
+): Promise<string[]> {
+  return Promise.all(
+    jobs.map(
+      (job) =>
+        new Promise<string>((resolve, reject) => {
+          const worker = new Worker(RMW_WORKER_URL, {
+            execArgv: ["--import", "tsx"],
+            workerData: { dbPath, ...job },
+          });
+          worker.on("message", (m: string) => resolve(m));
+          worker.on("error", reject);
+          worker.on("exit", (code) => {
+            if (code !== 0) reject(new Error(`worker exited ${code}`));
+          });
+        }),
+    ),
+  );
+}
+
+describe("read-modify-write under concurrency — adversarial", () => {
+  // SF-2: many writers each set a DISTINCT field on the SAME, not-yet-created
+  // task at once. This races on BOTH ends of the read-modify-write: the initial
+  // create (two INSERTs of the same id would collide) AND the subsequent edits.
+  // Under the transaction every writer's field must survive and no writer may
+  // crash — without it the create race throws a PRIMARY KEY constraint and/or an
+  // edit is lost.
+  it("concurrent setTask of distinct fields on one task: all survive, none crash", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hark-board-rmw-set-"));
+    const file = join(dir, "board.db");
+    try {
+      // Create the file + schema once, but NOT the task — let the writers race
+      // to create it.
+      new BoardStore(file).close();
+
+      // Each writer owns a distinct settable column, so the converged row should
+      // carry every one of them.
+      const jobs = [
+        { op: "set" as const, taskId: "hot", field: "title", value: "T" },
+        { op: "set" as const, taskId: "hot", field: "body", value: "B" },
+        { op: "set" as const, taskId: "hot", field: "assignee", value: "coder" },
+        { op: "set" as const, taskId: "hot", field: "workstream", value: "board" },
+        { op: "set" as const, taskId: "hot", field: "priority", value: "p1" },
+        { op: "set" as const, taskId: "hot", field: "orchId", value: "o-1" },
+        { op: "set" as const, taskId: "hot", field: "agentId", value: "a-1" },
+        { op: "set" as const, taskId: "hot", field: "status", value: "ready" },
+      ];
+      const results = await runRmwWorkers(file, jobs);
+      // No writer crashed (no PRIMARY KEY collision, no lost lock).
+      expect(results).toEqual(jobs.map(() => "ok"));
+
+      const check = new BoardStore(file);
+      const t = check.getTask("hot");
+      // Every writer's field landed — none overwritten by the create race.
+      expect(t?.title).toBe("T");
+      expect(t?.body).toBe("B");
+      expect(t?.assignee).toBe("coder");
+      expect(t?.workstream).toBe("board");
+      expect(t?.priority).toBe("p1");
+      expect(t?.orchId).toBe("o-1");
+      expect(t?.agentId).toBe("a-1");
+      expect(t?.status).toBe("ready");
+      check.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The canonical lost-update: link is a read-merge-write of the WHOLE
+  // depends_on column. Many writers each add a DISTINCT edge at once. Without
+  // the transaction, two writers read the same edge set, each appends its own,
+  // and one overwrites the other → a silently dropped edge. Under the
+  // transaction every edge must survive.
+  it("concurrent link of distinct edges: every edge survives (no lost update)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hark-board-rmw-link-"));
+    const file = join(dir, "board.db");
+    try {
+      const seed = new BoardStore(file);
+      seed.setTask("root", { title: "has deps" });
+      seed.close();
+
+      const N = 12;
+      const jobs = Array.from({ length: N }, (_, i) => ({
+        op: "link" as const,
+        taskId: "root",
+        value: `dep-${i}`,
+      }));
+      const results = await runRmwWorkers(file, jobs);
+      expect(results).toEqual(jobs.map(() => "ok"));
+
+      const check = new BoardStore(file);
+      const deps = (check.getTask("root")?.dependsOn ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .sort();
+      // All N edges present, none lost to a concurrent linker.
+      expect(deps).toEqual(
+        Array.from({ length: N }, (_, i) => `dep-${i}`).sort(),
+      );
       check.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
