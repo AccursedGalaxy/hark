@@ -30,7 +30,21 @@ thinking.*
 >   push); a managed head pulls — `notifyHead` no longer pushes into a managed
 >   head's live pane (invariant: nothing force-types). Charter gains a news-triage
 >   section (surface-now vs note-to-PLAN).
-> - **Phases C–D — not built.** See §7.
+> - **Phase C — DONE (unit + integration-tested; dial dogfooded on `:3999`).**
+>   The per-project autonomy dial (`POST /api/orchestrations/:id/autonomy` +
+>   `hark head autonomy <L0|L1|L2|L3>`, default L2). Mode-based routing for a
+>   managed head's worker transitions (`decideHeadRouting`): blocker → escalate
+>   to the human (`escalateToHuman` — pages via the existing attention layer, a
+>   needs-you Notification on the head session; always wired); pipeline advance →
+>   pull while the conversation is active, or an autonomous advance-push
+>   (`buildAdvancePush`/`pushHeadTurn`) once idle (no human prompt past 90s) and
+>   the dial is L2/L3; L0/L1 idle → wait. `lastHumanAt` (set each
+>   UserPromptSubmit) drives the active/idle decision. The push path is wired
+>   ONLY under `HARK_ORCH_AUTONOMY=1` (it types into the session); escalation is
+>   not (it doesn't). **Full idle-loop + escalation LIVE validation needs real
+>   worker sessions under autonomy — deferred to the existing live-validation
+>   thread; logic is integration-tested with fakes.**
+> - **Phase D — not built.** See §7.
 >
 > **Enforcement boundary (honest scope).** The `PreToolUse` guard is airtight on
 > the `Write`/`Edit` surface (LLM agents mutate files almost exclusively through

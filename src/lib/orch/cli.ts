@@ -1,4 +1,4 @@
-import { AGENT_ROLES, type AgentRole } from "../../shared/protocol.js";
+import { AGENT_ROLES, AUTONOMY_LEVELS, type AgentRole } from "../../shared/protocol.js";
 import type { OrchStatusView } from "../../shared/protocol.js";
 
 // The `hark` CLI is the head's action surface (Bash-invokable). A Claude Code
@@ -46,7 +46,8 @@ export type RenderKind =
   | "diff"
   | "log"
   | "watch"
-  | "promote";
+  | "promote"
+  | "autonomy";
 
 export type CliPlan =
   | { kind: "request"; request: RequestSpec; render: RenderKind }
@@ -58,6 +59,7 @@ export type CliPlan =
 const USAGE = `hark — orchestration head CLI
 
   hark head init                            promote THIS session to the project's PM-head
+  hark head autonomy <L0|L1|L2|L3>          set the project's autonomy dial
   hark orch status                          show every agent + the head (compact)
   hark orch watch                           block until the next event, print it, exit
   hark agent spawn <role> --task "…" [--depends-on <id>]   spawn a worker (head only)
@@ -124,6 +126,22 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
           body: { sessionId: env.sessionId, cwd: env.cwd },
         },
         render: "promote",
+      };
+    }
+    if (sub === "autonomy") {
+      if (!env.orchId) return err("no PM-head for this project (run `hark head init`)");
+      const level = (rest[0] ?? "").toUpperCase();
+      if (!(AUTONOMY_LEVELS as string[]).includes(level)) {
+        return err(`autonomy needs a level: ${AUTONOMY_LEVELS.join(", ")}`);
+      }
+      return {
+        kind: "request",
+        request: {
+          method: "POST",
+          path: `/api/orchestrations/${env.orchId}/autonomy`,
+          body: { level },
+        },
+        render: "autonomy",
       };
     }
     return err(`unknown head command: ${sub ?? "(none)"}`);
@@ -314,6 +332,8 @@ export function renderResponse(render: RenderKind, data: unknown): string {
         : "Promoted this session to the project PM-head.\n\n";
       return charter ? header + charter : JSON.stringify(d);
     }
+    case "autonomy":
+      return d.ok ? `autonomy → ${d.autonomyLevel}` : JSON.stringify(d);
     case "send":
     case "brief":
       return d.ok ? "ok" : JSON.stringify(d);

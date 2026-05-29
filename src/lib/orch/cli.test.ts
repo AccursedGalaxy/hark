@@ -79,6 +79,25 @@ describe("planCommand — head init (promotion)", () => {
     expect(out).toContain("product manager");
   });
 
+  it("POSTs the autonomy dial against the resolved orchId", () => {
+    const plan = planCommand(["head", "autonomy", "l3"], {
+      ...headEnv,
+    });
+    expect(plan).toEqual({
+      kind: "request",
+      request: {
+        method: "POST",
+        path: "/api/orchestrations/orch-1/autonomy",
+        body: { level: "L3" },
+      },
+      render: "autonomy",
+    });
+  });
+
+  it("rejects an unknown autonomy level", () => {
+    expect(planCommand(["head", "autonomy", "L9"], headEnv).kind).toBe("error");
+  });
+
   it("notes a re-attach when promoting an already-managed project", () => {
     const out = renderResponse("promote", {
       reattached: true,

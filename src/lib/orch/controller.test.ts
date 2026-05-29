@@ -6,9 +6,11 @@ import { OrchStore } from "./store.js";
 import { Orchestrator } from "./orchestrator.js";
 import {
   AutonomyController,
+  buildAdvancePush,
   buildHeadNotification,
   buildNudge,
   decideAutonomyAction,
+  decideHeadRouting,
   metricsFromTranscript,
   scanMarkers,
   transcriptText,
@@ -45,6 +47,71 @@ describe("scanMarkers", () => {
   it("the last marker wins (a stale earlier one is ignored)", () => {
     const text = `${BLOCKED_MARKER}\n...later...\nall good\n${DONE_MARKER}`;
     expect(scanMarkers(text).kind).toBe("done");
+  });
+});
+
+describe("decideHeadRouting (managed PM-head, §3.5/§3.6)", () => {
+  const at = (over: Partial<Parameters<typeof decideHeadRouting>[0]>) =>
+    decideHeadRouting({
+      managed: true,
+      marker: "done",
+      autonomyLevel: "L2",
+      idle: false,
+      ...over,
+    });
+
+  it("escalates a blocker to the human regardless of mode or dial", () => {
+    expect(at({ marker: "blocked", idle: false, autonomyLevel: "L0" }).type).toBe(
+      "escalate",
+    );
+    expect(at({ marker: "blocked", idle: true, autonomyLevel: "L3" }).type).toBe(
+      "escalate",
+    );
+  });
+
+  it("pulls an advance while the conversation is active (no push)", () => {
+    expect(at({ marker: "done", idle: false }).type).toBe("pull");
+    expect(at({ marker: "handoff", idle: false }).type).toBe("pull");
+  });
+
+  it("pushes an advance when idle and the dial is L2/L3", () => {
+    expect(at({ marker: "done", idle: true, autonomyLevel: "L2" }).type).toBe("push");
+    expect(at({ marker: "handoff", idle: true, autonomyLevel: "L3" }).type).toBe(
+      "push",
+    );
+  });
+
+  it("waits (none) when idle but the dial is L0/L1", () => {
+    expect(at({ marker: "done", idle: true, autonomyLevel: "L0" }).type).toBe("none");
+    expect(at({ marker: "done", idle: true, autonomyLevel: "L1" }).type).toBe("none");
+  });
+
+  it("does nothing for a non-managed (executor) head", () => {
+    expect(
+      decideHeadRouting({ managed: false, marker: "blocked", autonomyLevel: "L2", idle: true }).type,
+    ).toBe("none");
+  });
+});
+
+describe("buildAdvancePush", () => {
+  it("renders an idle-advance turn citing the dial + the event", () => {
+    const text = buildAdvancePush(
+      {
+        role: "coder",
+        agentId: "a1",
+        branch: "feat",
+        marker: "done",
+        summary: "added parser",
+        diffstat: "2 files +30/-4",
+        commitCount: 2,
+      },
+      "L2",
+    );
+    expect(text).toContain("L2");
+    expect(text).toContain("coder");
+    expect(text).toContain("feat");
+    expect(text.toLowerCase()).toContain("advance");
+    expect(text.toLowerCase()).toContain("never land");
   });
 });
 
@@ -474,6 +541,128 @@ describe("AutonomyController head notifications", () => {
     });
     await controller.onAgentSignal(orchId, agent!.id, { stopped: false });
     expect(headSent).toHaveLength(0);
+  });
+});
+
+describe("AutonomyController managed PM-head routing", () => {
+  interface Escalation {
+    role: string;
+    reason: string;
+  }
+  async function setup(opts: {
+    marker: string;
+    lastHumanAt: number;
+    autonomyLevel?: "L0" | "L1" | "L2" | "L3";
+    withPush?: boolean;
+  }) {
+    const o = await store.createManagedHead({
+      name: "PM: app",
+      goal: "g",
+      projectRoot: "/home/u/app",
+      projectName: "app",
+      baseRef: "main",
+      sessionId: "sess-head",
+      branch: "main",
+      autonomyLevel: opts.autonomyLevel ?? "L2",
+    });
+    await store.updateOrchestration(o.id, (x) => {
+      x.lastHumanAt = opts.lastHumanAt;
+    });
+    const agent = await store.addAgent(o.id, {
+      role: "coder",
+      branch: "hark/app/coder-1",
+      worktreeDir: "/wt/coder",
+      sessionId: "sess-coder",
+      lifecycle: "running",
+    });
+    await store.updateAgent(o.id, agent!.id, (a) => (a.briefedAt = 1));
+
+    const escalations: Escalation[] = [];
+    const pushes: string[] = [];
+    const headSent: string[] = [];
+    const controller = new AutonomyController({
+      store,
+      orchestrator,
+      readTranscript: async () => [
+        {
+          kind: "assistant",
+          uuid: "a",
+          ts: "t",
+          blocks: [{ type: "text", text: `summary line\n${opts.marker}` }],
+        },
+      ],
+      sendText: async () => {},
+      sessionReady: async () => true,
+      sendToHead: async (_o, text) => {
+        headSent.push(text);
+      },
+      agentGitSummary: async () => ({ diffstat: "1 file +5/-0", commitCount: 1 }),
+      escalateToHuman: async (_o, a, reason) => {
+        escalations.push({ role: a.role, reason });
+      },
+      pushHeadTurn: opts.withPush
+        ? async (_o, text) => {
+            pushes.push(text);
+          }
+        : undefined,
+      idleThresholdMs: 1000,
+      now: () => 1_000_000,
+    });
+    return { controller, orchId: o.id, agentId: agent!.id, escalations, pushes, headSent };
+  }
+
+  it("escalates a worker BLOCKED to the human, never pushing into the live pane", async () => {
+    const { controller, orchId, agentId, escalations, pushes, headSent } = await setup({
+      marker: BLOCKED_MARKER,
+      lastHumanAt: 1_000_000, // active
+      withPush: true,
+    });
+    await controller.onAgentSignal(orchId, agentId, { stopped: true });
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0].role).toBe("coder");
+    expect(pushes).toHaveLength(0);
+    // A managed head never gets a routine worker update pushed into its pane.
+    expect(headSent).toHaveLength(0);
+  });
+
+  it("pushes an advance turn when the head is idle and the dial is L2", async () => {
+    const { controller, orchId, agentId, escalations, pushes } = await setup({
+      marker: DONE_MARKER,
+      lastHumanAt: 0, // idle (now=1_000_000, threshold 1000)
+      autonomyLevel: "L2",
+      withPush: true,
+    });
+    await controller.onAgentSignal(orchId, agentId, { stopped: true });
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain("L2");
+    expect(pushes[0].toLowerCase()).toContain("advance");
+    expect(escalations).toHaveLength(0);
+  });
+
+  it("pulls (no push) when a worker finishes while the conversation is active", async () => {
+    const { controller, orchId, agentId, pushes, headSent } = await setup({
+      marker: DONE_MARKER,
+      lastHumanAt: 1_000_000, // active
+      autonomyLevel: "L2",
+      withPush: true,
+    });
+    await controller.onAgentSignal(orchId, agentId, { stopped: true });
+    expect(pushes).toHaveLength(0);
+    expect(headSent).toHaveLength(0);
+    // The transition is still recorded for the newsroom to pull.
+    const events = await store.readEvents(orchId);
+    expect(events.some((e) => e.kind === "head_notified")).toBe(true);
+  });
+
+  it("does not push at L1 even when idle (waits for the human's nod)", async () => {
+    const { controller, orchId, agentId, pushes } = await setup({
+      marker: DONE_MARKER,
+      lastHumanAt: 0,
+      autonomyLevel: "L1",
+      withPush: true,
+    });
+    await controller.onAgentSignal(orchId, agentId, { stopped: true });
+    expect(pushes).toHaveLength(0);
   });
 });
 

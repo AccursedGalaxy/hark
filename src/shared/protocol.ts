@@ -417,6 +417,11 @@ export interface Orchestration {
   // so the head pulls only what's new. Initialized to the promotion time so a
   // fresh head isn't flooded with pre-promotion history.
   newsCursor?: number;
+  // Last time the human submitted a prompt to the managed head (ms). Drives the
+  // idle-loop mode decision (§3.5): a worker transition routes to pull while
+  // the conversation is active, and to an autonomous advance-push once the
+  // human has been quiet past the idle threshold. Initialized to promotion time.
+  lastHumanAt?: number;
 }
 
 // Append-only event log entry. Decisions, checkpoints, blocks, handoffs,

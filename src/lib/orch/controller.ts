@@ -5,13 +5,15 @@ import {
 } from "./roles.js";
 import type { OrchStore } from "./store.js";
 import type { Orchestrator } from "./orchestrator.js";
-import type {
-  AgentLifecycle,
-  AgentMetrics,
-  AgentRole,
-  OrchAgent,
-  Orchestration,
-  TranscriptEvent,
+import {
+  DEFAULT_AUTONOMY_LEVEL,
+  type AgentLifecycle,
+  type AgentMetrics,
+  type AgentRole,
+  type AutonomyLevel,
+  type OrchAgent,
+  type Orchestration,
+  type TranscriptEvent,
 } from "../../shared/protocol.js";
 
 // The autonomy controller is the loop that lets agents run as agents: it
@@ -214,6 +216,61 @@ export function buildHeadNotification(n: HeadNotification): string {
   return lines.join("\n");
 }
 
+// ---- Managed PM-head routing (idle loop + escalation, spec §3.5/§3.6) -------
+
+// How a worker transition routes to a *managed* PM-head. The same event routes
+// differently by mode (recency of human input) and the autonomy dial:
+//   - blocker  → escalate to the human (tier 2; always, any mode/dial).
+//   - advance (done/handoff), active conversation → pull (the newsroom delta
+//     injected at the next human turn handles it — no push).
+//   - advance, idle + dial L2/L3 → push the head a turn so the team advances.
+//   - advance, idle + dial L0/L1 → none (wait for the human's nod).
+// A non-managed (task-scoped executor) head is out of scope here — it keeps the
+// legacy always-push behavior in notifyHead.
+export type HeadRouting =
+  | { type: "escalate" }
+  | { type: "push" }
+  | { type: "pull" }
+  | { type: "none" };
+
+export interface HeadRoutingInput {
+  managed: boolean;
+  marker: MarkerKind;
+  autonomyLevel: AutonomyLevel;
+  // Human has been quiet past the idle threshold (no recent prompt to the head).
+  idle: boolean;
+}
+
+const ADVANCING_LEVELS = new Set<AutonomyLevel>(["L2", "L3"]);
+
+export function decideHeadRouting(input: HeadRoutingInput): HeadRouting {
+  if (!input.managed) return { type: "none" };
+  if (input.marker === "blocked") return { type: "escalate" };
+  // Pipeline advance (done / handoff).
+  if (!input.idle) return { type: "pull" };
+  return ADVANCING_LEVELS.has(input.autonomyLevel)
+    ? { type: "push" }
+    : { type: "none" };
+}
+
+// The turn pushed to an idle managed head so the pipeline advances on its own
+// (tier 3). Event-driven (one message, then the head yields) — never a blocking
+// watch — so the human's input always interleaves at the next turn boundary.
+export function buildAdvancePush(
+  n: HeadNotification,
+  autonomyLevel: AutonomyLevel,
+): string {
+  const stat = n.diffstat && n.diffstat.trim().length > 0 ? n.diffstat : "no diff yet";
+  return [
+    `[idle advance · autonomy ${autonomyLevel}] ${n.role} (${n.agentId}) on \`${n.branch}\` ${MARKER_VERB[n.marker]}.`,
+    `diff: ${stat} · ${n.commitCount} commit${n.commitCount === 1 ? "" : "s"}`,
+    n.summary.trim().length > 0 ? `summary: ${n.summary.trim()}` : "",
+    "You are idle and the dial permits autonomous advance. Move the pipeline forward: review the diff, dispatch the next stage (e.g. a tester on this branch) or prepare a PR, and update PLAN. Escalate blockers to the human; never land work yourself. Then yield — the human's next message will interleave.",
+  ]
+    .filter((l) => l.length > 0)
+    .join("\n");
+}
+
 // The message sent when nudging an agent that stopped without finishing.
 export function buildNudge(): string {
   return [
@@ -247,11 +304,30 @@ export interface ControllerDeps {
     orch: Orchestration,
     agent: OrchAgent,
   ) => Promise<{ diffstat: string; commitCount: number }>;
+  // ---- managed PM-head routing (idle loop + escalation, §3.5/§3.6) ----
+  // Page the human about a worker blocker (tier 2) through hark's attention
+  // layer — the same path a solo session going ASKING uses. Always wired (it
+  // doesn't type keystrokes). Absent → no escalation.
+  escalateToHuman?: (
+    orch: Orchestration,
+    agent: OrchAgent,
+    reason: string,
+  ) => Promise<void>;
+  // Push the managed head a single "advance" turn when it's idle and the dial
+  // permits (tier 3). Provided ONLY when active autonomy is enabled
+  // (HARK_ORCH_AUTONOMY=1), since it types into the session. Absent → no push.
+  pushHeadTurn?: (orch: Orchestration, text: string) => Promise<void>;
+  // How long the human must be quiet before the head is "idle" (ms).
+  idleThresholdMs?: number;
   now?: () => number;
   maxNudges?: number;
 }
 
 const DEFAULT_MAX_NUDGES = 3;
+// Default idle threshold: no human prompt to the head for 90s → idle. The idle
+// loop pushes the head an advance turn only past this, so a momentary pause in
+// an active conversation never triggers an autonomous push.
+const DEFAULT_IDLE_MS = 90_000;
 
 export class AutonomyController {
   constructor(private readonly deps: ControllerDeps) {}
@@ -305,22 +381,57 @@ export class AutonomyController {
     await this.perform(orch.id, agent, action);
 
     // Head-session model: when a worker actually TRANSITIONS to a state the
-    // head must act on (done/blocked/review), forward a compact notification to
-    // the head. Gated on a real transition so the reconcile tick can't spam the
-    // head every 3s while an agent sits blocked.
+    // head must act on (done/blocked/review), build a compact notification.
+    // Gated on a real transition so the reconcile tick can't spam every 3s
+    // while an agent sits blocked. For a task-scoped executor head this pushes
+    // into its pane; for a managed PM-head it records the event and ROUTES by
+    // mode + dial (escalate / idle-push / pull) per §3.5.
     if (
       action.type === "set_lifecycle" &&
       action.lifecycle !== prevLifecycle &&
       (action.lifecycle === "done" ||
         action.lifecycle === "blocked" ||
         action.lifecycle === "review") &&
-      orch.head &&
-      this.deps.sendToHead
+      orch.head
     ) {
-      await this.notifyHead(orch, agent, scan);
+      const note = await this.notifyHead(orch, agent, scan);
+      if (orch.managed && note) {
+        await this.routeManagedHead(orch, agent, note);
+      }
     }
 
     return action;
+  }
+
+  // Whether the managed head's human has been quiet long enough to be "idle".
+  private isHeadIdle(orch: Orchestration): boolean {
+    const threshold = this.deps.idleThresholdMs ?? DEFAULT_IDLE_MS;
+    const last = orch.lastHumanAt ?? orch.createdAt;
+    return this.now() - last > threshold;
+  }
+
+  // Route a worker transition for a managed PM-head: page the human on a
+  // blocker, push an advance turn when idle + dial permits, else let the
+  // newsroom pull handle it.
+  private async routeManagedHead(
+    orch: Orchestration,
+    agent: OrchAgent,
+    note: HeadNotification,
+  ): Promise<void> {
+    const routing = decideHeadRouting({
+      managed: true,
+      marker: note.marker,
+      autonomyLevel: orch.autonomyLevel ?? DEFAULT_AUTONOMY_LEVEL,
+      idle: this.isHeadIdle(orch),
+    });
+    if (routing.type === "escalate" && this.deps.escalateToHuman) {
+      await this.deps.escalateToHuman(orch, agent, note.summary);
+    } else if (routing.type === "push" && this.deps.pushHeadTurn) {
+      await this.deps.pushHeadTurn(
+        orch,
+        buildAdvancePush(note, orch.autonomyLevel ?? DEFAULT_AUTONOMY_LEVEL),
+      );
+    }
   }
 
   // Build and deliver a worker→head notification. The git summary is best-
@@ -330,8 +441,8 @@ export class AutonomyController {
     orch: Orchestration,
     agent: OrchAgent,
     scan: MarkerScan,
-  ): Promise<void> {
-    if (!orch.head || !this.deps.sendToHead) return;
+  ): Promise<HeadNotification | null> {
+    if (!orch.head) return null;
     let diffstat = "";
     let commitCount = 0;
     if (this.deps.agentGitSummary) {
@@ -343,7 +454,7 @@ export class AutonomyController {
         /* best-effort */
       }
     }
-    const text = buildHeadNotification({
+    const note: HeadNotification = {
       role: agent.role,
       agentId: agent.id,
       branch: agent.branch,
@@ -351,15 +462,14 @@ export class AutonomyController {
       summary: scan.summary,
       diffstat,
       commitCount,
-    });
-    // A managed PM-head consumes worker updates by PULL — the newsroom delta
-    // injected at the next turn boundary (§3.5 routine→pull). Pushing into its
-    // live pane would force-type into an active conversation, which the harness
-    // forbids; the idle loop (Phase C) is the only path that pushes a managed
-    // head, and only when it's idle + the dial permits. A task-scoped executor
-    // head keeps the original push behavior.
-    if (!orch.managed) {
-      await this.deps.sendToHead(orch, text);
+    };
+    // A managed PM-head never gets a routine worker update pushed into its live
+    // pane — that would force-type into an active conversation. It consumes
+    // updates by PULL (newsroom at the next turn) or, when idle + the dial
+    // permits, via routeManagedHead's advance push. A task-scoped executor head
+    // keeps the original always-push behavior.
+    if (!orch.managed && this.deps.sendToHead) {
+      await this.deps.sendToHead(orch, buildHeadNotification(note));
     }
     await this.deps.store.appendEvent({
       ts: this.now(),
@@ -369,6 +479,7 @@ export class AutonomyController {
       message: `head notified: ${agent.role} → ${scan.kind ?? "update"}`,
       data: { marker: scan.kind, pushed: !orch.managed },
     });
+    return note;
   }
 
   // The head's counterpart to onAgentSignal. The head is a coordinator, not a

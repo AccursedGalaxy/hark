@@ -186,6 +186,9 @@ export class OrchStore {
       // Start the newsroom cursor at promotion time so the first head turn
       // isn't flooded with any pre-promotion orchestration history.
       newsCursor: now,
+      // Just promoted = in active conversation; the idle loop only kicks in
+      // after the human has been quiet past the idle threshold.
+      lastHumanAt: now,
     };
     await this.writeRecord(o);
     await this.appendEvent({

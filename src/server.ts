@@ -50,10 +50,12 @@ import {
   renderNewsForInjection,
   type NewsItem,
 } from "./lib/orch/newsroom.js";
-import type {
-  AgentRole,
-  OrchAgent,
-  Orchestration,
+import {
+  AUTONOMY_LEVELS,
+  type AgentRole,
+  type AutonomyLevel,
+  type OrchAgent,
+  type Orchestration,
 } from "./shared/protocol.js";
 import { applyManagedBlock } from "./lib/claudemdBlock.js";
 import { appendCapture } from "./lib/projectCapture.js";
@@ -380,6 +382,47 @@ const orchController = new AutonomyController({
       baseRef: orch.baseRef,
       branch: agent.branch,
     }),
+  // Blocker → human (tier 2): page the user through the existing attention
+  // layer — the same path that flags a solo session going ASKING — by recording
+  // a needs-you Notification on the head's session and broadcasting it. Doesn't
+  // type into any session, so it's wired regardless of the autonomy flag.
+  escalateToHuman: async (orch, agent, reason) => {
+    const headSession = orch.head?.sessionId;
+    if (!headSession) return;
+    const msg = `Worker ${agent.role} is BLOCKED in "${orch.name}": ${
+      reason?.trim() || "needs a decision"
+    } — tell the head how to redirect.`;
+    const broadcast = promptState.record({
+      session_id: headSession,
+      hook_event_name: "Notification",
+      notification_type: "idle_prompt",
+      message: msg,
+    });
+    if (broadcast) broadcastHook(broadcast);
+    await orchStore.appendEvent({
+      ts: Date.now(),
+      orchestrationId: orch.id,
+      agentId: agent.id,
+      kind: "note",
+      message: `escalated blocker to human: ${agent.role}`,
+      data: { kind: "blocker_escalation" },
+    });
+  },
+  // Idle advance (tier 3): push the managed head one turn so the pipeline moves
+  // while the human is away. Types into the session, so it's wired ONLY under
+  // active autonomy (HARK_ORCH_AUTONOMY=1) — undefined otherwise → no push.
+  pushHeadTurn: ORCH_AUTONOMY
+    ? async (orch, text) => {
+        await sendToHead(orch, text);
+        await orchStore.appendEvent({
+          ts: Date.now(),
+          orchestrationId: orch.id,
+          kind: "note",
+          message: "idle-loop advance push",
+          data: { kind: "idle_advance" },
+        });
+      }
+    : undefined,
 });
 
 type HookSubscriber = (ev: HookBroadcast) => void;
@@ -1065,6 +1108,30 @@ app.get("/api/head/resolve", async (req, res) => {
   res.json({ orchId: orch.id, role: "head" });
 });
 
+// Set the per-project autonomy dial (spec §3.6) on a managed head. The `hark
+// head autonomy <level>` CLI and the dashboard POST here.
+app.post("/api/orchestrations/:id/autonomy", async (req, res) => {
+  const level = (req.body as { level?: unknown })?.level;
+  if (
+    typeof level !== "string" ||
+    !(AUTONOMY_LEVELS as string[]).includes(level)
+  ) {
+    res
+      .status(400)
+      .json({ error: `level must be one of: ${AUTONOMY_LEVELS.join(", ")}` });
+    return;
+  }
+  const updated = await orchStore.setAutonomyLevel(
+    req.params.id,
+    level as AutonomyLevel,
+  );
+  if (!updated) {
+    res.status(404).json({ error: "orchestration not found" });
+    return;
+  }
+  res.json({ ok: true, autonomyLevel: updated.autonomyLevel });
+});
+
 app.post("/api/orchestrations/:id/teardown", async (req, res) => {
   try {
     const orchestration = await orchStore.getOrchestration(req.params.id);
@@ -1431,6 +1498,16 @@ async function handleDecisionHook(
   }
 
   if (event === "UserPromptSubmit") {
+    // A human prompt to the head resets the idle clock (§3.5 mode = recency of
+    // human input): worker transitions route to pull while the conversation is
+    // active, and only to an autonomous push once this goes quiet.
+    await orchStore.updateOrchestration(
+      managed.orchId,
+      (o) => {
+        o.lastHumanAt = Date.now();
+      },
+      false,
+    );
     // Pull the newsroom delta since the head was last shown, advance its
     // cursor, and inject the news as additionalContext at the top of the turn.
     // This is the routine→pull path (§3.5): non-interrupting, reliable.
