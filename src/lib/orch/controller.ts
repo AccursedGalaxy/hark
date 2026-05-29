@@ -243,6 +243,10 @@ export interface BreakerInput {
 export interface BreakerDecision {
   tripped: boolean;
   reason?: string;
+  // Which trigger fired (only meaningful when tripped). The controller gates ONLY
+  // `no_progress` on the stuck-judge; `signature` and `hard_ceiling` stay
+  // immediate auto-kills, never gated on a judge.
+  trigger?: "signature" | "no_progress" | "hard_ceiling";
   // Always returned — persisted onto the agent so the next tick measures
   // against it.
   snapshot: BreakerState;
@@ -289,6 +293,14 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     prior.progressKey !== progressKey;
   const baseline = sigReset ? repeatCount : prior.baseline;
 
+  // The stuck-judge flag lives on the no-progress window: carry it forward while
+  // the window holds (committed diff unchanged), drop it the moment the window
+  // resets (worker advanced its diff -> resumed real progress). This makes
+  // "re-judge only once per window" and "clear the flag on recovery" fall out of
+  // the same reset the no-progress trigger already keys on.
+  const flaggedAt = progressReset ? undefined : prior?.flaggedAt;
+  const flaggedReason = progressReset ? undefined : prior?.flaggedReason;
+
   // Always carry every window's bookkeeping forward, regardless of which (if
   // any) trigger fires this tick.
   const snapshot: BreakerState = {
@@ -298,6 +310,8 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     diffKey,
     progressTurns,
     progressToolCalls,
+    flaggedAt,
+    flaggedReason,
   };
 
   // Trigger 3 (checked first — it's the hard guarantee): an absolute ceiling on
@@ -306,6 +320,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
   if (turns >= hardTurnCeiling) {
     return {
       tripped: true,
+      trigger: "hard_ceiling",
       reason: `circuit-breaker: hard ceiling — ${turns} turns ≥ ${hardTurnCeiling} (no worker may burn unbounded, progress or not)`,
       snapshot,
     };
@@ -313,6 +328,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
   if (tokens >= hardTokenCeiling) {
     return {
       tripped: true,
+      trigger: "hard_ceiling",
       reason: `circuit-breaker: hard ceiling — ${tokens} tokens ≥ ${hardTokenCeiling} (no worker may burn unbounded, progress or not)`,
       snapshot,
     };
@@ -326,6 +342,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     if (turnStreak >= noProgressTurns) {
       return {
         tripped: true,
+        trigger: "no_progress",
         reason: `circuit-breaker: ${turnStreak} turns with no committed-diff progress (varied-probe spiral)`,
         snapshot,
       };
@@ -334,6 +351,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     if (callStreak >= noProgressToolCalls) {
       return {
         tripped: true,
+        trigger: "no_progress",
         reason: `circuit-breaker: ${callStreak} tool calls with no committed-diff progress (varied-probe spiral)`,
         snapshot,
       };
@@ -346,6 +364,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     if (streak >= limit) {
       return {
         tripped: true,
+        trigger: "signature",
         reason: `circuit-breaker: ${repeatCount} consecutive identical no-op commands with no new commits or diff (\`${truncateSignature(signature)}\`)`,
         snapshot,
       };

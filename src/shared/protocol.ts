@@ -341,6 +341,14 @@ export interface BreakerState {
   // progress-based trigger. Optional for the same forward-compat reason.
   progressTurns?: number;
   progressToolCalls?: number;
+  // Set when the Haiku stuck-judge flagged this worker (verdict stuck/drifting)
+  // after the no-progress trigger fired. The worker is NOT killed on a flag — it
+  // stays `running`, surfaced in `orch status` with `flaggedReason`, the PM woken
+  // once. Both fields live on the no-progress window so they CLEAR the moment that
+  // window resets (committed diff moved -> real progress). While set they also gate
+  // re-judging: the judge runs only once per no-progress window.
+  flaggedAt?: number;
+  flaggedReason?: string;
 }
 
 export function emptyAgentMetrics(): AgentMetrics {
@@ -566,6 +574,11 @@ export interface AgentStatusLine {
   // (a human question or a tripped circuit-breaker). Surfaced so `orch status`
   // tells the PM WHY without a separate lookup.
   reason?: string;
+  // The Haiku stuck-judge's reason when a still-RUNNING worker has been flagged.
+  // Distinct from `reason` (terminal): a flagged worker keeps running, so the PM
+  // sees the flag and can steer or stop it. Cleared once the worker resumes
+  // committed progress.
+  flaggedReason?: string;
 }
 
 export interface HeadStatusLine {
