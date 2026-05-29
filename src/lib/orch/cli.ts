@@ -47,6 +47,7 @@ export type RenderKind =
   | "diff"
   | "log"
   | "watch"
+  | "set-base"
   | "promote"
   | "autonomy"
   | "pr";
@@ -64,6 +65,7 @@ const USAGE = `hark — orchestration head CLI
   hark head autonomy <L0|L1|L2|L3>          set the project's autonomy dial
   hark orch status                          show every agent + the head (compact)
   hark orch watch                           block until the next event, print it, exit
+  hark orch set-base <ref>                  re-point the orchestration's base branch
   hark agent spawn <role> --task "…" [--depends-on <id>]   spawn a worker (head only)
   hark agent send  <id> "<message>"         steer a worker
   hark agent brief <id> "<task>"            assign a worker its next task
@@ -191,6 +193,20 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
           path: `/api/orchestrations/${env.orchId}/events?wait=1`,
         },
         render: "watch",
+      };
+    }
+    if (sub === "set-base") {
+      if (!env.orchId) return err("HARK_ORCH_ID is not set");
+      const ref = rest[0];
+      if (!ref) return err("set-base needs a ref: hark orch set-base <ref>");
+      return {
+        kind: "request",
+        request: {
+          method: "POST",
+          path: `/api/orchestrations/${env.orchId}/base`,
+          body: { baseRef: ref },
+        },
+        render: "set-base",
       };
     }
     return err(`unknown orch command: ${sub ?? "(none)"}`);
@@ -367,6 +383,8 @@ export function renderResponse(render: RenderKind, data: unknown): string {
     }
     case "autonomy":
       return d.ok ? `autonomy → ${d.autonomyLevel}` : JSON.stringify(d);
+    case "set-base":
+      return d.ok ? `base set to ${d.baseRef}` : JSON.stringify(d);
     case "pr": {
       const result = d.result as PrResult | undefined;
       return result ? renderPrResult(result) : JSON.stringify(d);

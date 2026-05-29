@@ -264,6 +264,28 @@ export class OrchStore {
     return updated;
   }
 
+  // Re-point an existing orchestration's base branch. promoteSession only sets
+  // baseRef on create, so this is the only way to move a managed head off a
+  // stale base (e.g. onto `main`) without recreating the orchestration.
+  async setBaseRef(
+    orchId: string,
+    baseRef: string,
+  ): Promise<Orchestration | undefined> {
+    const updated = await this.updateOrchestration(orchId, (o) => {
+      o.baseRef = baseRef;
+    });
+    if (updated) {
+      await this.appendEvent({
+        ts: Date.now(),
+        orchestrationId: orchId,
+        kind: "note",
+        message: `base ref → ${baseRef}`,
+        data: { baseRef },
+      });
+    }
+    return updated ?? undefined;
+  }
+
   async getOrchestration(id: string): Promise<Orchestration | null> {
     try {
       const raw = await fs.readFile(this.recordPath(id), "utf8");
