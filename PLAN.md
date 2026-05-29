@@ -9,14 +9,15 @@ contract in italics — those lines are binding.*
 *What this project is for. 2–4 sentences. Slow-changing — only edit when
 the vision actually shifts.*
 
-hark is a notification and remote-control hub for Claude Code sessions running on this host. It reads `~/.claude/sessions/*.json` + per-session transcript JSONL and drives sessions via `tmux send-keys`, so any active session is reachable from any device on the tailnet without replacing the TUI. The point is attention triage and full mobile control — coexistence with terminal use, not replacement.
+hark is a notification and remote-control hub for Claude Code sessions running on this host. It reads `~/.claude/sessions/*.json` + per-session transcript JSONL and drives sessions via `tmux send-keys`, so any active session is reachable from any device on the tailnet without replacing the TUI. The point is attention triage and full mobile control — coexistence with terminal use, not replacement. On top of that single-session control, hark is growing an **orchestration layer**: running multiple sessions as a coordinated team of role-playing agents (Researcher/Coder/Tester/Documenter/Reviewer), each in an isolated git worktree, driven autonomously via the same tmux path — turning hark into a power tool for managing a whole project's worth of agents.
 
 ## Now
 
 *Active threads being shipped right now. Hard cap: 3 items. One bullet
 per thread; one line of context allowed beneath it.*
 
-- (none)
+- **Orchestration layer** (branch `orchestration`) — multi-agent glue on the existing foundation. Foundation landed: hardened tmux send path, `git worktree` isolation lib, 5 role charters + briefing builder, file-backed store + event log. See `docs/orchestration.md`.
+  Next: server endpoints to spawn/list orchestrations → autonomy controller (Stop-hook marker scanning) → frontend dashboard. All tested (430 green); not yet merged to main.
 
 ## Next
 
@@ -27,6 +28,9 @@ or out of the doc.*
 - **Capture modal: image attachment** — drag-and-drop and Ctrl+V paste in the capture textarea, mirroring the session composer's upload flow.
 - **Passive "modified by another session" indicator** — `PlanPanel` shows a small dot when `planMtime` advanced since this view's last fetch. Designed-but-deferred during the project-state build.
 - **Web Push** — service worker + VAPID for closed-app mobile notifications. Last open item from the original Phase 2+ list.
+- **Orchestration: server endpoints** — `POST /api/orchestrations` (create + spawn agents into worktrees via the existing `spawnClaudeSession`), `GET /api/orchestrations[/:id]`, agent lifecycle + event-log reads. Wire `OrchStore` into `server.ts`.
+- **Orchestration: autonomy controller** — on `Stop`/`SubagentStop` hook for an orchestration-owned session, scan the transcript tail for `[[HARK:DONE/BLOCKED/HANDOFF]]` markers (`src/lib/orch/roles.ts`) and advance/nudge/block the agent; bounded self-review loop; record interventions + metrics into `events.jsonl`.
+- **Orchestration: frontend** — orchestration dashboard (agents, lifecycle, live metrics/cost/autonomy time), spawn flow, and per-orchestration event-log timeline. New `useOrchestrations` hook mirroring `useSessions`.
 
 ## Shipped
 

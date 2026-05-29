@@ -21,7 +21,7 @@ import {
   readRecentDirs,
   recordSpawnedDir,
 } from "./lib/recentDirs.js";
-import { sendKey, sendLiteral, sendText } from "./lib/sendKeys.js";
+import { sendInput, sendKey } from "./lib/sendKeys.js";
 import { discoverCommands } from "./lib/slashCommands.js";
 import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
@@ -499,19 +499,13 @@ app.post("/api/sessions/:id/send", async (req, res) => {
 
   try {
     if (typeof body.text === "string" || Array.isArray(body.attachments)) {
-      const atts = (body.attachments ?? []).filter(
-        (p): p is string => typeof p === "string" && p.length > 0,
-      );
-      for (const p of atts) {
-        await sendLiteral(pane.socket, pane.paneId, `@${p} `);
-      }
-      const text = typeof body.text === "string" ? body.text : "";
-      if (text.length > 0) {
-        await sendText(pane.socket, pane.paneId, text);
-      }
-      if (body.submit !== false) {
-        await sendKey(pane.socket, pane.paneId, "Enter");
-      }
+      // Whole payload (attachments → text → Enter) goes through one atomic,
+      // pane-locked, copy-mode-safe send so concurrent clients can't interleave.
+      await sendInput(pane.socket, pane.paneId, {
+        attachments: body.attachments,
+        text: body.text,
+        submit: body.submit,
+      });
     } else if (typeof body.key === "string") {
       await sendKey(pane.socket, pane.paneId, body.key);
     } else {

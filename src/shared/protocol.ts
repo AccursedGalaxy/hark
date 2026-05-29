@@ -235,6 +235,133 @@ export const STATE_LABEL: Record<SessionState, string> = {
   dead: "idle",
 };
 
+// ---- Orchestration ----
+//
+// An orchestration is a named mission against one project (git repo), worked
+// by a set of role-playing agents. Each agent is an ordinary Claude Code
+// session driven via tmux (the unchanged interaction model), but pinned to its
+// own isolated git worktree + branch so agents never collide on the working
+// tree. These shapes cross the HTTP/SSE seam to the orchestration UI; the
+// charters/briefings that *drive* the roles live server-side in lib/orch.
+
+export type AgentRole =
+  | "researcher"
+  | "coder"
+  | "tester"
+  | "documenter"
+  | "reviewer";
+
+// Where an agent is in its lifecycle. Distinct from a session's live/idle
+// status: this tracks the agent's progress through the orchestration, derived
+// from worktree/spawn steps + the autonomy markers it prints.
+export type AgentLifecycle =
+  | "pending" // record created, worktree not yet made
+  | "spawning" // worktree ready, tmux session launching
+  | "running" // actively working toward its definition of done
+  | "blocked" // printed BLOCKED — needs a human decision
+  | "review" // work handed off, awaiting review
+  | "done" // printed DONE and self-reviewed
+  | "failed" // errored or abandoned
+  | "cancelled"; // stopped by the user
+
+// Per-agent metrics, accumulated from the transcript (tokens/cost) and the
+// lifecycle timeline (autonomy time, interventions). The "document everything"
+// half of the brief — these power the orchestration dashboard.
+export interface AgentMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number;
+  // Wall-clock the agent has spent running autonomously (ms), excluding time
+  // spent blocked on a human.
+  autonomyMs: number;
+  // How many times a human had to step in (blocked → resumed).
+  interventions: number;
+  // Assistant turns taken.
+  turns: number;
+}
+
+export function emptyAgentMetrics(): AgentMetrics {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    costUsd: 0,
+    autonomyMs: 0,
+    interventions: 0,
+    turns: 0,
+  };
+}
+
+export interface OrchAgent {
+  id: string;
+  orchestrationId: string;
+  role: AgentRole;
+  // Isolated branch + worktree directory this agent owns.
+  branch: string;
+  worktreeDir: string;
+  // Claude Code session id once the spawned process registers itself; null
+  // until then. PID is captured at spawn so the agent can be correlated to its
+  // session/pane even before the session id exists.
+  sessionId: string | null;
+  pid: number | null;
+  lifecycle: AgentLifecycle;
+  createdAt: number;
+  updatedAt: number;
+  // Set when lifecycle is "blocked" — the question the agent is waiting on.
+  blockedReason?: string;
+  metrics: AgentMetrics;
+}
+
+export type OrchestrationStatus =
+  | "active"
+  | "completed"
+  | "archived"
+  | "failed";
+
+export interface Orchestration {
+  id: string;
+  name: string;
+  goal: string;
+  // Absolute repo root (matches ProjectInfo.key) and its display basename.
+  projectRoot: string;
+  projectName: string;
+  // Ref agents branch from (e.g. "main" or a feature branch).
+  baseRef: string;
+  status: OrchestrationStatus;
+  createdAt: number;
+  updatedAt: number;
+  agents: OrchAgent[];
+}
+
+// Append-only event log entry. Decisions, checkpoints, blocks, handoffs,
+// failures, and metric snapshots all flow through one ordered JSONL stream per
+// orchestration — the session log / audit trail the brief asks for.
+export type OrchEventKind =
+  | "orchestration_created"
+  | "orchestration_status"
+  | "agent_spawned"
+  | "agent_lifecycle"
+  | "decision"
+  | "checkpoint"
+  | "blocked"
+  | "handoff"
+  | "failure"
+  | "metric"
+  | "note";
+
+export interface OrchEvent {
+  ts: number;
+  orchestrationId: string;
+  agentId?: string;
+  kind: OrchEventKind;
+  message: string;
+  // Arbitrary structured payload (e.g. a metric delta, a decision's options).
+  data?: unknown;
+}
+
 // ---- Transcript events (exactly what /api/sessions/:id/transcript returns) ----
 
 export type ContentBlock =

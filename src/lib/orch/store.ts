@@ -1,0 +1,300 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { randomBytes } from "node:crypto";
+import {
+  emptyAgentMetrics,
+  type AgentLifecycle,
+  type AgentRole,
+  type OrchAgent,
+  type OrchEvent,
+  type Orchestration,
+  type OrchestrationStatus,
+} from "../../shared/protocol.js";
+
+// File-backed persistence for orchestrations. Mirrors hark's "everything is a
+// file, no database" philosophy: each orchestration is a directory under
+// ~/.hark/orchestrations/<id>/ holding its record (orchestration.json) and an
+// append-only event log (events.jsonl). The log is the audit trail the brief
+// asks for — decisions, checkpoints, blocks, failures, metric snapshots, in
+// order, never rewritten.
+
+export function defaultOrchDir(): string {
+  return (
+    process.env.HARK_ORCH_DIR ||
+    path.join(os.homedir(), ".hark", "orchestrations")
+  );
+}
+
+const RECORD_FILE = "orchestration.json";
+const EVENTS_FILE = "events.jsonl";
+
+// Short, time-sortable, collision-resistant id. Lexicographically increasing
+// (base36 ms timestamp) so a plain readdir sorts oldest→newest, with random
+// suffix to disambiguate ids minted in the same millisecond.
+function genId(prefix: string): string {
+  const t = Date.now().toString(36);
+  const r = randomBytes(3).toString("hex");
+  return `${prefix}-${t}-${r}`;
+}
+
+export interface CreateOrchestrationInput {
+  name: string;
+  goal: string;
+  projectRoot: string;
+  projectName: string;
+  baseRef?: string;
+}
+
+export interface CreateAgentInput {
+  role: AgentRole;
+  branch: string;
+  worktreeDir: string;
+  pid?: number | null;
+  sessionId?: string | null;
+  lifecycle?: AgentLifecycle;
+}
+
+export class OrchStore {
+  private readonly rootDir: string;
+  // Per-orchestration write lock so concurrent read-modify-write cycles on the
+  // same record can't clobber each other. Keyed by id; same chaining pattern
+  // as the tmux pane lock.
+  private readonly locks = new Map<string, Promise<void>>();
+
+  constructor(rootDir?: string) {
+    this.rootDir = rootDir ?? defaultOrchDir();
+  }
+
+  private dir(id: string): string {
+    return path.join(this.rootDir, id);
+  }
+  private recordPath(id: string): string {
+    return path.join(this.dir(id), RECORD_FILE);
+  }
+  private eventsPath(id: string): string {
+    return path.join(this.dir(id), EVENTS_FILE);
+  }
+
+  private async withLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const prior = this.locks.get(id) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((res) => (release = res));
+    const tail = prior.then(() => mine);
+    this.locks.set(id, tail);
+    try {
+      await prior;
+      return await fn();
+    } finally {
+      release();
+      if (this.locks.get(id) === tail) this.locks.delete(id);
+    }
+  }
+
+  // Atomic JSON write: temp file in the same dir + rename, so a reader never
+  // observes a half-written record even if the process dies mid-write.
+  private async writeRecord(o: Orchestration): Promise<void> {
+    const dir = this.dir(o.id);
+    await fs.mkdir(dir, { recursive: true });
+    const tmp = path.join(dir, `.${RECORD_FILE}.${randomBytes(4).toString("hex")}`);
+    await fs.writeFile(tmp, JSON.stringify(o, null, 2), "utf8");
+    await fs.rename(tmp, this.recordPath(o.id));
+  }
+
+  async createOrchestration(
+    input: CreateOrchestrationInput,
+  ): Promise<Orchestration> {
+    const now = Date.now();
+    const o: Orchestration = {
+      id: genId("orch"),
+      name: input.name,
+      goal: input.goal,
+      projectRoot: input.projectRoot,
+      projectName: input.projectName,
+      baseRef: input.baseRef ?? "HEAD",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      agents: [],
+    };
+    await this.writeRecord(o);
+    await this.appendEvent({
+      ts: now,
+      orchestrationId: o.id,
+      kind: "orchestration_created",
+      message: `Orchestration "${o.name}" created for ${o.projectName}`,
+      data: { goal: o.goal, baseRef: o.baseRef },
+    });
+    return o;
+  }
+
+  async getOrchestration(id: string): Promise<Orchestration | null> {
+    try {
+      const raw = await fs.readFile(this.recordPath(id), "utf8");
+      return JSON.parse(raw) as Orchestration;
+    } catch {
+      return null;
+    }
+  }
+
+  async listOrchestrations(): Promise<Orchestration[]> {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(this.rootDir);
+    } catch {
+      return [];
+    }
+    const out: Orchestration[] = [];
+    await Promise.all(
+      entries.map(async (id) => {
+        const o = await this.getOrchestration(id);
+        if (o) out.push(o);
+      }),
+    );
+    // Newest first.
+    out.sort((a, b) => b.createdAt - a.createdAt);
+    return out;
+  }
+
+  // Read-modify-write under the per-id lock. Returns the updated record, or
+  // null if the orchestration doesn't exist. `bumpUpdatedAt` defaults true.
+  async updateOrchestration(
+    id: string,
+    mutate: (o: Orchestration) => void,
+    bumpUpdatedAt = true,
+  ): Promise<Orchestration | null> {
+    return this.withLock(id, async () => {
+      const o = await this.getOrchestration(id);
+      if (!o) return null;
+      mutate(o);
+      if (bumpUpdatedAt) o.updatedAt = Date.now();
+      await this.writeRecord(o);
+      return o;
+    });
+  }
+
+  async setStatus(
+    id: string,
+    status: OrchestrationStatus,
+  ): Promise<Orchestration | null> {
+    const updated = await this.updateOrchestration(id, (o) => {
+      o.status = status;
+    });
+    if (updated) {
+      await this.appendEvent({
+        ts: Date.now(),
+        orchestrationId: id,
+        kind: "orchestration_status",
+        message: `Orchestration status → ${status}`,
+      });
+    }
+    return updated;
+  }
+
+  async addAgent(
+    orchId: string,
+    input: CreateAgentInput,
+  ): Promise<OrchAgent | null> {
+    const now = Date.now();
+    const agent: OrchAgent = {
+      id: genId("agent"),
+      orchestrationId: orchId,
+      role: input.role,
+      branch: input.branch,
+      worktreeDir: input.worktreeDir,
+      sessionId: input.sessionId ?? null,
+      pid: input.pid ?? null,
+      lifecycle: input.lifecycle ?? "pending",
+      createdAt: now,
+      updatedAt: now,
+      metrics: emptyAgentMetrics(),
+    };
+    const updated = await this.updateOrchestration(orchId, (o) => {
+      o.agents.push(agent);
+    });
+    if (!updated) return null;
+    await this.appendEvent({
+      ts: now,
+      orchestrationId: orchId,
+      agentId: agent.id,
+      kind: "agent_spawned",
+      message: `${agent.role} agent created on ${agent.branch}`,
+      data: { worktreeDir: agent.worktreeDir },
+    });
+    return agent;
+  }
+
+  async updateAgent(
+    orchId: string,
+    agentId: string,
+    mutate: (a: OrchAgent) => void,
+  ): Promise<OrchAgent | null> {
+    let result: OrchAgent | null = null;
+    await this.updateOrchestration(orchId, (o) => {
+      const a = o.agents.find((x) => x.id === agentId);
+      if (!a) return;
+      mutate(a);
+      a.updatedAt = Date.now();
+      result = a;
+    });
+    return result;
+  }
+
+  // Convenience for the most common agent mutation — a lifecycle transition,
+  // logged to the event stream so the timeline is complete.
+  async setAgentLifecycle(
+    orchId: string,
+    agentId: string,
+    lifecycle: AgentLifecycle,
+    opts: { reason?: string } = {},
+  ): Promise<OrchAgent | null> {
+    const a = await this.updateAgent(orchId, agentId, (agent) => {
+      agent.lifecycle = lifecycle;
+      if (lifecycle === "blocked") agent.blockedReason = opts.reason;
+      else delete agent.blockedReason;
+    });
+    if (a) {
+      await this.appendEvent({
+        ts: Date.now(),
+        orchestrationId: orchId,
+        agentId,
+        kind: "agent_lifecycle",
+        message: `${a.role} → ${lifecycle}${opts.reason ? `: ${opts.reason}` : ""}`,
+      });
+    }
+    return a;
+  }
+
+  // Append one event to the orchestration's JSONL log. O_APPEND keeps
+  // concurrent appends from interleaving mid-line (kernel-atomic for the small
+  // single-line writes we do here), matching projectCapture's approach.
+  async appendEvent(event: OrchEvent): Promise<void> {
+    const dir = this.dir(event.orchestrationId);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.appendFile(
+      this.eventsPath(event.orchestrationId),
+      JSON.stringify(event) + "\n",
+      "utf8",
+    );
+  }
+
+  async readEvents(orchId: string): Promise<OrchEvent[]> {
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.eventsPath(orchId), "utf8");
+    } catch {
+      return [];
+    }
+    const out: OrchEvent[] = [];
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        out.push(JSON.parse(t) as OrchEvent);
+      } catch {
+        /* skip a corrupt line rather than failing the whole read */
+      }
+    }
+    return out;
+  }
+}
