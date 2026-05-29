@@ -400,6 +400,20 @@ export function Composer({
   const onKeyDown = (e: React.KeyboardEvent) => {
     noteKeyForHardwareDetection(e);
     if (slashMenu.onKeyDown(e)) return;
+    // Alt+Enter inserts a literal newline at the caret instead of submitting,
+    // matching the Claude Code CLI. Alt+Enter does not insert a newline
+    // natively, so splice it into the controlled value and restore the caret.
+    if (e.key === "Enter" && e.altKey) {
+      e.preventDefault();
+      const ta = taRef.current;
+      const start = ta?.selectionStart ?? text.length;
+      const end = ta?.selectionEnd ?? text.length;
+      commitSlashEdit({
+        text: `${text.slice(0, start)}\n${text.slice(end)}`,
+        caret: start + 1,
+      });
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey && shouldSendOnEnter()) {
       e.preventDefault();
       void submitText();
@@ -775,7 +789,7 @@ export function Composer({
           <span className="spc" />
           <span>
             <kbd>↵</kbd> send · <kbd>⇧</kbd>
-            <kbd>↵</kbd> newline · <kbd>/</kbd> commands
+            <kbd>↵</kbd> / <kbd>⌥</kbd><kbd>↵</kbd> newline · <kbd>/</kbd> commands
           </span>
         </div>
       </div>
