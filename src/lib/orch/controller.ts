@@ -108,20 +108,53 @@ export function finalMarkerText(events: TranscriptEvent[]): string {
 // ---- Runaway circuit-breaker ------------------------------------------------
 
 // A worker that lost confidence its tools ran has been observed spiralling into
-// repeated identical no-op probe commands (recover-check-N / retry-burst-N),
-// never reaching a terminal state and burning 1M+ tokens until a human kills
-// it. The breaker watches each worker's transcript and trips when it issues a
-// run of identical tool calls WITHOUT advancing its branch (no new commits, no
-// diff change). Tripping flips the worker to `blocked` with a reason; the
-// reconcile loop's existing terminal-reap then SIGTERMs it. A worker that IS
-// progressing — its commit count or diffstat moves — resets the window and
-// never trips, even if it repeats a command.
+// no-op probe commands, never reaching a terminal state and burning 1M+ tokens
+// until a human kills it. The breaker watches each worker's transcript + git
+// progress and trips on ANY of three INDEPENDENT triggers, so a worker can't
+// burn unbounded tokens by fooling one of them:
+//
+//   1. Signature trigger — a run of identical no-op tool calls (the original
+//      heuristic). Cheap, but a varied-probe spiral (different greps/echoes)
+//      slides right past it: a live worker hit 147 turns / 7.6M tokens with
+//      ZERO commits and never tripped, because its probes were all different.
+//   2. No-progress trigger (signature-INDEPENDENT) — N turns OR K tool calls
+//      with no committed-DIFF change, regardless of WHAT commands ran. This is
+//      what catches the varied-probe spiral the signature trigger misses.
+//   3. Hard ceiling — total turns OR total tokens past an absolute bound,
+//      regardless of progress. The last-resort backstop: even a worker that
+//      launders every other trigger (e.g. a trivial commit every N turns to
+//      reset the no-progress window) cannot burn past this.
+//
+// Tripping flips the worker to `blocked` with a reason; the reconcile loop's
+// existing terminal-reap then SIGTERMs it. A worker that IS progressing — its
+// committed diff moves — resets the signature + no-progress windows and trips
+// neither, even while repeating a command; only the hard ceiling is immune to
+// progress, by design.
 
-// Default run length that trips the breaker. Five identical no-progress calls
-// in a row is well past any legitimate retry (a real retry loop changes
-// something between attempts, which breaks the identical run) while leaving
-// headroom against a twitchy false positive.
+// Default run length that trips the signature trigger. Five identical
+// no-progress calls in a row is well past any legitimate retry (a real retry
+// loop changes something between attempts, which breaks the identical run)
+// while leaving headroom against a twitchy false positive.
 export const DEFAULT_RUNAWAY_LIMIT = 5;
+
+// No-progress trigger: trip after this many assistant turns OR tool calls with
+// no committed-diff change. Tuned generously below the observed 147-turn spiral
+// so a genuinely slow-but-committing worker (which resets the window the moment
+// its diff moves) is never caught, while a worker burning dozens of turns with
+// nothing landed on its branch is. Workers are told to commit incrementally
+// (see roles.ts), so a long no-commit stretch is itself the anomaly.
+export const DEFAULT_NO_PROGRESS_TURNS = 40;
+export const DEFAULT_NO_PROGRESS_TOOL_CALLS = 80;
+
+// Hard ceiling: an absolute backstop that trips REGARDLESS of progress, so no
+// single worker can burn unbounded even if every progress-based heuristic is
+// fooled. The turn bound also catches the laundering case — a worker dribbling
+// a trivial commit just often enough to keep resetting the no-progress window.
+// The token bound trips a high-tokens-per-turn spiral well before the observed
+// 7.6M-token miss. Both are deliberately well above any healthy single-slice
+// worker.
+export const DEFAULT_HARD_TURN_CEILING = 120;
+export const DEFAULT_HARD_TOKEN_CEILING = 4_000_000;
 
 // Normalise a tool call into a signature for the "identical command" test.
 // Runs of digits collapse to `#` so a counter-incrementing probe
@@ -183,12 +216,28 @@ export interface BreakerInput {
   signature: string | null;
   repeatCount: number;
   // Key that changes whenever the worker advances its branch: commitCount +
-  // committed diffstat. A run spent making progress moves this; a no-op spiral
-  // leaves it frozen.
+  // committed diffstat. The SIGNATURE trigger's window resets when this moves.
   progressKey: string;
+  // The committed diff ALONE (diffstat). The NO-PROGRESS trigger's window
+  // resets only when this moves — so a no-op/empty commit (which bumps
+  // commitCount, hence progressKey, but not the diff) can't launder a spiral.
+  diffKey: string;
+  // Total assistant turns + tool calls + tokens observed so far. Drive the
+  // no-progress trigger (turns/tool-calls since the last diff change) and the
+  // hard ceiling (absolute turns/tokens).
+  turns: number;
+  toolCalls: number;
+  tokens: number;
   // The snapshot persisted from the previous observation (agent.breaker).
   prior?: BreakerState;
+  // Signature trigger: identical no-op run length that trips.
   limit: number;
+  // No-progress trigger: turns / tool-calls with no diff change that trip.
+  noProgressTurns: number;
+  noProgressToolCalls: number;
+  // Hard ceiling: absolute turns / tokens that trip regardless of progress.
+  hardTurnCeiling: number;
+  hardTokenCeiling: number;
 }
 
 export interface BreakerDecision {
@@ -199,35 +248,110 @@ export interface BreakerDecision {
   snapshot: BreakerState;
 }
 
-// Pure breaker policy. The window of "consecutive no-progress repeats" opens
-// fresh whenever the repeated command changes OR progress advances; inside an
-// open window we count repeats beyond the baseline captured when it opened.
-// Deliberately conservative: the first observation of any window never trips
-// (baseline == repeatCount), so a worker already mid-run when we start watching
-// gets a clean window first — and a worker that advances its branch resets the
-// window every time, so genuine progress can never trip even while repeating.
+// Pure breaker policy over three independent triggers (any one trips). Each
+// progress-based window opens fresh whenever its progress signal advances, and
+// the FIRST observation of a window never trips (baseline == current), so a
+// worker already mid-activity when we start watching gets a clean window —
+// while a worker that advances its committed diff resets both windows every
+// time, so genuine progress can never trip them. The hard ceiling alone is
+// immune to progress: it is the absolute backstop.
 export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
-  const { signature, repeatCount, progressKey, prior, limit } = input;
-  if (!signature) {
-    return {
-      tripped: false,
-      snapshot: { signature: "", progressKey, baseline: 0 },
-    };
-  }
-  const windowReset =
+  const {
+    signature,
+    repeatCount,
+    progressKey,
+    diffKey,
+    turns,
+    toolCalls,
+    tokens,
+    prior,
+    limit,
+    noProgressTurns,
+    noProgressToolCalls,
+    hardTurnCeiling,
+    hardTokenCeiling,
+  } = input;
+
+  // No-progress window — keyed on the committed DIFF alone, so a commit that
+  // changes nothing (empty / no-op) does NOT reset it. Reopens (baseline =
+  // current turns/tool-calls) whenever the diff moves or there's no prior.
+  const progressReset = !prior || prior.diffKey !== diffKey;
+  const progressTurns = progressReset ? turns : prior.progressTurns ?? turns;
+  const progressToolCalls = progressReset
+    ? toolCalls
+    : prior.progressToolCalls ?? toolCalls;
+
+  // Signature window — keyed on signature + progressKey (commits OR diff).
+  const sigReset =
     !prior ||
+    !signature ||
     prior.signature !== signature ||
     prior.progressKey !== progressKey;
-  const baseline = windowReset ? repeatCount : prior.baseline;
-  const snapshot: BreakerState = { signature, progressKey, baseline };
-  const streak = repeatCount - baseline;
-  if (streak >= limit) {
+  const baseline = sigReset ? repeatCount : prior.baseline;
+
+  // Always carry every window's bookkeeping forward, regardless of which (if
+  // any) trigger fires this tick.
+  const snapshot: BreakerState = {
+    signature: signature ?? "",
+    progressKey,
+    baseline,
+    diffKey,
+    progressTurns,
+    progressToolCalls,
+  };
+
+  // Trigger 3 (checked first — it's the hard guarantee): an absolute ceiling on
+  // turns / tokens that ignores progress entirely. Closes the false-negative
+  // path where a worker launders every progress-based window yet keeps burning.
+  if (turns >= hardTurnCeiling) {
     return {
       tripped: true,
-      reason: `circuit-breaker: ${repeatCount} consecutive identical no-op commands with no new commits or diff (\`${truncateSignature(signature)}\`)`,
+      reason: `circuit-breaker: hard ceiling — ${turns} turns ≥ ${hardTurnCeiling} (no worker may burn unbounded, progress or not)`,
       snapshot,
     };
   }
+  if (tokens >= hardTokenCeiling) {
+    return {
+      tripped: true,
+      reason: `circuit-breaker: hard ceiling — ${tokens} tokens ≥ ${hardTokenCeiling} (no worker may burn unbounded, progress or not)`,
+      snapshot,
+    };
+  }
+
+  // Trigger 2: N turns / K tool calls with no committed-diff change. Signature-
+  // independent, so a VARIED-probe spiral (different commands every turn) trips
+  // here even though it never trips the signature run.
+  if (!progressReset) {
+    const turnStreak = turns - progressTurns;
+    if (turnStreak >= noProgressTurns) {
+      return {
+        tripped: true,
+        reason: `circuit-breaker: ${turnStreak} turns with no committed-diff progress (varied-probe spiral)`,
+        snapshot,
+      };
+    }
+    const callStreak = toolCalls - progressToolCalls;
+    if (callStreak >= noProgressToolCalls) {
+      return {
+        tripped: true,
+        reason: `circuit-breaker: ${callStreak} tool calls with no committed-diff progress (varied-probe spiral)`,
+        snapshot,
+      };
+    }
+  }
+
+  // Trigger 1 (original): a trailing run of identical no-op commands.
+  if (signature && !sigReset) {
+    const streak = repeatCount - baseline;
+    if (streak >= limit) {
+      return {
+        tripped: true,
+        reason: `circuit-breaker: ${repeatCount} consecutive identical no-op commands with no new commits or diff (\`${truncateSignature(signature)}\`)`,
+        snapshot,
+      };
+    }
+  }
+
   return { tripped: false, snapshot };
 }
 
@@ -535,6 +659,14 @@ export interface ControllerDeps {
   // Consecutive identical no-op commands that trip the runaway breaker.
   // Defaults to DEFAULT_RUNAWAY_LIMIT.
   runawayLimit?: number;
+  // Turns / tool-calls with no committed-diff progress that trip the breaker's
+  // signature-independent no-progress trigger. Default DEFAULT_NO_PROGRESS_*.
+  noProgressTurns?: number;
+  noProgressToolCalls?: number;
+  // Absolute turn / token ceiling that trips regardless of progress. Default
+  // DEFAULT_HARD_TURN_CEILING / DEFAULT_HARD_TOKEN_CEILING.
+  hardTurnCeiling?: number;
+  hardTokenCeiling?: number;
 }
 
 const DEFAULT_MAX_NUDGES = 3;
@@ -686,16 +818,28 @@ export class AutonomyController {
     }
 
     const events = await this.deps.readTranscript(agent.sessionId);
-    const { signature, count } = trailingRepeat(toolUseSignatures(events));
+    const signatures = toolUseSignatures(events);
+    const { signature, count } = trailingRepeat(signatures);
+    const toolCalls = signatures.length;
+    // Total turns + tokens (incl. cache) drive the hard ceiling and the
+    // no-progress turn count. Cache-read tokens are the lion's share of a
+    // re-probe spiral's burn, so they belong in the ceiling.
+    const m = metricsFromTranscript(events);
+    const tokens =
+      m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheCreationTokens;
 
     // Progress signal: a worker advancing its branch moves commit count / diff.
-    // Best-effort — if it can't be computed the window simply won't reset on
-    // progress, and the identical-run requirement alone still guards a trip.
+    // progressKey (commits + diff) gates the signature window; diffKey (diff
+    // ALONE) gates the no-progress window, so a no-op commit can't reset it.
+    // Best-effort — if it can't be computed the windows simply won't reset on
+    // progress, and the hard ceiling still guarantees a trip.
     let progressKey = "";
+    let diffKey = "";
     if (this.deps.agentGitSummary) {
       try {
         const s = await this.deps.agentGitSummary(orch, agent);
         progressKey = `${s.commitCount}:${s.diffstat}`;
+        diffKey = s.diffstat;
       } catch {
         /* best-effort */
       }
@@ -705,8 +849,18 @@ export class AutonomyController {
       signature,
       repeatCount: count,
       progressKey,
+      diffKey,
+      turns: m.turns,
+      toolCalls,
+      tokens,
       prior: agent.breaker,
       limit: this.deps.runawayLimit ?? DEFAULT_RUNAWAY_LIMIT,
+      noProgressTurns: this.deps.noProgressTurns ?? DEFAULT_NO_PROGRESS_TURNS,
+      noProgressToolCalls:
+        this.deps.noProgressToolCalls ?? DEFAULT_NO_PROGRESS_TOOL_CALLS,
+      hardTurnCeiling: this.deps.hardTurnCeiling ?? DEFAULT_HARD_TURN_CEILING,
+      hardTokenCeiling:
+        this.deps.hardTokenCeiling ?? DEFAULT_HARD_TOKEN_CEILING,
     });
 
     // Persist the snapshot every tick so the next observation measures the run
