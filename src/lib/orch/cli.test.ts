@@ -6,6 +6,8 @@ import {
   planCommand,
   renderResponse,
   truncateTask,
+  taskFileArg,
+  injectTask,
   type CliEnv,
 } from "./cli.js";
 import type { OrchStatusView } from "../../shared/protocol.js";
@@ -292,6 +294,91 @@ describe("planCommand — agent spawn (head-gated)", () => {
   it("requires a task", () => {
     const plan = planCommand(["agent", "spawn", "coder"], headEnv);
     expect(plan.kind).toBe("error");
+  });
+});
+
+describe("task-file helpers (--task-file)", () => {
+  it("taskFileArg returns the path when --task-file is present", () => {
+    expect(
+      taskFileArg(["agent", "spawn", "coder", "--task-file", "brief.txt"]),
+    ).toBe("brief.txt");
+  });
+
+  it("taskFileArg returns null when --task-file is absent", () => {
+    expect(taskFileArg(["agent", "spawn", "coder", "--task", "hi"])).toBeNull();
+  });
+
+  it("injectTask splices --task and removes the --task-file pair", () => {
+    const out = injectTask(
+      ["agent", "spawn", "coder", "--task-file", "x.txt"],
+      "hello",
+    );
+    expect(out).toContain("--task");
+    expect(out).toContain("hello");
+    expect(out).not.toContain("--task-file");
+    expect(out).not.toContain("x.txt");
+  });
+
+  it("injectTask does not mutate its input argv", () => {
+    const input = ["agent", "spawn", "coder", "--task-file", "x.txt"];
+    const copy = [...input];
+    injectTask(input, "hello");
+    expect(input).toEqual(copy);
+  });
+
+  it("planCommand on the injected argv plans a normal spawn with the task body", () => {
+    const argv = injectTask(
+      ["agent", "spawn", "coder", "--task-file", "x.txt"],
+      "hello",
+    );
+    const plan = planCommand(argv, headEnv);
+    expect(plan.kind).toBe("request");
+    if (plan.kind === "request") {
+      expect((plan.request.body as Record<string, unknown>).task).toBe("hello");
+    }
+  });
+
+  it("supports --task-file for brief via injection", () => {
+    const argv = injectTask(
+      ["agent", "brief", "agent-2", "--task-file", "x.txt"],
+      "next task",
+    );
+    const plan = planCommand(argv, headEnv);
+    expect(plan.kind).toBe("request");
+    if (plan.kind === "request") {
+      expect(plan.request.path).toBe(
+        "/api/orchestrations/orch-1/agents/agent-2/brief",
+      );
+      expect((plan.request.body as Record<string, unknown>).task).toBe(
+        "next task",
+      );
+    }
+  });
+
+  it("errors when BOTH --task and --task-file are passed to spawn", () => {
+    const plan = planCommand(
+      ["agent", "spawn", "coder", "--task", "a", "--task-file", "x.txt"],
+      headEnv,
+    );
+    expect(plan.kind).toBe("error");
+    if (plan.kind === "error") expect(plan.message).toMatch(/not both/i);
+  });
+
+  it("errors when BOTH --task and --task-file are passed to brief", () => {
+    const plan = planCommand(
+      ["agent", "brief", "agent-2", "--task", "a", "--task-file", "x.txt"],
+      headEnv,
+    );
+    expect(plan.kind).toBe("error");
+    if (plan.kind === "error") expect(plan.message).toMatch(/not both/i);
+  });
+
+  it("injectTask leaves argv untouched when an inline --task is already present", () => {
+    const argv = ["agent", "spawn", "coder", "--task", "a", "--task-file", "x.txt"];
+    const out = injectTask(argv, "hello");
+    expect(out).toEqual(argv);
+    // …so planCommand still sees both flags and can surface the error.
+    expect(planCommand(out, headEnv).kind).toBe("error");
   });
 });
 
