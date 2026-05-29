@@ -38,6 +38,15 @@ describe("planCommand — orch status", () => {
     expect(plan.kind).toBe("error");
   });
 
+  it("passes ?all=1 for orch status --all", () => {
+    const plan = planCommand(["orch", "status", "--all"], headEnv);
+    expect(plan).toEqual({
+      kind: "request",
+      request: { method: "GET", path: "/api/orchestrations/orch-1/status?all=1" },
+      render: "status",
+    });
+  });
+
   it("long-polls events for orch watch", () => {
     const plan = planCommand(["orch", "watch"], headEnv);
     expect(plan).toEqual({
@@ -430,6 +439,22 @@ describe("planCommand — agent send / brief / diff / log", () => {
       "/api/orchestrations/orch-1/agents/agent-2/log",
     );
   });
+
+  it("POSTs the stop verb for a worker", () => {
+    const plan = planCommand(["agent", "stop", "agent-2"], headEnv);
+    expect(plan).toEqual({
+      kind: "request",
+      request: {
+        method: "POST",
+        path: "/api/orchestrations/orch-1/agents/agent-2/stop",
+      },
+      render: "stop",
+    });
+  });
+
+  it("errors when stop is given no agentId", () => {
+    expect(planCommand(["agent", "stop"], headEnv).kind).toBe("error");
+  });
 });
 
 describe("planCommand — errors and help", () => {
@@ -565,6 +590,24 @@ describe("renderResponse — spawn / send / diff", () => {
   it("acknowledges send/brief", () => {
     expect(renderResponse("send", { ok: true }).toLowerCase()).toContain("ok");
     expect(renderResponse("brief", { ok: true }).toLowerCase()).toContain("ok");
+  });
+
+  it("reports the stop result, distinguishing a fresh stop from an already-terminal one", () => {
+    const fresh = renderResponse("stop", {
+      ok: true,
+      agentId: "agent-9",
+      lifecycle: "stopped",
+      alreadyTerminal: false,
+    });
+    expect(fresh).toBe("stopped agent-9 → stopped");
+
+    const already = renderResponse("stop", {
+      ok: true,
+      agentId: "agent-9",
+      lifecycle: "done",
+      alreadyTerminal: true,
+    });
+    expect(already).toBe("agent-9 already terminal (done)");
   });
 
   it("renders watched events and the timeout case", () => {

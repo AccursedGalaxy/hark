@@ -1291,7 +1291,8 @@ app.get("/api/orchestrations/:id/status", async (req, res) => {
         diffstats[a.id] = s.diffstat;
       }),
     );
-    res.json(buildStatusView(orch, diffstats));
+    const all = req.query.all === "1" || req.query.all === "true";
+    res.json(buildStatusView(orch, diffstats, { all }));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1413,6 +1414,29 @@ app.post("/api/orchestrations/:id/agents/:agentId/send", async (req, res) => {
   try {
     await sendToAgent(agent, text);
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Halt a worker — `hark agent stop <id>`. SIGTERMs the worker's process and
+// flips its lifecycle to the terminal `stopped` state (keeps the worktree +
+// branch). Idempotent: stopping an already-terminal or dead-pid worker just
+// reports the current state instead of erroring — the fix for a zombie record
+// that shows `running` after its pid is gone.
+app.post("/api/orchestrations/:id/agents/:agentId/stop", async (req, res) => {
+  try {
+    const result = await orchestrator.stopAgent(req.params.id, req.params.agentId);
+    if (!result) {
+      res.status(404).json({ error: "agent not found" });
+      return;
+    }
+    res.json({
+      ok: true,
+      agentId: req.params.agentId,
+      lifecycle: result.lifecycle,
+      alreadyTerminal: result.alreadyTerminal,
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

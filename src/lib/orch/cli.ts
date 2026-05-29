@@ -50,6 +50,7 @@ export type RenderKind =
   | "set-base"
   | "promote"
   | "autonomy"
+  | "stop"
   | "pr";
 
 export type CliPlan =
@@ -63,12 +64,13 @@ const USAGE = `hark — orchestration head CLI
 
   hark head init                            promote THIS session to the project's PM-head
   hark head autonomy <L0|L1|L2|L3>          set the project's autonomy dial
-  hark orch status                          show every agent + the head (compact)
+  hark orch status [--all]                  show active agents + the head (compact); --all includes terminal workers
   hark orch watch                           block until the next event, print it, exit
   hark orch set-base <ref>                  re-point the orchestration's base branch
   hark agent spawn <role> (--task "…" | --task-file <path|->) [--depends-on <id>]   spawn a worker (head only)
   hark agent send  <id> "<message>"         steer a worker
   hark agent brief <id> ("<task>" | --task-file <path|->)   assign a worker its next task
+  hark agent stop  <id>                      halt a worker (SIGTERM + mark stopped, keeps the worktree)
   hark agent diff  <id> [--stat|--full]     worker branch vs base (--stat default)
   hark agent log   <id>                     recent commits on the worker branch
   hark pr          <id> [--title "…"] [--base <ref>]   push the worker branch + open a PR (human lands)
@@ -208,9 +210,12 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
   if (group === "orch") {
     if (sub === "status") {
       if (!env.orchId) return err("HARK_ORCH_ID is not set");
+      // --all reveals terminal workers (done/blocked/failed/stopped/cancelled),
+      // which the status view hides by default to keep the PM's surface lean.
+      const query = flags["--all"] ? "?all=1" : "";
       return {
         kind: "request",
-        request: { method: "GET", path: `/api/orchestrations/${env.orchId}/status` },
+        request: { method: "GET", path: `/api/orchestrations/${env.orchId}/status${query}` },
         render: "status",
       };
     }
@@ -298,6 +303,15 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
           kind: "request",
           request: { method: "POST", path: `${base}/${id}/brief`, body: { task } },
           render: "brief",
+        };
+      }
+      case "stop": {
+        const id = rest[0];
+        if (!id) return err("stop needs an agentId");
+        return {
+          kind: "request",
+          request: { method: "POST", path: `${base}/${id}/stop` },
+          render: "stop",
         };
       }
       case "diff": {
@@ -427,6 +441,14 @@ export function renderResponse(render: RenderKind, data: unknown): string {
     }
     case "autonomy":
       return d.ok ? `autonomy → ${d.autonomyLevel}` : JSON.stringify(d);
+    case "stop": {
+      if (!d.ok) return JSON.stringify(d);
+      const id = typeof d.agentId === "string" ? d.agentId : "agent";
+      const lifecycle = typeof d.lifecycle === "string" ? d.lifecycle : "stopped";
+      return d.alreadyTerminal
+        ? `${id} already terminal (${lifecycle})`
+        : `stopped ${id} → ${lifecycle}`;
+    }
     case "set-base":
       return d.ok ? `base set to ${d.baseRef}` : JSON.stringify(d);
     case "pr": {
