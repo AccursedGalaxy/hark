@@ -1563,6 +1563,211 @@ describe("AutonomyController.checkCircuitBreaker stuck-judge", () => {
   });
 });
 
+// ---- Stuck-judge: adversarial / gap coverage (Tester) ----------------------
+//
+// The coder's suite covers progressing/stuck/throw/unparseable + signature &
+// hard-ceiling bypass. These target the branches that suite leaves thin:
+//   - recovery THROUGH the controller (flag clears when the diff moves), not
+//     just at the pure decideCircuitBreaker level;
+//   - a flag is NOT immortality — the hard ceiling still kills a flagged worker;
+//   - the `drifting` verdict (impl treats it like `stuck`, but it was untested);
+//   - empty stdout + valid-JSON-unknown-verdict + async-reject fail-safes;
+//   - the `progressing` audit note + that it never escalates.
+// Each asserts a state transition that flips if the corresponding branch
+// regresses (not a tautology).
+
+// Open a no-progress window then drive it past the turn limit. Returns the
+// agent ids and a `bump`/`tick` pair so each test composes its own trajectory.
+async function makeStuckScenario(opts: {
+  judge?: (prompt: string) => Promise<string> | string;
+  noProgressTurns?: number;
+  hardTurnCeiling?: number;
+  withHead?: boolean;
+}) {
+  const { orchId, agentId } = await makeAgent("sess-run", "running");
+  if (opts.withHead ?? true) {
+    await store.setHead(orchId, {
+      sessionId: "sess-head",
+      pid: 9,
+      worktreeDir: "/wt/head",
+      branch: "head",
+    });
+  }
+  const probes: TranscriptEvent[] = [];
+  // Mutable git state so a test can "land a commit" mid-trajectory.
+  const gitState = { diffstat: "", commitCount: 0 };
+  const ctl = makeBreakerController({
+    transcript: () => probes,
+    git: () => ({ ...gitState }),
+    limit: 1000, // signature trigger off — isolate Trigger 2
+    noProgressTurns: opts.noProgressTurns ?? 5,
+    hardTurnCeiling: opts.hardTurnCeiling,
+    judge: opts.judge,
+  });
+  const agentNow = async () =>
+    (await store.getOrchestration(orchId))!.agents.find((x) => x.id === agentId)!;
+  return { ...ctl, orchId, agentId, probes, gitState, agentNow };
+}
+
+describe("AutonomyController.checkCircuitBreaker stuck-judge — adversarial", () => {
+  it("RECOVERY (integration): a flagged worker whose committed diff then moves clears flaggedAt/Reason on the next tick", async () => {
+    const s = await makeStuckScenario({
+      judge: () => '{"verdict":"stuck","reason":"spinning on greps"}',
+    });
+    // Open the window, then spiral past the limit → flagged (not killed).
+    s.probes.push(bashTurn("grep a src"), bashTurn("grep b src"));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    for (const w of ["c", "d", "e", "f", "g", "h"]) s.probes.push(bashTurn(`grep ${w} src`));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    let a = await s.agentNow();
+    expect(a.lifecycle).toBe("running");
+    expect(a.breaker?.flaggedAt).toBe(1_000_000);
+    expect(a.breaker?.flaggedReason).toContain("spinning on greps");
+    expect(s.escalations).toHaveLength(1);
+
+    // The worker recovers: it lands a real committed diff. Next tick the
+    // no-progress window resets, which must CLEAR the flag.
+    s.gitState.diffstat = "2 files +40/-1";
+    s.gitState.commitCount = 1;
+    s.probes.push(bashTurn("grep i src"));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    a = await s.agentNow();
+    expect(a.lifecycle).toBe("running");
+    expect(a.breaker?.flaggedAt).toBeUndefined();
+    expect(a.breaker?.flaggedReason).toBeUndefined();
+    // The recovery tick neither re-judged nor re-escalated.
+    expect(s.judgePrompts).toHaveLength(1);
+    expect(s.escalations).toHaveLength(1);
+  });
+
+  it("RECOVERY is not permanent suppression: after the flag clears, a fresh no-progress spiral is judged AGAIN", async () => {
+    const s = await makeStuckScenario({
+      judge: () => '{"verdict":"stuck","reason":"spinning"}',
+    });
+    s.probes.push(bashTurn("grep a src"), bashTurn("grep b src"));
+    await s.controller.checkCircuitBreaker(s.orchId, s.agentId); // open
+    for (const w of ["c", "d", "e", "f", "g", "h"]) s.probes.push(bashTurn(`grep ${w} src`));
+    await s.controller.checkCircuitBreaker(s.orchId, s.agentId); // flag (judge #1)
+    expect(s.judgePrompts).toHaveLength(1);
+
+    // Recover (diff moves) → flag clears, new window opens at the current count.
+    s.gitState.diffstat = "1 file +5/-0";
+    s.gitState.commitCount = 1;
+    s.probes.push(bashTurn("grep recover src"));
+    await s.controller.checkCircuitBreaker(s.orchId, s.agentId);
+    expect((await s.agentNow()).breaker?.flaggedAt).toBeUndefined();
+
+    // Now freeze the diff again and spiral past the limit a SECOND time.
+    for (const w of ["j", "k", "l", "m", "n", "o"]) s.probes.push(bashTurn(`grep ${w} src`));
+    await s.controller.checkCircuitBreaker(s.orchId, s.agentId);
+    // The judge is consulted again for the new window — recovery did not silence it.
+    expect(s.judgePrompts).toHaveLength(2);
+    expect((await s.agentNow()).breaker?.flaggedAt).toBe(1_000_000);
+  });
+
+  it("a FLAG is not immortality: a flagged worker that keeps burning is still killed by the hard ceiling (the leak bound)", async () => {
+    // noProgress=5 so it flags early; hard ceiling 12 turns is the backstop.
+    const s = await makeStuckScenario({
+      judge: () => '{"verdict":"stuck","reason":"spinning forever"}',
+      noProgressTurns: 5,
+      hardTurnCeiling: 12,
+    });
+    s.probes.push(bashTurn("grep a src"), bashTurn("grep b src")); // 2 turns
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    for (const w of ["c", "d", "e", "f", "g", "h"]) s.probes.push(bashTurn(`grep ${w} src`)); // 8 turns
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false); // flagged
+    expect((await s.agentNow()).lifecycle).toBe("running");
+    expect(s.judgePrompts).toHaveLength(1);
+
+    // The flagged worker keeps spinning (still no diff) up to the hard ceiling.
+    for (const w of ["i", "j", "k", "l"]) s.probes.push(bashTurn(`grep ${w} src`)); // 12 turns ≥ ceiling
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(true); // KILLED
+    const a = await s.agentNow();
+    expect(a.lifecycle).toBe("blocked");
+    expect(a.blockedReason).toContain("hard ceiling");
+    // The hard-ceiling kill is immune to the judge — it was never re-consulted.
+    expect(s.judgePrompts).toHaveLength(1);
+  });
+
+  it("DRIFTING verdict → flagged (still running), PM woken once, reason surfaced — same as stuck", async () => {
+    const s = await makeStuckScenario({
+      judge: () => '{"verdict":"drifting","reason":"wandered onto unrelated refactors"}',
+    });
+    s.probes.push(bashTurn("grep a src"), bashTurn("grep b src"));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    for (const w of ["c", "d", "e", "f", "g", "h"]) s.probes.push(bashTurn(`grep ${w} src`));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+
+    const a = await s.agentNow();
+    expect(a.lifecycle).toBe("running"); // NOT killed
+    expect(a.breaker?.flaggedReason).toContain("wandered onto unrelated refactors");
+    expect(a.breaker?.flaggedAt).toBe(1_000_000);
+    expect(s.escalations).toHaveLength(1);
+    expect(s.escalations[0].reason).toContain("drifting");
+
+    // Once-per-window: a subsequent no-diff tick neither re-judges nor re-escalates.
+    s.probes.push(bashTurn("grep i src"));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    expect(s.judgePrompts).toHaveLength(1);
+    expect(s.escalations).toHaveLength(1);
+  });
+
+  it("FAIL-SAFE: empty stdout → blocked (never silently let-run)", async () => {
+    const s = await makeStuckScenario({ judge: () => "" });
+    s.probes.push(bashTurn("grep a src"), bashTurn("grep b src"));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    for (const w of ["c", "d", "e", "f", "g", "h"]) s.probes.push(bashTurn(`grep ${w} src`));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(true);
+    const a = await s.agentNow();
+    expect(a.lifecycle).toBe("blocked");
+    expect(a.blockedReason).toContain("no committed-diff progress");
+  });
+
+  it("FAIL-SAFE: valid JSON but an UNKNOWN verdict → blocked (parser rejects, controller blocks)", async () => {
+    const s = await makeStuckScenario({
+      judge: () => '{"verdict":"maybe","reason":"hedging"}',
+    });
+    s.probes.push(bashTurn("grep a src"), bashTurn("grep b src"));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    for (const w of ["c", "d", "e", "f", "g", "h"]) s.probes.push(bashTurn(`grep ${w} src`));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(true);
+    expect((await s.agentNow()).lifecycle).toBe("blocked");
+  });
+
+  it("FAIL-SAFE: an async rejection (subprocess timeout shape) → blocked", async () => {
+    const s = await makeStuckScenario({
+      judge: () => Promise.reject(new Error("claude -p timed out")),
+    });
+    s.probes.push(bashTurn("grep a src"), bashTurn("grep b src"));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    for (const w of ["c", "d", "e", "f", "g", "h"]) s.probes.push(bashTurn(`grep ${w} src`));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(true);
+    expect((await s.agentNow()).lifecycle).toBe("blocked");
+  });
+
+  it("PROGRESSING records an audit note and never escalates to the PM", async () => {
+    const s = await makeStuckScenario({
+      judge: () => '{"verdict":"progressing","reason":"reading 6 distinct files"}',
+    });
+    s.probes.push(readTurn("a.ts"), readTurn("b.ts"));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+    for (const f of ["c", "d", "e", "f", "g", "h"]) s.probes.push(readTurn(`${f}.ts`));
+    expect(await s.controller.checkCircuitBreaker(s.orchId, s.agentId)).toBe(false);
+
+    const a = await s.agentNow();
+    expect(a.lifecycle).toBe("running");
+    expect(a.breaker?.flaggedAt).toBeUndefined();
+    // progressing is a coordination note, NOT a human-paging escalation.
+    expect(s.escalations).toHaveLength(0);
+    const events = await store.readEvents(s.orchId);
+    const note = events.find(
+      (e) => (e.data as { kind?: string } | undefined)?.kind === "stuck_judge",
+    );
+    expect(note).toBeTruthy();
+    expect((note!.data as { verdict?: string }).verdict).toBe("progressing");
+  });
+});
+
 // ---- finalMarkerText (full persisted summary) ------------------------------
 
 describe("finalMarkerText", () => {
