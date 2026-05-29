@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -12,11 +13,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   linkNodeModules,
+  branchGitSummary,
   buildBranchDeleteArgs,
   buildDiffArgs,
   buildLogArgs,
   buildRevListCountArgs,
   buildShortstatArgs,
+  diffBranch,
   buildWorktreeAddArgs,
   buildWorktreeListArgs,
   buildWorktreePruneArgs,
@@ -214,6 +217,107 @@ describe("git inspection builders (head reads worker branches vs base)", () => {
       "20",
       "main..br",
     ]);
+  });
+});
+
+// End-to-end regression guard against the diff-inflation bug: when the base ref
+// has advanced AHEAD of the worker's fork point, the worker's diff must show
+// ONLY the worker's own changes — never the base's own commits. The three-dot
+// `base...branch` form (a merge-base diff) does this; a two-dot `base..branch`
+// would inflate the diff with the base's commits. This locks both the
+// `hark agent diff` path (diffBranch) and the `hark pr` diffstat path
+// (branchGitSummary) against a regression to the two-dot form.
+describe("diff against an advanced base shows only the worker's own changes", () => {
+  let root: string;
+  let repo: string;
+
+  function git(args: string[]): void {
+    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  }
+
+  function setup(): void {
+    root = mkdtempSync(join(tmpdir(), "hark-diff-"));
+    repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["init", "-q", repo]);
+    // Deterministic base branch name regardless of the host's init.defaultBranch.
+    git(["symbolic-ref", "HEAD", "refs/heads/base"]);
+    git(["config", "user.email", "t@t"]);
+    git(["config", "user.name", "t"]);
+    git(["config", "commit.gpgsign", "false"]);
+
+    // Fork point.
+    writeFileSync(join(repo, "shared.txt"), "0\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "c0"]);
+    git(["branch", "worker"]);
+
+    // Base advances with its OWN commits after the fork — these must NOT appear
+    // in the worker's diff.
+    writeFileSync(join(repo, "base-only.txt"), "a\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "base ahead 1"]);
+    writeFileSync(join(repo, "base-only.txt"), "a\nb\n");
+    git(["commit", "-q", "-a", "-m", "base ahead 2"]);
+
+    // The worker makes its own single change on its branch.
+    git(["checkout", "-q", "worker"]);
+    writeFileSync(join(repo, "worker.txt"), "w\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "worker commit"]);
+  }
+
+  function cleanup(): void {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  it("diffBranch --stat shows worker.txt but not the base's own commits", async () => {
+    setup();
+    try {
+      const stat = await diffBranch({
+        repoRoot: repo,
+        baseRef: "base",
+        branch: "worker",
+        full: false,
+      });
+      expect(stat).toContain("worker.txt");
+      expect(stat).not.toContain("base-only.txt");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("diffBranch --full patches worker.txt but not the base's own commits", async () => {
+    setup();
+    try {
+      const full = await diffBranch({
+        repoRoot: repo,
+        baseRef: "base",
+        branch: "worker",
+        full: true,
+      });
+      expect(full).toContain("worker.txt");
+      expect(full).toContain("+w");
+      expect(full).not.toContain("base-only.txt");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("branchGitSummary counts only the worker's commit and diffstat", async () => {
+    setup();
+    try {
+      const summary = await branchGitSummary({
+        repoRoot: repo,
+        baseRef: "base",
+        branch: "worker",
+      });
+      // One worker commit — NOT the two base-ahead commits.
+      expect(summary.commitCount).toBe(1);
+      expect(summary.diffstat).toBe("1 file +1/-0");
+    } finally {
+      cleanup();
+    }
   });
 });
 
