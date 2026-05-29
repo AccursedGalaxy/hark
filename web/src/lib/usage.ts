@@ -9,83 +9,20 @@
 // the side of slight over-counting (e.g. assuming the larger family rate
 // when a model id is ambiguous) so the displayed number isn't optimistic.
 
-import type { MessageUsage, TranscriptEvent } from "./protocol";
+import type { TranscriptEvent } from "./protocol";
 
-// USD per 1M tokens, by token category. Cache reads are the cheap path —
-// roughly 10% of the base input rate; cache creation costs ~25% more than
-// the base input rate because it includes the write. Numbers as of the
-// Claude 4.x release line; bumped to family rate on unknown variants.
-export interface ModelPricing {
-  inputPer1M: number;
-  outputPer1M: number;
-  cacheReadPer1M: number;
-  cacheCreatePer1M: number;
-  // Default context window. Some models expose a 1M-context tier behind a
-  // suffix (e.g. "[1m]") — `contextLimitForModel` handles that override.
-  contextLimit: number;
-}
-
-const OPUS: ModelPricing = {
-  inputPer1M: 15,
-  outputPer1M: 75,
-  cacheReadPer1M: 1.5,
-  cacheCreatePer1M: 18.75,
-  contextLimit: 200_000,
-};
-
-const SONNET: ModelPricing = {
-  inputPer1M: 3,
-  outputPer1M: 15,
-  cacheReadPer1M: 0.3,
-  cacheCreatePer1M: 3.75,
-  contextLimit: 200_000,
-};
-
-const HAIKU: ModelPricing = {
-  inputPer1M: 1,
-  outputPer1M: 5,
-  cacheReadPer1M: 0.1,
-  cacheCreatePer1M: 1.25,
-  contextLimit: 200_000,
-};
-
-// Family rate for anything we can't identify — pessimistic (Opus) so the
-// cost line never silently undercounts a session running on a premium tier.
-const UNKNOWN: ModelPricing = OPUS;
-
-export function pricingForModel(model: string | undefined): ModelPricing {
-  if (!model) return UNKNOWN;
-  const m = model.toLowerCase();
-  if (m.includes("opus")) return OPUS;
-  if (m.includes("sonnet")) return SONNET;
-  if (m.includes("haiku")) return HAIKU;
-  return UNKNOWN;
-}
-
-// Some Claude Code builds tag the 1M-context tier in the model string
-// (e.g. "claude-opus-4-7[1m]"). Detect and lift the default 200k → 1M.
-export function contextLimitForModel(model: string | undefined): number {
-  const base = pricingForModel(model).contextLimit;
-  if (!model) return base;
-  return /\[1m\]/i.test(model) ? 1_000_000 : base;
-}
-
-// USD cost for one assistant turn. Each token category has its own rate;
-// cache reads dominate session-long sessions because nearly every turn
-// replays the prior context as a cache hit.
-export function costOfUsage(
-  usage: MessageUsage,
-  pricing: ModelPricing,
-): number {
-  const M = 1_000_000;
-  return (
-    (usage.inputTokens * pricing.inputPer1M +
-      usage.outputTokens * pricing.outputPer1M +
-      usage.cacheReadInputTokens * pricing.cacheReadPer1M +
-      usage.cacheCreationInputTokens * pricing.cacheCreatePer1M) /
-    M
-  );
-}
+// Pricing table + per-turn cost live in src/shared/pricing.ts so the server
+// (the metrics DB) and this web bundle share ONE source of truth — no forked,
+// drifting price tables. Re-exported here so existing web imports
+// (`pricingForModel`, `costOfUsage`, `ModelPricing`, ...) keep their path.
+export {
+  pricingForModel,
+  contextLimitForModel,
+  costOfUsage,
+  costForTokens,
+} from "../../../src/shared/pricing";
+export type { ModelPricing, TokenCounts } from "../../../src/shared/pricing";
+import { costOfUsage, pricingForModel } from "../../../src/shared/pricing";
 
 export interface SessionUsageTotals {
   // Sums across every assistant turn.

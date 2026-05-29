@@ -5,6 +5,7 @@ import {
 } from "./roles.js";
 import type { OrchStore } from "./store.js";
 import type { Orchestrator } from "./orchestrator.js";
+import { costOfUsage, pricingForModel } from "../../shared/pricing.js";
 import {
   DEFAULT_AUTONOMY_LEVEL,
   isTerminalLifecycle,
@@ -238,8 +239,18 @@ function truncateSignature(sig: string, max = 60): string {
 
 export type TranscriptMetrics = Pick<
   AgentMetrics,
-  "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheCreationTokens" | "turns"
->;
+  | "inputTokens"
+  | "outputTokens"
+  | "cacheReadTokens"
+  | "cacheCreationTokens"
+  | "costUsd"
+  | "turns"
+> & {
+  // Last-seen model id across the transcript (sessions can switch mid-run, so
+  // this is "current"). Undefined when no assistant turn recorded a model.
+  // Carried so the metrics DB can label each token_samples row.
+  model?: string;
+};
 
 // Cumulative token + turn totals across the whole transcript. The controller
 // SETS these on the agent (the transcript is the source of truth), preserving
@@ -252,16 +263,22 @@ export function metricsFromTranscript(
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
+    costUsd: 0,
     turns: 0,
   };
   for (const e of events) {
     if (e.kind !== "assistant") continue;
     m.turns++;
+    if (e.model) m.model = e.model;
     if (e.usage) {
       m.inputTokens += e.usage.inputTokens;
       m.outputTokens += e.usage.outputTokens;
       m.cacheReadTokens += e.usage.cacheReadInputTokens;
       m.cacheCreationTokens += e.usage.cacheCreationInputTokens;
+      // Price each turn at its own model's rate (sessions can switch models),
+      // mirroring the web rail's aggregateUsage. Fixes costUsd, which is always
+      // 0 on the JSON record today.
+      m.costUsd += costOfUsage(e.usage, pricingForModel(e.model));
     }
   }
   return m;
@@ -561,6 +578,7 @@ export class AutonomyController {
         a.metrics.outputTokens = tm.outputTokens;
         a.metrics.cacheReadTokens = tm.cacheReadTokens;
         a.metrics.cacheCreationTokens = tm.cacheCreationTokens;
+        a.metrics.costUsd = tm.costUsd;
         a.metrics.turns = tm.turns;
       });
     }
@@ -838,6 +856,7 @@ export class AutonomyController {
         h.metrics.outputTokens = tm.outputTokens;
         h.metrics.cacheReadTokens = tm.cacheReadTokens;
         h.metrics.cacheCreationTokens = tm.cacheCreationTokens;
+        h.metrics.costUsd = tm.costUsd;
         h.metrics.turns = tm.turns;
       });
     }
@@ -939,10 +958,16 @@ export class AutonomyController {
   // any decision or sending anything. Safe to call on a tick regardless of
   // whether active autonomy (briefing/nudging) is enabled, so the dashboard
   // stays current either way.
-  async refreshMetrics(orchId: string, agentId: string): Promise<void> {
+  // Returns the freshly-computed sample (tokens/turns/cost/model) so the
+  // reconcile loop can feed the metrics DB without re-reading the transcript;
+  // null when there's no session yet to read.
+  async refreshMetrics(
+    orchId: string,
+    agentId: string,
+  ): Promise<TranscriptMetrics | null> {
     const orch = await this.deps.store.getOrchestration(orchId);
     const agent = orch?.agents.find((a) => a.id === agentId);
-    if (!agent?.sessionId) return;
+    if (!agent?.sessionId) return null;
     const events = await this.deps.readTranscript(agent.sessionId);
     const tm = metricsFromTranscript(events);
     await this.deps.store.updateAgent(orchId, agentId, (a) => {
@@ -950,16 +975,18 @@ export class AutonomyController {
       a.metrics.outputTokens = tm.outputTokens;
       a.metrics.cacheReadTokens = tm.cacheReadTokens;
       a.metrics.cacheCreationTokens = tm.cacheCreationTokens;
+      a.metrics.costUsd = tm.costUsd;
       a.metrics.turns = tm.turns;
     });
+    return tm;
   }
 
   // Refresh the head's token/turn metrics from its transcript without making
   // any decision or typing anything. Safe to call on every reconcile tick even
   // with active autonomy off, so the dashboard's head card stays current.
-  async refreshHeadMetrics(orchId: string): Promise<void> {
+  async refreshHeadMetrics(orchId: string): Promise<TranscriptMetrics | null> {
     const orch = await this.deps.store.getOrchestration(orchId);
-    if (!orch?.head?.sessionId) return;
+    if (!orch?.head?.sessionId) return null;
     const events = await this.deps.readTranscript(orch.head.sessionId);
     const tm = metricsFromTranscript(events);
     await this.deps.store.updateHead(orchId, (h) => {
@@ -967,8 +994,10 @@ export class AutonomyController {
       h.metrics.outputTokens = tm.outputTokens;
       h.metrics.cacheReadTokens = tm.cacheReadTokens;
       h.metrics.cacheCreationTokens = tm.cacheCreationTokens;
+      h.metrics.costUsd = tm.costUsd;
       h.metrics.turns = tm.turns;
     });
+    return tm;
   }
 
   // Count the self-review nudges already sent to an agent, from the event log.
