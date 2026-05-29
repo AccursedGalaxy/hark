@@ -391,6 +391,7 @@ async function ghCreatePr(
 async function buildPrBody(
   orch: Orchestration,
   agent: OrchAgent,
+  baseRef: string = orch.baseRef,
 ): Promise<string> {
   const sections: string[] = [];
   const task = agent.task?.trim();
@@ -404,7 +405,7 @@ async function buildPrBody(
     const log = (
       await logBranch({
         repoRoot: orch.projectRoot,
-        baseRef: orch.baseRef,
+        baseRef,
         branch: agent.branch,
       })
     ).trim();
@@ -415,7 +416,7 @@ async function buildPrBody(
   try {
     const { diffstat } = await branchGitSummary({
       repoRoot: orch.projectRoot,
-      baseRef: orch.baseRef,
+      baseRef,
       branch: agent.branch,
     });
     if (diffstat) sections.push(`## Changes\n\n${diffstat}`);
@@ -1453,16 +1454,25 @@ app.post("/api/orchestrations/:id/agents/:agentId/pr", async (req, res) => {
     return;
   }
   const title = (req.body as { title?: unknown })?.title;
+  const base = (req.body as { base?: unknown })?.base;
+  // An explicit --base overrides the orchestration's default baseRef. The
+  // resolved base is used everywhere — the PR target, the push/PR-create call,
+  // AND the diffstat/commit-range — so the body is computed against the same
+  // ref the PR targets.
+  const baseRef =
+    typeof base === "string" && base.trim().length > 0
+      ? base.trim()
+      : orch.baseRef;
   // Assemble a default PR body from data we already have for this worker so the
   // PR opens with a useful description instead of "No description provided."
   // Best-effort: every git read is guarded so a failure just omits that
   // section — body assembly never throws out of this endpoint.
-  const body = await buildPrBody(orch, agent);
+  const body = await buildPrBody(orch, agent, baseRef);
   try {
     const result = await preparePr(
       {
         repoRoot: orch.projectRoot,
-        baseRef: orch.baseRef,
+        baseRef,
         branch: agent.branch,
         title: typeof title === "string" ? title : undefined,
         body,
@@ -1477,7 +1487,7 @@ app.post("/api/orchestrations/:id/agents/:agentId/pr", async (req, res) => {
           (
             await branchGitSummary({
               repoRoot: orch.projectRoot,
-              baseRef: orch.baseRef,
+              baseRef,
               branch: agent.branch,
             })
           ).diffstat,
