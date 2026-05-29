@@ -303,6 +303,16 @@ function shortTokens(n: number): string {
   return String(n);
 }
 
+// Collapse a (possibly multi-paragraph) task brief to a single compact line for
+// the status display. Whitespace runs — including newlines — fold to one space,
+// then the result is trimmed and cut to `max` chars with a trailing ellipsis if
+// it overflows. Display-only: the stored task is untouched.
+export function truncateTask(s: string, max = 60): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  if (flat.length <= max) return flat;
+  return flat.slice(0, max) + "…";
+}
+
 function renderStatus(view: OrchStatusView): string {
   const lines: string[] = [];
   lines.push(`${view.name} [${view.status}] — ${view.goal}`);
@@ -317,7 +327,7 @@ function renderStatus(view: OrchStatusView): string {
   }
   for (const a of view.agents) {
     const diff = a.diffstat ? ` | ${a.diffstat}` : "";
-    const task = a.task ? ` — ${a.task}` : "";
+    const task = a.task ? ` — ${truncateTask(a.task)}` : "";
     lines.push(
       `${pad(a.role, 11)} ${pad(a.lifecycle, 9)} ${pad(a.id, 22)} ${pad(a.branch, 28)} ${a.turns}t ${shortTokens(a.tokens)}${diff}${task}`,
     );
