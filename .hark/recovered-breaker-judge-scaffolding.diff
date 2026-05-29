@@ -1,0 +1,88 @@
+diff --git i/src/lib/orch/controller.ts w/src/lib/orch/controller.ts
+index 0f91df7..c7fba6d 100644
+--- i/src/lib/orch/controller.ts
++++ w/src/lib/orch/controller.ts
+@@ -243,6 +243,10 @@ export interface BreakerInput {
+ export interface BreakerDecision {
+   tripped: boolean;
+   reason?: string;
++  // Which trigger fired (only meaningful when tripped). The controller gates ONLY
++  // `no_progress` on the stuck-judge; `signature` and `hard_ceiling` stay
++  // immediate auto-kills, never gated on a judge.
++  trigger?: "signature" | "no_progress" | "hard_ceiling";
+   // Always returned — persisted onto the agent so the next tick measures
+   // against it.
+   snapshot: BreakerState;
+@@ -289,6 +293,14 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
+     prior.progressKey !== progressKey;
+   const baseline = sigReset ? repeatCount : prior.baseline;
+ 
++  // The stuck-judge flag lives on the no-progress window: carry it forward while
++  // the window holds (committed diff unchanged), drop it the moment the window
++  // resets (the worker advanced its diff → it resumed real progress). This is
++  // what makes "re-judge only once per window" and "clear the flag on recovery"
++  // fall out of the same reset the no-progress trigger already keys on.
++  const flaggedAt = progressReset ? undefined : prior?.flaggedAt;
++  const flaggedReason = progressReset ? undefined : prior?.flaggedReason;
++
+   // Always carry every window's bookkeeping forward, regardless of which (if
+   // any) trigger fires this tick.
+   const snapshot: BreakerState = {
+@@ -298,6 +310,8 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
+     diffKey,
+     progressTurns,
+     progressToolCalls,
++    flaggedAt,
++    flaggedReason,
+   };
+ 
+   // Trigger 3 (checked first — it's the hard guarantee): an absolute ceiling on
+@@ -306,6 +320,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
+   if (turns >= hardTurnCeiling) {
+     return {
+       tripped: true,
++      trigger: "hard_ceiling",
+       reason: `circuit-breaker: hard ceiling — ${turns} turns ≥ ${hardTurnCeiling} (no worker may burn unbounded, progress or not)`,
+       snapshot,
+     };
+@@ -313,6 +328,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
+   if (tokens >= hardTokenCeiling) {
+     return {
+       tripped: true,
++      trigger: "hard_ceiling",
+       reason: `circuit-breaker: hard ceiling — ${tokens} tokens ≥ ${hardTokenCeiling} (no worker may burn unbounded, progress or not)`,
+       snapshot,
+     };
+diff --git i/src/shared/protocol.ts w/src/shared/protocol.ts
+index dbb7970..2458ca7 100644
+--- i/src/shared/protocol.ts
++++ w/src/shared/protocol.ts
+@@ -341,6 +341,15 @@ export interface BreakerState {
+   // progress-based trigger. Optional for the same forward-compat reason.
+   progressTurns?: number;
+   progressToolCalls?: number;
++  // Set when the Haiku stuck-judge flagged this worker (verdict stuck/drifting)
++  // after the no-progress trigger fired. The worker is NOT killed on a flag — it
++  // stays `running`, surfaced in `orch status` with `flaggedReason`, and the PM
++  // is woken once. Both fields live on the no-progress window so they CLEAR the
++  // moment that window resets (the committed diff moved — i.e. the worker
++  // resumed real progress, typically after the PM steered it). While set they
++  // also gate re-judging: the judge runs only once per no-progress window.
++  flaggedAt?: number;
++  flaggedReason?: string;
+ }
+ 
+ export function emptyAgentMetrics(): AgentMetrics {
+@@ -566,6 +575,12 @@ export interface AgentStatusLine {
+   // (a human question or a tripped circuit-breaker). Surfaced so `orch status`
+   // tells the PM WHY without a separate lookup.
+   reason?: string;
++  // The Haiku stuck-judge's reason when a still-RUNNING worker has been flagged
++  // (no-progress trigger fired and the judge ruled stuck/drifting). Distinct
++  // from `reason` (which is terminal): a flagged worker keeps running, so the PM
++  // sees the flag and can steer or stop it. Cleared once the worker resumes
++  // committed progress.
++  flaggedReason?: string;
+ }
+ 
+ export interface HeadStatusLine {
