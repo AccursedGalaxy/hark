@@ -13,6 +13,10 @@ import {
   decideCircuitBreaker,
   decideHeadRouting,
   DEFAULT_RUNAWAY_LIMIT,
+  DEFAULT_NO_PROGRESS_TURNS,
+  DEFAULT_NO_PROGRESS_TOOL_CALLS,
+  DEFAULT_HARD_TURN_CEILING,
+  DEFAULT_HARD_TOKEN_CEILING,
   finalMarkerText,
   leanSummary,
   markerForLifecycle,
@@ -823,7 +827,22 @@ describe("toolUseSignatures + trailingRepeat", () => {
 });
 
 describe("decideCircuitBreaker", () => {
-  const base = { signature: "bash:probe", progressKey: "0:", limit: 5 };
+  // Non-tripping defaults for the two NEW triggers, so a test that exercises
+  // the signature trigger isn't perturbed by them: huge ceilings, huge
+  // no-progress allowance, and zero activity counters.
+  const base = {
+    signature: "bash:probe",
+    progressKey: "0:",
+    diffKey: "",
+    turns: 0,
+    toolCalls: 0,
+    tokens: 0,
+    limit: 5,
+    noProgressTurns: 10_000,
+    noProgressToolCalls: 10_000,
+    hardTurnCeiling: 1_000_000,
+    hardTokenCeiling: 1_000_000_000,
+  };
 
   it("trips once the no-progress run reaches the limit", () => {
     const d = decideCircuitBreaker({
@@ -838,9 +857,9 @@ describe("decideCircuitBreaker", () => {
 
   it("does NOT trip when the branch advanced (progressKey changed), even mid-run", () => {
     const d = decideCircuitBreaker({
+      ...base,
       signature: "bash:probe",
       progressKey: "1:2 files +9/-0", // diff advanced since the window opened
-      limit: 5,
       repeatCount: 9,
       prior: { signature: "bash:probe", progressKey: "0:", baseline: 0 },
     });
@@ -858,9 +877,9 @@ describe("decideCircuitBreaker", () => {
 
   it("resets the window when the repeated command changes", () => {
     const d = decideCircuitBreaker({
+      ...base,
       signature: "bash:other",
       progressKey: "0:",
-      limit: 5,
       repeatCount: 3,
       prior: { signature: "bash:probe", progressKey: "0:", baseline: 0 },
     });
@@ -871,12 +890,166 @@ describe("decideCircuitBreaker", () => {
   it("no-ops with no tool calls to judge", () => {
     expect(decideCircuitBreaker({ ...base, signature: null, repeatCount: 0 }).tripped).toBe(false);
   });
+
+  // --- Trigger 2: signature-independent no-progress (the 7.6M scenario) ---
+
+  it("TRIPS a varied-probe spiral: no diff progress past the turn limit, even though the command differs every turn", () => {
+    // signature changes every turn (repeatCount 1) → the signature trigger can
+    // NEVER fire. diffKey is frozen since the window opened, and turns have
+    // grown past the no-progress limit.
+    const d = decideCircuitBreaker({
+      ...base,
+      signature: "bash:grep-something-different",
+      repeatCount: 1, // never an identical run
+      diffKey: "", // no committed diff, unchanged since the window opened
+      turns: 50,
+      noProgressTurns: 40,
+      prior: {
+        signature: "bash:earlier-probe",
+        progressKey: "0:",
+        baseline: 1,
+        diffKey: "",
+        progressTurns: 5, // window opened at turn 5; 50-5 = 45 ≥ 40
+        progressToolCalls: 5,
+      },
+    });
+    expect(d.tripped).toBe(true);
+    expect(d.reason).toContain("no committed-diff progress");
+  });
+
+  it("TRIPS a no-progress spiral on the tool-call count too", () => {
+    const d = decideCircuitBreaker({
+      ...base,
+      signature: "bash:vary",
+      repeatCount: 1,
+      diffKey: "1 file +2/-0",
+      turns: 5, // well under the turn limit
+      toolCalls: 120,
+      noProgressToolCalls: 80,
+      prior: {
+        signature: "bash:vary",
+        progressKey: "0:1 file +2/-0",
+        baseline: 1,
+        diffKey: "1 file +2/-0",
+        progressTurns: 0,
+        progressToolCalls: 20, // 120-20 = 100 ≥ 80
+      },
+    });
+    expect(d.tripped).toBe(true);
+    expect(d.reason).toContain("tool calls");
+  });
+
+  it("does NOT trip a worker making real progress: diff advances so the no-progress window keeps resetting", () => {
+    // The diff moved since the prior observation → window reopens at the
+    // current turn count, streak resets to 0, nothing trips even though many
+    // turns/tool-calls have elapsed in total.
+    const d = decideCircuitBreaker({
+      ...base,
+      signature: "bash:vary",
+      repeatCount: 1,
+      diffKey: "3 files +40/-2", // advanced from the prior diff
+      turns: 200,
+      toolCalls: 400,
+      noProgressTurns: 40,
+      noProgressToolCalls: 80,
+      prior: {
+        signature: "bash:vary",
+        progressKey: "5:2 files +30/-1",
+        baseline: 1,
+        diffKey: "2 files +30/-1", // older diff
+        progressTurns: 150,
+        progressToolCalls: 300,
+      },
+    });
+    expect(d.tripped).toBe(false);
+    // window reopened against the fresh diff baseline
+    expect(d.snapshot.diffKey).toBe("3 files +40/-2");
+    expect(d.snapshot.progressTurns).toBe(200);
+    expect(d.snapshot.progressToolCalls).toBe(400);
+  });
+
+  it("does NOT trip a no-op COMMIT that bumps commitCount but not the diff (anti-laundering)", () => {
+    // progressKey changed (commitCount 5→6) but diffKey is identical — an empty
+    // / no-op commit. The no-progress window must NOT reset on that, or a worker
+    // could launder a spiral by committing nothing every N turns.
+    const d = decideCircuitBreaker({
+      ...base,
+      signature: "bash:vary",
+      repeatCount: 1,
+      progressKey: "6:1 file +2/-0", // commitCount advanced…
+      diffKey: "1 file +2/-0", // …but the diff did NOT
+      turns: 60,
+      noProgressTurns: 40,
+      prior: {
+        signature: "bash:vary",
+        progressKey: "5:1 file +2/-0", // prior commitCount 5
+        baseline: 1,
+        diffKey: "1 file +2/-0",
+        progressTurns: 5, // 60-5 = 55 ≥ 40 → trips despite the no-op commit
+        progressToolCalls: 5,
+      },
+    });
+    expect(d.tripped).toBe(true);
+    expect(d.reason).toContain("no committed-diff progress");
+  });
+
+  // --- Trigger 3: hard ceiling (absolute, progress-immune) ---
+
+  it("TRIPS on the hard turn ceiling even while the worker IS making progress", () => {
+    // Every progress-based window is reset this tick (diff just advanced), and
+    // the signature is non-repeating — yet the absolute turn ceiling still
+    // trips. This is the laundering backstop.
+    const d = decideCircuitBreaker({
+      ...base,
+      signature: "bash:vary",
+      repeatCount: 1,
+      diffKey: "9 files +900/-3", // fresh progress this tick
+      turns: 120,
+      hardTurnCeiling: 120,
+      prior: {
+        signature: "bash:vary",
+        progressKey: "1:1 file",
+        baseline: 1,
+        diffKey: "1 file", // different → progress window resets
+        progressTurns: 119,
+        progressToolCalls: 1,
+      },
+    });
+    expect(d.tripped).toBe(true);
+    expect(d.reason).toContain("hard ceiling");
+    expect(d.reason).toContain("turns");
+  });
+
+  it("TRIPS on the hard token ceiling regardless of turns/progress", () => {
+    const d = decideCircuitBreaker({
+      ...base,
+      turns: 3, // tiny turn count
+      tokens: 5_000_000,
+      hardTokenCeiling: 4_000_000,
+      diffKey: "1 file +1/-0",
+      prior: {
+        signature: "bash:probe",
+        progressKey: "0:",
+        baseline: 0,
+        diffKey: "1 file +1/-0",
+        progressTurns: 0,
+        progressToolCalls: 0,
+      },
+    });
+    expect(d.tripped).toBe(true);
+    expect(d.reason).toContain("hard ceiling");
+    expect(d.reason).toContain("tokens");
+  });
 });
 
 function makeBreakerController(opts: {
   transcript: () => TranscriptEvent[];
   git: () => { diffstat: string; commitCount: number };
   limit?: number;
+  noProgressTurns?: number;
+  noProgressToolCalls?: number;
+  hardTurnCeiling?: number;
+  hardTokenCeiling?: number;
 }) {
   const escalations: { agentId: string; reason: string }[] = [];
   const controller = new AutonomyController({
@@ -890,6 +1063,10 @@ function makeBreakerController(opts: {
       escalations.push({ agentId: a.id, reason });
     },
     runawayLimit: opts.limit,
+    noProgressTurns: opts.noProgressTurns,
+    noProgressToolCalls: opts.noProgressToolCalls,
+    hardTurnCeiling: opts.hardTurnCeiling,
+    hardTokenCeiling: opts.hardTokenCeiling,
     now: () => 1_000_000,
   });
   return { controller, escalations };
@@ -939,6 +1116,90 @@ describe("AutonomyController.checkCircuitBreaker", () => {
     expect(o!.agents.find((x) => x.id === agentId)!.lifecycle).toBe("running");
   });
 
+  it("TRIPS a VARIED-probe spiral: distinct commands every turn, no diff progress (the 7.6M scenario)", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    const { controller } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: "", commitCount: 0 }), // never advances
+      limit: 1000, // signature trigger effectively disabled
+      noProgressTurns: 5,
+    });
+
+    // Open the no-progress window at 2 turns (first observation never trips).
+    probes.push(bashTurn("grep alpha src"), bashTurn("echo checking"));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+
+    // Each subsequent turn is a DIFFERENT probe — the identical-run heuristic
+    // can never fire — yet nothing lands on the branch.
+    for (const w of ["beta", "gamma", "delta", "epsilon", "zeta", "eta"]) {
+      probes.push(bashTurn(`grep ${w} src`));
+    }
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(true);
+
+    const a = (await store.getOrchestration(orchId))!.agents.find(
+      (x) => x.id === agentId,
+    )!;
+    expect(a.lifecycle).toBe("blocked");
+    expect(a.blockedReason).toContain("no committed-diff progress");
+  });
+
+  it("does NOT trip varied commands while the committed diff keeps advancing (no false positive)", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    let commits = 0;
+    const { controller } = makeBreakerController({
+      transcript: () => probes,
+      // Real progress: diff grows every tick.
+      git: () => ({ diffstat: `${commits} files +${commits * 10}/-0`, commitCount: commits }),
+      limit: 1000,
+      noProgressTurns: 5,
+      noProgressToolCalls: 5,
+    });
+
+    const cmds = ["a", "bb", "ccc", "dddd", "eeeee", "ffffff", "ggggggg", "hh"];
+    for (const c of cmds) {
+      probes.push(bashTurn(`grep ${c} src`)); // distinct each time
+      commits++; // committed diff advances → both windows reset every tick
+      expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+    }
+    expect(
+      (await store.getOrchestration(orchId))!.agents.find((x) => x.id === agentId)!
+        .lifecycle,
+    ).toBe("running");
+  });
+
+  it("hard ceiling trips a worker sitting just under every other threshold", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    let commits = 0;
+    const { controller } = makeBreakerController({
+      transcript: () => probes,
+      // Diff advances every tick → signature + no-progress windows perpetually
+      // reset, so neither of those triggers can ever fire.
+      git: () => ({ diffstat: `${commits} files +${commits}/-0`, commitCount: commits }),
+      limit: 1000, // signature trigger off
+      noProgressTurns: 1000, // no-progress (turns) off
+      noProgressToolCalls: 100000, // no-progress (tool calls) off
+      hardTurnCeiling: 6, // the ONLY live bound
+    });
+
+    // The worker commits real diff on every turn — it fools BOTH progress-based
+    // triggers — but the absolute turn ceiling is immune to progress and trips.
+    let tripped = false;
+    for (let t = 1; t <= 6; t++) {
+      probes.push(bashTurn(`work-step-${String.fromCharCode(96 + t)}`));
+      commits++;
+      tripped = await controller.checkCircuitBreaker(orchId, agentId);
+    }
+    expect(tripped).toBe(true);
+    const a = (await store.getOrchestration(orchId))!.agents.find(
+      (x) => x.id === agentId,
+    )!;
+    expect(a.lifecycle).toBe("blocked");
+    expect(a.blockedReason).toContain("hard ceiling");
+  });
+
   it("ignores a worker that isn't running (terminal / no session)", async () => {
     const { orchId, agentId } = await makeAgent(null, "running"); // no session id
     const { controller } = makeBreakerController({
@@ -952,6 +1213,20 @@ describe("AutonomyController.checkCircuitBreaker", () => {
   it("uses DEFAULT_RUNAWAY_LIMIT when no override is given", () => {
     expect(DEFAULT_RUNAWAY_LIMIT).toBeGreaterThanOrEqual(4);
     expect(DEFAULT_RUNAWAY_LIMIT).toBeLessThanOrEqual(5);
+  });
+
+  it("ships sane defaults for the new triggers (catch the spiral, leave headroom)", () => {
+    // No-progress bounds well below the observed 147-turn spiral.
+    expect(DEFAULT_NO_PROGRESS_TURNS).toBeLessThan(147);
+    expect(DEFAULT_NO_PROGRESS_TURNS).toBeGreaterThanOrEqual(20);
+    expect(DEFAULT_NO_PROGRESS_TOOL_CALLS).toBeGreaterThanOrEqual(
+      DEFAULT_NO_PROGRESS_TURNS,
+    );
+    // Hard ceiling above the no-progress bound (so the no-progress trigger
+    // normally fires first) but below the observed 7.6M-token miss.
+    expect(DEFAULT_HARD_TURN_CEILING).toBeGreaterThan(DEFAULT_NO_PROGRESS_TURNS);
+    expect(DEFAULT_HARD_TOKEN_CEILING).toBeLessThan(7_600_000);
+    expect(DEFAULT_HARD_TOKEN_CEILING).toBeGreaterThan(1_000_000);
   });
 
   it("persists the breaker reason as the summary + sets headWokeAt (no double-wake)", async () => {
