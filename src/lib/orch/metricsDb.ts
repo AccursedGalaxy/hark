@@ -4,10 +4,12 @@ import { DatabaseSync } from "node:sqlite";
 import { defaultOrchDir } from "./store.js";
 import { costForTokens } from "../../shared/pricing.js";
 import type {
+  ContentBlock,
   OrchAgent,
   OrchEvent,
   OrchHead,
   Orchestration,
+  TranscriptEvent,
 } from "../../shared/protocol.js";
 
 // Central metrics datastore (Phase 0). A DERIVED, rebuildable read-model in
@@ -26,10 +28,10 @@ import type {
 // Bumped when the schema changes shape. Stored in PRAGMA user_version; a
 // mismatch is the signal to drop + rebuild (Phase 0 just records it — the DB
 // is rebuildable, so a future migration can wipe rather than migrate).
-export const SCHEMA_VERSION = 1;
+// v2 adds the turns/tool_calls capture tables (transport instrumentation).
+export const SCHEMA_VERSION = 2;
 
-// CREATE TABLE IF NOT EXISTS statements, applied idempotently on open. Phase 1
-// tables (turns/tool_calls) are intentionally absent.
+// CREATE TABLE IF NOT EXISTS statements, applied idempotently on open.
 export const SCHEMA_DDL: readonly string[] = [
   // Upserted snapshot of each orchestration record.
   `CREATE TABLE IF NOT EXISTS orchestrations (
@@ -113,6 +115,57 @@ export const SCHEMA_DDL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS ingest_state (
     orch_id TEXT PRIMARY KEY,
     events_offset INTEGER
+  )`,
+  // Transport instrumentation — CAPTURE half (board-independent). One row per
+  // assistant turn, sourced from the transcript's assistant-side stream. This
+  // is INTENT, not self-report: a turn is recorded because the assistant ISSUED
+  // it (the tool_use blocks are persisted on the assistant message), so it
+  // survives a dropped *result*. `tool_call_count` is the batch size — how many
+  // tool calls were issued together in this one turn.
+  `CREATE TABLE IF NOT EXISTS turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT,
+    orch_id TEXT,
+    session_id TEXT,
+    turn_index INTEGER,
+    uuid TEXT,
+    ts INTEGER,
+    model TEXT,
+    tool_call_count INTEGER,
+    stop_reason TEXT
+  )`,
+  // (agent_id, turn_index) is the natural key — re-ingest is idempotent (a
+  // re-read of the same transcript can't duplicate a turn row).
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_agent_index ON turns (agent_id, turn_index)`,
+  // Per-call tool-call metadata: channel (tool name), a stable call-id (the
+  // tool_use block id), batch membership (turn_uuid + turn_index) and batch
+  // size, and the issuing-turn index. Raw material for later correlating
+  // IO-glitch incidence against channel and batch size. The call-id is the
+  // tool_use block id — globally unique and stable, so it doubles as the
+  // idempotency key for re-ingest.
+  `CREATE TABLE IF NOT EXISTS tool_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id TEXT,
+    agent_id TEXT,
+    orch_id TEXT,
+    session_id TEXT,
+    turn_index INTEGER,
+    turn_uuid TEXT,
+    batch_size INTEGER,
+    batch_position INTEGER,
+    channel TEXT,
+    ts INTEGER
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_calls_call_id ON tool_calls (call_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_tool_calls_agent ON tool_calls (agent_id, turn_index)`,
+  `CREATE INDEX IF NOT EXISTS idx_tool_calls_channel ON tool_calls (channel)`,
+  // Per-agent capture cursor: how many assistant turns have been ingested. The
+  // turns/tool_calls counterpart of ingest_state's byte offset — a re-read each
+  // tick only processes turns past this index. A DB wipe resets it → full
+  // rebuild from the transcript.
+  `CREATE TABLE IF NOT EXISTS turn_ingest_state (
+    agent_id TEXT PRIMARY KEY,
+    turns_ingested INTEGER
   )`,
 ];
 
@@ -284,6 +337,125 @@ export function eventRow(e: OrchEvent): Bind[] {
   ];
 }
 
+// ---- Transcript tool-call capture (transport instrumentation) ---------------
+//
+// The INTENT extractor. Reads the assistant-side stream (assistant turns + the
+// tool_use blocks they carry) and projects each turn into a CapturedTurn. This
+// is the load-bearing invariant of the brief: intent is sourced from the
+// transcript's tool_use blocks — persisted on the assistant message — NOT from
+// any tool_result or self-report. A `log "I did X"` rides the same channel that
+// drops; the tool_use block does not, so it is the record that survives a
+// dropped result. Pure + exported so the projection is unit-testable.
+
+// One captured tool call: the stable call-id (tool_use block id), the channel
+// (tool name: Bash / Edit / Write / other), and its 0-based position within
+// the batch issued in this turn.
+export interface CapturedToolCall {
+  callId: string;
+  channel: string;
+  batchPosition: number;
+}
+
+// One captured assistant turn: its ordinal among assistant turns (the issuing-
+// turn index, aligned with metricsFromTranscript's turn count), the message
+// uuid, the parsed timestamp (ms epoch; null when unparseable), the model and
+// stop_reason recorded for the turn, and the tool calls issued together in it.
+// A turn with no tool calls is still captured (batch size 0) — it records that
+// the turn happened and issued nothing.
+export interface CapturedTurn {
+  turnIndex: number;
+  uuid: string;
+  ts: number | null;
+  model: string | undefined;
+  stopReason: string | undefined;
+  toolCalls: CapturedToolCall[];
+}
+
+// Parse a transcript ISO timestamp to ms epoch; null when absent/unparseable.
+function parseTranscriptTs(ts: string | undefined): number | null {
+  if (!ts) return null;
+  const ms = Date.parse(ts);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+// Project a transcript into its assistant turns + their tool_use blocks. The
+// turn index increments for EVERY assistant turn (matching the token-metrics
+// turn count), so a turn that issued no tool call still advances the index and
+// is recorded. Tool-call intent comes only from `tool_use` blocks — never from
+// tool_result events.
+export function captureTurns(events: TranscriptEvent[]): CapturedTurn[] {
+  const turns: CapturedTurn[] = [];
+  let turnIndex = 0;
+  for (const e of events) {
+    if (e.kind !== "assistant") continue;
+    const toolCalls: CapturedToolCall[] = [];
+    for (const b of e.blocks) {
+      if (b.type !== "tool_use") continue;
+      toolCalls.push({
+        callId: b.id,
+        channel: b.name,
+        batchPosition: toolCalls.length,
+      });
+    }
+    turns.push({
+      turnIndex,
+      uuid: e.uuid,
+      ts: parseTranscriptTs(e.ts),
+      model: e.model,
+      stopReason: e.stopReason,
+      toolCalls,
+    });
+    turnIndex++;
+  }
+  return turns;
+}
+
+// `block.type === "tool_use"` is the channel narrowing; exported so callers can
+// extract a channel name without re-implementing the discriminant.
+export function toolUseChannel(block: ContentBlock): string | null {
+  return block.type === "tool_use" ? block.name : null;
+}
+
+export function turnRow(
+  agentId: string,
+  orchId: string,
+  sessionId: string | null,
+  t: CapturedTurn,
+): Bind[] {
+  return [
+    agentId,
+    orchId,
+    nv(sessionId),
+    t.turnIndex,
+    nv(t.uuid),
+    t.ts ?? null,
+    nv(t.model),
+    t.toolCalls.length,
+    nv(t.stopReason),
+  ];
+}
+
+export function toolCallRow(
+  agentId: string,
+  orchId: string,
+  sessionId: string | null,
+  t: CapturedTurn,
+  c: CapturedToolCall,
+): Bind[] {
+  return [
+    c.callId,
+    agentId,
+    orchId,
+    nv(sessionId),
+    t.turnIndex,
+    nv(t.uuid),
+    t.toolCalls.length,
+    c.batchPosition,
+    c.channel,
+    t.ts ?? null,
+  ];
+}
+
 // ---- Runtime wrapper --------------------------------------------------------
 
 export class MetricsDb {
@@ -402,6 +574,61 @@ export class MetricsDb {
          ON CONFLICT(orch_id) DO UPDATE SET events_offset=excluded.events_offset`,
       )
       .run(orchId, offset);
+  }
+
+  getTurnsIngested(agentId: string): number {
+    const row = this.db
+      .prepare("SELECT turns_ingested FROM turn_ingest_state WHERE agent_id = ?")
+      .get(agentId) as { turns_ingested?: number } | undefined;
+    return Number(row?.turns_ingested ?? 0);
+  }
+
+  setTurnsIngested(agentId: string, count: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO turn_ingest_state (agent_id, turns_ingested)
+         VALUES (?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET turns_ingested=excluded.turns_ingested`,
+      )
+      .run(agentId, count);
+  }
+
+  // Ingest the assistant turns + their tool calls for one agent, off the stored
+  // per-agent cursor. Only turns past the cursor are written, so a full
+  // transcript can be re-read every tick cheaply. INSERT OR IGNORE on both
+  // tables (keyed by (agent_id, turn_index) and call_id) makes this idempotent
+  // even if the cursor is wrong — a partial-failure re-run can never duplicate.
+  // The cursor is advanced LAST, so a throw mid-ingest just re-processes next
+  // tick (the OR IGNOREs absorb the overlap). Returns the rows newly attempted.
+  ingestTurns(
+    agentId: string,
+    orchId: string,
+    sessionId: string | null,
+    turns: CapturedTurn[],
+  ): number {
+    const cursor = this.getTurnsIngested(agentId);
+    const fresh = turns.filter((t) => t.turnIndex >= cursor);
+    if (fresh.length === 0) return 0;
+    const turnStmt = this.db.prepare(
+      `INSERT OR IGNORE INTO turns
+         (agent_id, orch_id, session_id, turn_index, uuid, ts, model,
+          tool_call_count, stop_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const callStmt = this.db.prepare(
+      `INSERT OR IGNORE INTO tool_calls
+         (call_id, agent_id, orch_id, session_id, turn_index, turn_uuid,
+          batch_size, batch_position, channel, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const t of fresh) {
+      turnStmt.run(...turnRow(agentId, orchId, sessionId, t));
+      for (const c of t.toolCalls) {
+        callStmt.run(...toolCallRow(agentId, orchId, sessionId, t, c));
+      }
+    }
+    this.setTurnsIngested(agentId, turns.length);
+    return fresh.length;
   }
 
   close(): void {
