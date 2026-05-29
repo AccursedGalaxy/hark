@@ -399,7 +399,14 @@ export function buildPmHeadBriefing(ctx: PmHeadBriefingContext): string {
   lines.push("hark agent diff <agentId> [--stat|--full]   # worker branch vs base (--stat default)");
   lines.push("hark agent log <agentId>         # recent commits on the worker branch");
   lines.push('hark agent brief <agentId> "<task>"   # assign the worker its next task');
+  lines.push('hark pr <agentId> [--title "…"]  # push the worker branch + open a PR (you never land it)');
   lines.push("```");
+
+  lines.push("");
+  lines.push("## Landing & integration");
+  lines.push(
+    "When a branch is ready, run `hark pr <agentId>` to push it and open a PR against the base — but the human merges it; you never land. With no remote it hands back a ready branch + diff for the human to merge locally. For a genuine branch collision, don't `merge -X` yourself: dispatch an **integrator worker** (`hark agent spawn coder --task \"merge A into B, resolve conflicts\" --depends-on <id>`) — conflict resolution is judgment, and it stays in an isolated worktree.",
+  );
 
   lines.push("");
   lines.push("## Triaging team news");

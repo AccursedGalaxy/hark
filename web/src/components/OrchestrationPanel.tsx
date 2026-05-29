@@ -196,6 +196,11 @@ function OrchestrationListView({
                 >
                   <div className="orch-card-top">
                     <span className="orch-card-name">{o.name}</span>
+                    {o.managed && (
+                      <span className="tag accent" title="Persistent PM-head">
+                        PM{o.autonomyLevel ? ` · ${o.autonomyLevel}` : ""}
+                      </span>
+                    )}
                     <span className={"tag " + statusTagClass(o.status)}>
                       {o.status}
                     </span>
@@ -384,6 +389,19 @@ function OrchestrationDetailView({
       />
       <div className="plan-pane" data-screen-label="OrchDetailPane">
         <div className="orch-goal">{o.goal}</div>
+
+        {o.managed && (
+          <div className="orch-card-meta" style={{ marginBottom: "0.5rem" }}>
+            <span className="tag accent" title="Persistent, project-scoped PM-head (read-only on the tree)">
+              PM-head
+            </span>
+            {o.autonomyLevel && (
+              <span className="tag" title="Per-project autonomy dial (idle loop)">
+                autonomy {o.autonomyLevel}
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="orch-metrics">
           <Metric label="agents" value={`${s.agentCount}`} />

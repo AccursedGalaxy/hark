@@ -1,4 +1,5 @@
 import express from "express";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -37,9 +38,12 @@ import {
   addWorktree,
   branchGitSummary,
   diffBranch,
+  hasOrigin,
   logBranch,
+  pushBranch,
   removeWorktree,
 } from "./lib/orch/worktree.js";
+import { preparePr } from "./lib/orch/pr.js";
 import { clearTrust } from "./lib/orch/trust.js";
 import { summarizeOrchestration } from "./lib/orch/summary.js";
 import { buildStatusView } from "./lib/orch/statusView.js";
@@ -342,6 +346,36 @@ async function sendToSession(
 
 async function sendToAgent(agent: OrchAgent, text: string): Promise<void> {
   await sendToSession(agent.sessionId, agent.pid, "agent session", text);
+}
+
+// `gh` IO for the `hark pr` helper. Kept here (not in the pure pr.ts) so the
+// policy stays testable with fakes while the real subprocess lives at the edge.
+function runGh(args: string[], cwd?: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("gh", args, { cwd, encoding: "utf8" }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout ?? "");
+    });
+  });
+}
+async function ghReady(): Promise<boolean> {
+  try {
+    await runGh(["auth", "status"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function ghCreatePr(
+  repoRoot: string,
+  baseRef: string,
+  branch: string,
+  title?: string,
+): Promise<string> {
+  const args = ["pr", "create", "--base", baseRef, "--head", branch];
+  if (title && title.trim().length > 0) args.push("--title", title.trim(), "--body", "");
+  else args.push("--fill");
+  return runGh(args, repoRoot);
 }
 
 // Deliver text to an orchestration's head session (briefing, worker
@@ -922,6 +956,31 @@ app.get("/api/projects/:key/newsroom", async (req, res) => {
   }
 });
 
+// Per-project managed-mode registry (spec §6 #9): is there a promoted PM-head
+// for this project, and what's its dial + head status? Drives the dashboard's
+// "managed" surfacing. `{ managed: false }` when none.
+app.get("/api/projects/:key/head", async (req, res) => {
+  const project = findKnownProject(req.params.key);
+  if (!project) {
+    res.status(404).json({ error: "project not found" });
+    return;
+  }
+  const orch = await orchStore.findActiveManagedHead(project.root);
+  if (!orch) {
+    res.json({ managed: false });
+    return;
+  }
+  res.json({
+    managed: true,
+    orchId: orch.id,
+    autonomyLevel: orch.autonomyLevel ?? null,
+    headSessionId: orch.head?.sessionId ?? null,
+    headBranch: orch.head?.branch ?? null,
+    workerCount: orch.agents.length,
+    summary: summarizeOrchestration(orch),
+  });
+});
+
 app.post("/api/projects/:key/capture", async (req, res) => {
   const project = findKnownProject(req.params.key);
   if (!project) {
@@ -1331,6 +1390,56 @@ app.get("/api/orchestrations/:id/agents/:agentId/log", async (req, res) => {
       branch: agent.branch,
     });
     res.json({ log });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// `hark pr <agentId>` — push the worker's branch + open a PR against base,
+// with NO checkout against the project root (the human still owns the landing).
+// Degrades gracefully: no origin → ready-branch + diff; no gh → push only.
+app.post("/api/orchestrations/:id/agents/:agentId/pr", async (req, res) => {
+  const orch = await orchStore.getOrchestration(req.params.id);
+  const agent = orch?.agents.find((a) => a.id === req.params.agentId);
+  if (!orch || !agent) {
+    res.status(404).json({ error: "agent not found" });
+    return;
+  }
+  const title = (req.body as { title?: unknown })?.title;
+  try {
+    const result = await preparePr(
+      {
+        repoRoot: orch.projectRoot,
+        baseRef: orch.baseRef,
+        branch: agent.branch,
+        title: typeof title === "string" ? title : undefined,
+      },
+      {
+        hasOrigin: (r) => hasOrigin(r),
+        ghReady: () => ghReady(),
+        push: (r, b) => pushBranch(r, b),
+        createPr: (r, base, b, t) => ghCreatePr(r, base, b, t),
+        diffstat: async () =>
+          (
+            await branchGitSummary({
+              repoRoot: orch.projectRoot,
+              baseRef: orch.baseRef,
+              branch: agent.branch,
+            })
+          ).diffstat,
+      },
+    );
+    if (result.status === "created") {
+      await orchStore.appendEvent({
+        ts: Date.now(),
+        orchestrationId: orch.id,
+        agentId: agent.id,
+        kind: "checkpoint",
+        message: `PR opened for ${agent.role}: ${result.url}`,
+        data: { kind: "pr", url: result.url },
+      });
+    }
+    res.json({ ok: true, result });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

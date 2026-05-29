@@ -1,11 +1,11 @@
 # PM-Head Orchestration Harness — build spec
 
-*Status: **Phase A built** (branch `pm-head-harness`, 2026-05-29). This is the
-target architecture for turning hark's shipped head-session engine into a
-first-class, semi-autonomous project harness: a persistent product-manager
-session that ideates with you, owns `PLAN.md`, and dispatches a worker team to
-ship/test fast — without ever surprising your working tree or interrupting your
-thinking.*
+*Status: **Phases A–D built** (branch `pm-head-harness`, 2026-05-29; not merged).
+This is the target architecture for turning hark's shipped head-session engine
+into a first-class, semi-autonomous project harness: a persistent
+product-manager session that ideates with you, owns `PLAN.md`, and dispatches a
+worker team to ship/test fast — without ever surprising your working tree or
+interrupting your thinking.*
 
 > **Build progress.**
 > - **Phase A — DONE (unit-tested + dogfooded on `:3999`).** Promotion (`hark
@@ -44,7 +44,16 @@ thinking.*
 >   not (it doesn't). **Full idle-loop + escalation LIVE validation needs real
 >   worker sessions under autonomy — deferred to the existing live-validation
 >   thread; logic is integration-tested with fakes.**
-> - **Phase D — not built.** See §7.
+> - **Phase D — DONE (unit-tested; registry + wiring dogfooded on `:3999`).**
+>   `hark pr <agentId> [--title]` → `POST .../agents/:agentId/pr` (`pr.ts`:
+>   pushes the branch + `gh pr create --base`, NO checkout against root; degrades
+>   to a ready-branch + diff with no `origin`, push-only with no `gh` — human
+>   still lands). Integrator-worker pattern + `hark pr` taught in the charter.
+>   Managed-mode registry: `GET /api/projects/:key/head` (managed? dial? head
+>   status?); dashboard surfaces a "PM · <dial>" badge in the orchestration list
+>   + a "PM-head / autonomy <Lx>" row in the detail view. **The `hark pr`
+>   happy-path (real push + PR) needs a worker branch + remote — folds into the
+>   live-validation thread; all four preparePr branches are unit-tested.**
 >
 > **Enforcement boundary (honest scope).** The `PreToolUse` guard is airtight on
 > the `Write`/`Edit` surface (LLM agents mutate files almost exclusively through

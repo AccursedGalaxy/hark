@@ -107,6 +107,50 @@ describe("planCommand — head init (promotion)", () => {
   });
 });
 
+describe("planCommand — pr", () => {
+  it("POSTs a PR request for the agent (no title → --fill server-side)", () => {
+    const plan = planCommand(["pr", "agent-3"], headEnv);
+    expect(plan).toEqual({
+      kind: "request",
+      request: {
+        method: "POST",
+        path: "/api/orchestrations/orch-1/agents/agent-3/pr",
+        body: {},
+      },
+      render: "pr",
+    });
+  });
+
+  it("passes a --title through", () => {
+    const plan = planCommand(["pr", "agent-3", "--title", "Add OAuth"], headEnv);
+    if (plan.kind === "request") {
+      expect(plan.request.body).toEqual({ title: "Add OAuth" });
+    } else {
+      throw new Error("expected request");
+    }
+  });
+
+  it("errors without an agentId", () => {
+    expect(planCommand(["pr"], headEnv).kind).toBe("error");
+  });
+
+  it("renders the created PR url", () => {
+    const out = renderResponse("pr", {
+      ok: true,
+      result: { status: "created", url: "https://gh/pr/9", branch: "feat" },
+    });
+    expect(out).toContain("https://gh/pr/9");
+  });
+
+  it("renders the no-remote ready-branch message", () => {
+    const out = renderResponse("pr", {
+      ok: true,
+      result: { status: "no_remote", branch: "feat", diffstat: "1 file", message: "Branch feat is ready" },
+    });
+    expect(out).toContain("ready");
+  });
+});
+
 describe("env-fallback resolution", () => {
   it("builds a resolve GET from cwd when orchId is unset", () => {
     const req = buildResolveRequest({

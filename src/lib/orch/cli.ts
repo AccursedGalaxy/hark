@@ -1,5 +1,6 @@
 import { AGENT_ROLES, AUTONOMY_LEVELS, type AgentRole } from "../../shared/protocol.js";
 import type { OrchStatusView } from "../../shared/protocol.js";
+import { renderPrResult, type PrResult } from "./pr.js";
 
 // The `hark` CLI is the head's action surface (Bash-invokable). A Claude Code
 // session can't call hark's HTTP API out of the box, so the head acts through
@@ -47,7 +48,8 @@ export type RenderKind =
   | "log"
   | "watch"
   | "promote"
-  | "autonomy";
+  | "autonomy"
+  | "pr";
 
 export type CliPlan =
   | { kind: "request"; request: RequestSpec; render: RenderKind }
@@ -67,6 +69,7 @@ const USAGE = `hark — orchestration head CLI
   hark agent brief <id> "<task>"            assign a worker its next task
   hark agent diff  <id> [--stat|--full]     worker branch vs base (--stat default)
   hark agent log   <id>                     recent commits on the worker branch
+  hark pr          <id> [--title "…"]        push the worker branch + open a PR (human lands)
 
 Roles: ${AGENT_ROLES.join(", ")}
 Targets the orchestration in $HARK_ORCH_ID against $HARK_API; if unset, the
@@ -74,7 +77,7 @@ project's promoted PM-head is resolved from the cwd.`;
 
 // Split argv into positionals + flags. Value flags (--task, --depends-on) take
 // the next token; boolean flags (--stat, --full) don't.
-const VALUE_FLAGS = new Set(["--task", "--depends-on"]);
+const VALUE_FLAGS = new Set(["--task", "--depends-on", "--title"]);
 interface ParsedArgs {
   positionals: string[];
   flags: Record<string, string | true>;
@@ -145,6 +148,24 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
       };
     }
     return err(`unknown head command: ${sub ?? "(none)"}`);
+  }
+
+  if (group === "pr") {
+    if (!env.orchId) return err("HARK_ORCH_ID is not set");
+    const id = sub; // `hark pr <agentId> [--title "…"]`
+    if (!id) return err('pr needs an agentId: hark pr <agentId> [--title "…"]');
+    const title = typeof flags["--title"] === "string" ? flags["--title"] : undefined;
+    const body: Record<string, unknown> = {};
+    if (title) body.title = title;
+    return {
+      kind: "request",
+      request: {
+        method: "POST",
+        path: `/api/orchestrations/${env.orchId}/agents/${id}/pr`,
+        body,
+      },
+      render: "pr",
+    };
   }
 
   if (group === "orch") {
@@ -334,6 +355,10 @@ export function renderResponse(render: RenderKind, data: unknown): string {
     }
     case "autonomy":
       return d.ok ? `autonomy → ${d.autonomyLevel}` : JSON.stringify(d);
+    case "pr": {
+      const result = d.result as PrResult | undefined;
+      return result ? renderPrResult(result) : JSON.stringify(d);
+    }
     case "send":
     case "brief":
       return d.ok ? "ok" : JSON.stringify(d);

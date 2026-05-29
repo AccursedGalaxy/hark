@@ -349,6 +349,26 @@ export async function currentBranch(repoRoot: string): Promise<string> {
   }
 }
 
+// Whether the repo has an `origin` remote — the precondition for opening a PR
+// (Sharp Edge 7). False on any failure (no remote / not a repo).
+export async function hasOrigin(repoRoot: string): Promise<boolean> {
+  try {
+    const out = await runGit(["-C", repoRoot, "remote", "get-url", "origin"]);
+    return out.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Push a branch to origin with upstream tracking. Throws on failure (the caller
+// reports it) — no checkout happens, so the project root tree is never touched.
+export async function pushBranch(
+  repoRoot: string,
+  branch: string,
+): Promise<void> {
+  await runGit(["-C", repoRoot, "push", "-u", "origin", branch]);
+}
+
 // Worker branch vs base, as text. `full` returns the patch; otherwise --stat.
 // Used by the `hark agent diff` endpoint.
 export async function diffBranch(opts: {
