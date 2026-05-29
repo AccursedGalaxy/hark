@@ -455,6 +455,37 @@ describe("planCommand — agent send / brief / diff / log", () => {
   it("errors when stop is given no agentId", () => {
     expect(planCommand(["agent", "stop"], headEnv).kind).toBe("error");
   });
+
+  it("GETs a worker's persisted summary", () => {
+    const plan = planCommand(["agent", "summary", "agent-2"], headEnv);
+    expect(plan).toEqual({
+      kind: "request",
+      request: {
+        method: "GET",
+        path: "/api/orchestrations/orch-1/agents/agent-2/summary",
+      },
+      render: "summary",
+    });
+  });
+
+  it("errors when summary is given no agentId", () => {
+    expect(planCommand(["agent", "summary"], headEnv).kind).toBe("error");
+  });
+
+  it("renders the persisted summary text", () => {
+    expect(
+      renderResponse("summary", { summary: "Changed foo.ts\nAdded a guard", lifecycle: "done" }),
+    ).toBe("Changed foo.ts\nAdded a guard");
+  });
+
+  it("renders a clear message when no summary is recorded", () => {
+    expect(renderResponse("summary", { summary: "", lifecycle: "done" })).toContain(
+      "no summary recorded",
+    );
+    expect(
+      renderResponse("summary", { summary: "", lifecycle: "running" }),
+    ).toContain("running");
+  });
 });
 
 describe("planCommand — errors and help", () => {

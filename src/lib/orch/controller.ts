@@ -7,6 +7,7 @@ import type { OrchStore } from "./store.js";
 import type { Orchestrator } from "./orchestrator.js";
 import {
   DEFAULT_AUTONOMY_LEVEL,
+  isTerminalLifecycle,
   type AgentLifecycle,
   type AgentMetrics,
   type AgentRole,
@@ -54,14 +55,20 @@ export function scanMarkers(text: string): MarkerScan {
   }
   if (!best) return { kind: null, summary: "" };
   const before = text.slice(0, best.at).trim();
-  // Keep the trailing few non-empty lines as the human-facing summary.
-  const lines = before.split("\n").map((l) => l.trim());
+  return { kind: best.kind, summary: leanSummary(before) };
+}
+
+// Trailing few non-empty lines of a block — the lean, head-facing summary kept
+// small for the head's context budget. Reused to trim the persisted full marker
+// text back down when building a head notification from it.
+export function leanSummary(text: string, maxLines = 8): string {
+  const lines = text.split("\n").map((l) => l.trim());
   const tail: string[] = [];
-  for (let i = lines.length - 1; i >= 0 && tail.length < 8; i--) {
+  for (let i = lines.length - 1; i >= 0 && tail.length < maxLines; i--) {
     if (lines[i].length > 0) tail.unshift(lines[i]);
     else if (tail.length > 0) break; // stop at the first blank above the block
   }
-  return { kind: best.kind, summary: tail.join("\n") };
+  return tail.join("\n");
 }
 
 // Concatenate the text the agent actually emitted (assistant text blocks) so
@@ -76,6 +83,25 @@ export function transcriptText(events: TranscriptEvent[]): string {
     }
   }
   return parts.join("\n");
+}
+
+// The worker's FULL final message with the marker tokens stripped — the
+// untruncated deliverable persisted on the record (`hark agent summary`). The
+// marker always lands in the last assistant turn, so the final message text IS
+// the agent's "what changed / why blocked" prose. Distinct from scanMarkers'
+// lean `summary`, which is deliberately truncated for the head notification.
+export function finalMarkerText(events: TranscriptEvent[]): string {
+  let text = "";
+  for (const e of events) {
+    if (e.kind !== "assistant") continue;
+    const parts: string[] = [];
+    for (const b of e.blocks) {
+      if (b.type === "text") parts.push(b.text);
+    }
+    if (parts.length > 0) text = parts.join("\n");
+  }
+  for (const m of MARKERS) text = text.split(m.token).join("");
+  return text.trim();
 }
 
 // ---- Runaway circuit-breaker ------------------------------------------------
@@ -252,6 +278,10 @@ export interface AutonomyState {
   // A Stop hook fired: the agent ended a turn (reached a turn boundary).
   stopped: boolean;
   scan: MarkerScan;
+  // The FULL marker text to persist on the record when this turn drives a
+  // terminal/handoff transition (untruncated; see finalMarkerText). Empty when
+  // there's no marker.
+  fullSummary: string;
   // Self-review nudges already sent this run.
   nudges: number;
   maxNudges: number;
@@ -259,7 +289,13 @@ export interface AutonomyState {
 
 export type AutonomyAction =
   | { type: "deliver_briefing" }
-  | { type: "set_lifecycle"; lifecycle: AgentLifecycle; reason?: string }
+  | {
+      type: "set_lifecycle";
+      lifecycle: AgentLifecycle;
+      reason?: string;
+      // FULL marker text to persist on the record (hark agent summary).
+      summary?: string;
+    }
   | { type: "nudge" }
   | { type: "none" };
 
@@ -278,15 +314,21 @@ export function decideAutonomyAction(s: AutonomyState): AutonomyAction {
 
   switch (s.scan.kind) {
     case "done":
-      return { type: "set_lifecycle", lifecycle: "done" };
+      return { type: "set_lifecycle", lifecycle: "done", summary: s.fullSummary };
     case "blocked":
       return {
         type: "set_lifecycle",
         lifecycle: "blocked",
         reason: s.scan.summary || "agent reported it is blocked",
+        summary: s.fullSummary,
       };
     case "handoff":
-      return { type: "set_lifecycle", lifecycle: "review", reason: s.scan.summary };
+      return {
+        type: "set_lifecycle",
+        lifecycle: "review",
+        reason: s.scan.summary,
+        summary: s.fullSummary,
+      };
     default:
       break;
   }
@@ -328,6 +370,26 @@ const MARKER_VERB: Record<MarkerKind, string> = {
   blocked: "is BLOCKED and needs a decision",
   handoff: "HANDED OFF its work",
 };
+
+// Map a terminal lifecycle to the head-notification marker that drives routing
+// (blocked → escalate to the human; done → advance the pipeline). `failed` is a
+// needs-you event like `blocked`; `stopped` was a deliberate halt, so it routes
+// like `done` (re-plan / advance). `cancelled` is a teardown — null means "don't
+// wake" (the worktree is being removed anyway).
+export function markerForLifecycle(
+  lifecycle: AgentLifecycle,
+): MarkerKind | null {
+  switch (lifecycle) {
+    case "blocked":
+    case "failed":
+      return "blocked";
+    case "done":
+    case "stopped":
+      return "done";
+    default:
+      return null;
+  }
+}
 
 // Render a worker→head notification as the text typed into the head's session.
 // Compact and action-oriented: it tells the head what happened and points at
@@ -488,9 +550,11 @@ export class AutonomyController {
 
     // Pull transcript for marker scan + metrics (only if there's a session).
     let scan: MarkerScan = { kind: null, summary: "" };
+    let fullSummary = "";
     if (agent.sessionId) {
       const events = await this.deps.readTranscript(agent.sessionId);
       scan = scanMarkers(transcriptText(events));
+      if (scan.kind) fullSummary = finalMarkerText(events);
       const tm = metricsFromTranscript(events);
       await this.deps.store.updateAgent(orchId, agentId, (a) => {
         a.metrics.inputTokens = tm.inputTokens;
@@ -509,6 +573,7 @@ export class AutonomyController {
       briefingDelivered: agent.briefedAt != null,
       stopped: opts.stopped,
       scan,
+      fullSummary,
       nudges,
       maxNudges: this.deps.maxNudges ?? DEFAULT_MAX_NUDGES,
     });
@@ -516,26 +581,67 @@ export class AutonomyController {
     await this.perform(orch.id, agent, action);
 
     // Head-session model: when a worker actually TRANSITIONS to a state the
-    // head must act on (done/blocked/review), build a compact notification.
-    // Gated on a real transition so the reconcile tick can't spam every 3s
-    // while an agent sits blocked. For a task-scoped executor head this pushes
-    // into its pane; for a managed PM-head it records the event and ROUTES by
-    // mode + dial (escalate / idle-push / pull) per §3.5.
+    // head must act on, notify the head. Gated on a real transition so the
+    // reconcile tick can't spam every 3s while an agent sits in place.
     if (
       action.type === "set_lifecycle" &&
       action.lifecycle !== prevLifecycle &&
-      (action.lifecycle === "done" ||
-        action.lifecycle === "blocked" ||
-        action.lifecycle === "review") &&
       orch.head
     ) {
-      const note = await this.notifyHead(orch, agent, scan);
-      if (orch.managed && note) {
-        await this.routeManagedHead(orch, agent, note);
+      if (isTerminalLifecycle(action.lifecycle)) {
+        // Terminal (done/blocked): route through the fire-once wake so the head
+        // is woken exactly once whether the transition is seen here (marker) or
+        // by the reconcile loop — robust to the marker-vs-reconcile race.
+        await this.wakeHeadForTerminal(orch.id, agent.id);
+      } else if (action.lifecycle === "review") {
+        // Handoff → review is NOT terminal (the work is awaiting review, not
+        // finished), so it keeps the immediate transition-guarded notification.
+        const note = await this.notifyHead(orch, agent, "handoff", scan.summary);
+        if (orch.managed && note) {
+          await this.routeManagedHead(orch, agent, note);
+        }
       }
     }
 
     return action;
+  }
+
+  // Wake the head exactly once for a worker that has reached a terminal
+  // lifecycle (done/blocked/failed/stopped). This is the single guaranteed
+  // wake-up: it fires whether the terminal transition was detected via the
+  // worker's marker (onAgentSignal, immediately) or via the reconcile loop (a
+  // stop / circuit-breaker trip / failure that never emitted a marker). The
+  // `headWokeAt` guard — mirroring `killedAt` — makes the double-cover idempotent
+  // so the head is never woken twice nor missed. Builds the notification from
+  // the PERSISTED summary (trimmed lean), so it works even after the live
+  // session is gone. Best-effort: a routing failure leaves the guard set (it has
+  // been "woken" as far as the once-guarantee is concerned) and is swallowed.
+  async wakeHeadForTerminal(orchId: string, agentId: string): Promise<void> {
+    const orch = await this.deps.store.getOrchestration(orchId);
+    if (!orch?.head) return;
+    const agent = orch.agents.find((a) => a.id === agentId);
+    if (!agent || agent.headWokeAt != null) return;
+    if (!isTerminalLifecycle(agent.lifecycle)) return;
+    const marker = markerForLifecycle(agent.lifecycle);
+    if (!marker) return; // cancelled (teardown) — nothing to wake for.
+
+    // Fire-once guard set up front so a re-entrant reconcile tick can't double.
+    await this.deps.store.updateAgent(orchId, agentId, (a) => {
+      a.headWokeAt = this.now();
+    });
+    try {
+      const note = await this.notifyHead(
+        orch,
+        agent,
+        marker,
+        leanSummary(agent.summary ?? ""),
+      );
+      if (orch.managed && note) {
+        await this.routeManagedHead(orch, agent, note);
+      }
+    } catch {
+      /* best-effort — the guard is set; the record carries the summary/reason */
+    }
   }
 
   // Runaway circuit-breaker: trip a worker that's spiralling on identical no-op
@@ -595,9 +701,12 @@ export class AutonomyController {
 
     const reason = decision.reason ?? "circuit-breaker tripped";
     // setAgentLifecycle records the reason on the worker record (blockedReason)
-    // + an agent_lifecycle event, so the PM sees WHY in `orch status`.
+    // + an agent_lifecycle event, so the PM sees WHY in `orch status`. The
+    // breaker has no marker text, so the reason IS the persisted summary
+    // (retrievable via `hark agent summary`).
     await this.deps.store.setAgentLifecycle(orchId, agentId, "blocked", {
       reason,
+      summary: reason,
     });
     await this.deps.store.appendEvent({
       ts: this.now(),
@@ -609,7 +718,12 @@ export class AutonomyController {
     });
     // A runaway is a needs-you event: page the human through the same path a
     // worker BLOCKED marker uses, so the PM-head learns WHY it stopped (the
-    // reason is also on the record regardless). Best-effort.
+    // reason is also on the record regardless). Best-effort. This escalation IS
+    // this worker's head-wake, so set the `headWokeAt` guard to keep the
+    // reconcile loop's generic wake-up from escalating the same trip twice.
+    await this.deps.store.updateAgent(orchId, agentId, (a) => {
+      a.headWokeAt = this.now();
+    });
     if (orch.head && this.deps.escalateToHuman) {
       try {
         await this.deps.escalateToHuman(orch, agent, reason);
@@ -657,7 +771,8 @@ export class AutonomyController {
   private async notifyHead(
     orch: Orchestration,
     agent: OrchAgent,
-    scan: MarkerScan,
+    marker: MarkerKind,
+    summary: string,
   ): Promise<HeadNotification | null> {
     if (!orch.head) return null;
     let diffstat = "";
@@ -675,8 +790,8 @@ export class AutonomyController {
       role: agent.role,
       agentId: agent.id,
       branch: agent.branch,
-      marker: (scan.kind ?? "done") as MarkerKind,
-      summary: scan.summary,
+      marker,
+      summary,
       diffstat,
       commitCount,
     };
@@ -693,8 +808,8 @@ export class AutonomyController {
       orchestrationId: orch.id,
       agentId: agent.id,
       kind: "head_notified",
-      message: `head notified: ${agent.role} → ${scan.kind ?? "update"}`,
-      data: { marker: scan.kind, pushed: !orch.managed },
+      message: `head notified: ${agent.role} → ${marker}`,
+      data: { marker, pushed: !orch.managed },
     });
     return note;
   }
@@ -799,12 +914,13 @@ export class AutonomyController {
         return;
       }
       case "set_lifecycle": {
-        // A human-blocking transition counts as an intervention point.
+        // A human-blocking transition counts as an intervention point. The full
+        // marker text (action.summary) is persisted so it survives reaping.
         await this.deps.store.setAgentLifecycle(
           orchId,
           agent.id,
           action.lifecycle,
-          { reason: action.reason },
+          { reason: action.reason, summary: action.summary },
         );
         if (action.lifecycle === "blocked") {
           await this.deps.store.updateAgent(orchId, agent.id, (a) => {

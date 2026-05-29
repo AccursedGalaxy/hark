@@ -13,6 +13,9 @@ import {
   decideCircuitBreaker,
   decideHeadRouting,
   DEFAULT_RUNAWAY_LIMIT,
+  finalMarkerText,
+  leanSummary,
+  markerForLifecycle,
   metricsFromTranscript,
   scanMarkers,
   toolUseSignature,
@@ -174,6 +177,7 @@ describe("decideAutonomyAction", () => {
     briefingDelivered: true,
     stopped: false,
     scan: { kind: null, summary: "" },
+    fullSummary: "",
     nudges: 0,
     maxNudges: 3,
   };
@@ -919,5 +923,324 @@ describe("AutonomyController.checkCircuitBreaker", () => {
   it("uses DEFAULT_RUNAWAY_LIMIT when no override is given", () => {
     expect(DEFAULT_RUNAWAY_LIMIT).toBeGreaterThanOrEqual(4);
     expect(DEFAULT_RUNAWAY_LIMIT).toBeLessThanOrEqual(5);
+  });
+
+  it("persists the breaker reason as the summary + sets headWokeAt (no double-wake)", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    const { controller } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: "", commitCount: 0 }),
+      limit: 3,
+    });
+    // Open the window (baseline), then spam past the limit to trip it.
+    probes.push(bashTurn("recover-check-1"), bashTurn("recover-check-2"));
+    await controller.checkCircuitBreaker(orchId, agentId);
+    for (let n = 3; n <= 8; n++) probes.push(bashTurn(`recover-check-${n}`));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(true);
+
+    const a = (await store.getOrchestration(orchId))!.agents.find(
+      (x) => x.id === agentId,
+    )!;
+    // The breaker has no marker prose, so its reason IS the persisted summary.
+    expect(a.summary).toContain("circuit-breaker");
+    expect(a.summary).toBe(a.blockedReason);
+    // The breaker escalation IS the wake — the guard is set so the reconcile
+    // loop's generic wake-up won't escalate the same trip a second time.
+    expect(a.headWokeAt).toBe(1_000_000);
+  });
+});
+
+// ---- finalMarkerText (full persisted summary) ------------------------------
+
+describe("finalMarkerText", () => {
+  it("returns the LAST assistant message in full, marker stripped", () => {
+    const events: TranscriptEvent[] = [
+      { kind: "assistant", uuid: "1", ts: "t", blocks: [{ type: "text", text: "early turn" }] },
+      {
+        kind: "assistant",
+        uuid: "2",
+        ts: "t",
+        blocks: [
+          {
+            type: "text",
+            text: `Changed foo.ts and bar.ts.\nAdded a guard.\n${DONE_MARKER}`,
+          },
+        ],
+      },
+    ];
+    const full = finalMarkerText(events);
+    expect(full).toContain("Changed foo.ts and bar.ts.");
+    expect(full).toContain("Added a guard.");
+    expect(full).not.toContain("early turn"); // only the final message
+    expect(full).not.toContain(DONE_MARKER); // marker stripped
+  });
+
+  it("keeps lines the lean 8-line summary would truncate", () => {
+    const long = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n");
+    const events: TranscriptEvent[] = [
+      {
+        kind: "assistant",
+        uuid: "1",
+        ts: "t",
+        blocks: [{ type: "text", text: `${long}\n${DONE_MARKER}` }],
+      },
+    ];
+    const full = finalMarkerText(events);
+    // The lean summary drops the head of the block; the full text keeps it.
+    expect(leanSummary(full)).not.toContain("line 1\n");
+    expect(full).toContain("line 1");
+    expect(full).toContain("line 12");
+  });
+});
+
+describe("markerForLifecycle", () => {
+  it("maps terminal lifecycles to a routing marker (null for cancelled)", () => {
+    expect(markerForLifecycle("done")).toBe("done");
+    expect(markerForLifecycle("stopped")).toBe("done");
+    expect(markerForLifecycle("blocked")).toBe("blocked");
+    expect(markerForLifecycle("failed")).toBe("blocked");
+    expect(markerForLifecycle("cancelled")).toBeNull();
+    expect(markerForLifecycle("running")).toBeNull();
+  });
+});
+
+// ---- PART 1: summary persists + survives reaping ---------------------------
+
+describe("AutonomyController summary persistence", () => {
+  it("persists the FULL DONE marker text on the record, surviving a reap", async () => {
+    const orchId = await makeOrchWithHead();
+    const agent = await store.addAgent(orchId, {
+      role: "coder",
+      branch: "hark/ship-login/coder-1",
+      worktreeDir: "/wt/coder",
+      sessionId: "sess-coder",
+      lifecycle: "running",
+    });
+    await store.updateAgent(orchId, agent!.id, (a) => (a.briefedAt = 1));
+
+    // A summary longer than the lean 8-line notification cap.
+    const lines = Array.from({ length: 11 }, (_, i) => `change ${i + 1}`);
+    const summaryText = lines.join("\n");
+    const { controller } = makeHeadAwareController({
+      ready: true,
+      transcript: [
+        {
+          kind: "assistant",
+          uuid: "a",
+          ts: "t",
+          blocks: [{ type: "text", text: `${summaryText}\n${DONE_MARKER}` }],
+        },
+      ],
+    });
+
+    await controller.onAgentSignal(orchId, agent!.id, { stopped: true });
+
+    const persisted = (await store.getOrchestration(orchId))!.agents.find(
+      (a) => a.id === agent!.id,
+    )!;
+    expect(persisted.lifecycle).toBe("done");
+    // FULL text — including the first line a lean truncation would drop — and
+    // without the marker token.
+    expect(persisted.summary).toContain("change 1");
+    expect(persisted.summary).toContain("change 11");
+    expect(persisted.summary).not.toContain(DONE_MARKER);
+
+    // Simulate the reconcile loop reaping the finished worker: the live session
+    // is gone (killedAt set), but the summary lives on the record.
+    await orchestrator.killTerminalAgent(orchId, agent!.id);
+    const afterReap = (await store.getOrchestration(orchId))!.agents.find(
+      (a) => a.id === agent!.id,
+    )!;
+    expect(afterReap.killedAt).not.toBeNull();
+    expect(afterReap.summary).toContain("change 1");
+    expect(afterReap.summary).toContain("change 11");
+  });
+
+  it("persists the BLOCKED marker text too", async () => {
+    const orchId = await makeOrchWithHead();
+    const agent = await store.addAgent(orchId, {
+      role: "coder",
+      branch: "hark/ship-login/coder-1",
+      worktreeDir: "/wt/coder",
+      sessionId: "sess-coder",
+      lifecycle: "running",
+    });
+    await store.updateAgent(orchId, agent!.id, (a) => (a.briefedAt = 1));
+    const { controller } = makeHeadAwareController({
+      ready: true,
+      transcript: [
+        {
+          kind: "assistant",
+          uuid: "a",
+          ts: "t",
+          blocks: [
+            { type: "text", text: `Need a decision on the API shape.\n${BLOCKED_MARKER}` },
+          ],
+        },
+      ],
+    });
+    await controller.onAgentSignal(orchId, agent!.id, { stopped: true });
+    const a = (await store.getOrchestration(orchId))!.agents.find(
+      (x) => x.id === agent!.id,
+    )!;
+    expect(a.lifecycle).toBe("blocked");
+    expect(a.summary).toContain("Need a decision on the API shape.");
+  });
+});
+
+// ---- PART 2: reliable worker-done wake-up (exactly once) -------------------
+
+interface WakeRecord {
+  escalations: { role: string; reason: string }[];
+  pushes: string[];
+  headSent: string[];
+}
+
+// A managed PM-head controller wired with all three routing deps (escalate /
+// push / head-send) so we can assert exactly which fires — and how often.
+function makeWakeController(opts: {
+  transcript?: TranscriptEvent[];
+  idleThresholdMs?: number;
+}): { controller: AutonomyController } & WakeRecord {
+  const rec: WakeRecord = { escalations: [], pushes: [], headSent: [] };
+  const controller = new AutonomyController({
+    store,
+    orchestrator,
+    readTranscript: async () => opts.transcript ?? [],
+    sendText: async () => {},
+    sessionReady: async () => true,
+    sendToHead: async (_o, text) => {
+      rec.headSent.push(text);
+    },
+    agentGitSummary: async () => ({ diffstat: "1 file +2/-0", commitCount: 1 }),
+    escalateToHuman: async (_o, a, reason) => {
+      rec.escalations.push({ role: a.role, reason });
+    },
+    pushHeadTurn: async (_o, text) => {
+      rec.pushes.push(text);
+    },
+    idleThresholdMs: opts.idleThresholdMs ?? 1000,
+    now: () => 1_000_000,
+  });
+  return { controller, ...rec };
+}
+
+async function makeManagedWithWorker(opts: {
+  lifecycle: OrchAgent["lifecycle"];
+  summary?: string;
+  lastHumanAt?: number;
+  autonomyLevel?: "L0" | "L1" | "L2" | "L3";
+}): Promise<{ orchId: string; agentId: string }> {
+  const o = await store.createManagedHead({
+    name: "PM: app",
+    goal: "g",
+    projectRoot: "/home/u/app",
+    projectName: "app",
+    baseRef: "main",
+    sessionId: "sess-head",
+    branch: "main",
+    autonomyLevel: opts.autonomyLevel ?? "L2",
+  });
+  await store.updateOrchestration(o.id, (x) => {
+    x.lastHumanAt = opts.lastHumanAt ?? 0; // idle by default (now=1_000_000)
+  });
+  const agent = await store.addAgent(o.id, {
+    role: "coder",
+    branch: "hark/app/coder-1",
+    worktreeDir: "/wt/coder",
+    sessionId: "sess-coder",
+    lifecycle: opts.lifecycle,
+  });
+  await store.updateAgent(o.id, agent!.id, (a) => {
+    a.briefedAt = 1;
+    if (opts.summary != null) a.summary = opts.summary;
+  });
+  return { orchId: o.id, agentId: agent!.id };
+}
+
+describe("AutonomyController.wakeHeadForTerminal (reliable wake-up)", () => {
+  it("wakes the head exactly once, even across repeated calls", async () => {
+    const { orchId, agentId } = await makeManagedWithWorker({
+      lifecycle: "done",
+      summary: "did the thing",
+    });
+    const { controller, pushes } = makeWakeController({});
+
+    await controller.wakeHeadForTerminal(orchId, agentId);
+    await controller.wakeHeadForTerminal(orchId, agentId);
+    await controller.wakeHeadForTerminal(orchId, agentId);
+
+    expect(pushes).toHaveLength(1); // fire-once guard (headWokeAt)
+    const a = (await store.getOrchestration(orchId))!.agents.find(
+      (x) => x.id === agentId,
+    )!;
+    expect(a.headWokeAt).toBe(1_000_000);
+  });
+
+  it("wakes for a worker that went terminal via the reconcile loop (stopped, NO marker)", async () => {
+    // The exact bug: a worker reaches terminal WITHOUT ever emitting a marker
+    // (here a `hark agent stop`). The wake must still fire, built from the
+    // persisted record — not from a live transcript scan.
+    const { orchId, agentId } = await makeManagedWithWorker({
+      lifecycle: "stopped",
+      summary: "halted by operator",
+    });
+    const { controller, pushes, escalations } = makeWakeController({});
+
+    await controller.wakeHeadForTerminal(orchId, agentId);
+    // `stopped` routes like `done` → idle advance push.
+    expect(pushes).toHaveLength(1);
+    expect(escalations).toHaveLength(0);
+  });
+
+  it("escalates a blocked worker exactly once (no double-page)", async () => {
+    const { orchId, agentId } = await makeManagedWithWorker({
+      lifecycle: "blocked",
+      summary: "needs a human call",
+    });
+    const { controller, escalations, pushes } = makeWakeController({});
+    await controller.wakeHeadForTerminal(orchId, agentId);
+    await controller.wakeHeadForTerminal(orchId, agentId);
+    expect(escalations).toHaveLength(1);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it("does nothing for a non-terminal worker", async () => {
+    const { orchId, agentId } = await makeManagedWithWorker({
+      lifecycle: "running",
+    });
+    const { controller, pushes, escalations } = makeWakeController({});
+    await controller.wakeHeadForTerminal(orchId, agentId);
+    expect(pushes).toHaveLength(0);
+    expect(escalations).toHaveLength(0);
+    const a = (await store.getOrchestration(orchId))!.agents.find(
+      (x) => x.id === agentId,
+    )!;
+    expect(a.headWokeAt).toBeUndefined();
+  });
+
+  it("marker path + reconcile path together fire the wake exactly once", async () => {
+    // onAgentSignal sees the DONE marker and wakes immediately; the reconcile
+    // loop's safety-net wake then no-ops via the guard — exactly once total.
+    const { orchId, agentId } = await makeManagedWithWorker({
+      lifecycle: "running",
+    });
+    const { controller, pushes } = makeWakeController({
+      transcript: [
+        {
+          kind: "assistant",
+          uuid: "a",
+          ts: "t",
+          blocks: [{ type: "text", text: `all done\n${DONE_MARKER}` }],
+        },
+      ],
+    });
+
+    await controller.onAgentSignal(orchId, agentId, { stopped: true }); // marker path
+    await controller.wakeHeadForTerminal(orchId, agentId); // reconcile safety net
+    await controller.wakeHeadForTerminal(orchId, agentId);
+
+    expect(pushes).toHaveLength(1);
   });
 });
