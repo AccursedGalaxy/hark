@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>hark — how the agents work</title>
+<style>
+  :root {
+    --bg: #0c0e12;
+    --panel: #14171d;
+    --panel-2: #1a1e26;
+    --line: #262b35;
+    --ink: #e7ebf2;
+    --muted: #9aa4b2;
+    --faint: #6b7480;
+    --accent: #6ea8fe;
+    --human: #f0b86e;
+    --pm: #8b7bf0;
+    --role-researcher: #6ee7b7;
+    --role-coder: #6ea8fe;
+    --role-tester: #f0a4c0;
+    --role-documenter: #c9a8f0;
+    --role-reviewer: #f0b86e;
+    --ok: #6ee7b7;
+    --warn: #f0b86e;
+    --stop: #f08a8a;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 800px at 70% -10%, #161b25 0%, var(--bg) 55%);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px 96px; }
+
+  /* ---- header ---- */
+  header.hero { padding: 72px 0 40px; border-bottom: 1px solid var(--line); }
+  .kicker {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--faint); margin: 0 0 14px;
+  }
+  h1 { font-size: clamp(34px, 5vw, 56px); line-height: 1.05; margin: 0 0 18px; letter-spacing: -.02em; }
+  h1 .mark { color: var(--accent); }
+  .lede { font-size: 19px; color: var(--muted); max-width: 760px; margin: 0; }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  section { padding: 56px 0 0; }
+  h2 {
+    font-size: 13px; font-family: var(--mono); letter-spacing: .16em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 6px;
+  }
+  .h2sub { font-size: 26px; margin: 0 0 28px; letter-spacing: -.01em; }
+  .section-note { color: var(--muted); max-width: 720px; margin: -16px 0 28px; }
+
+  /* ---- org chart ---- */
+  .org { display: flex; flex-direction: column; align-items: center; gap: 0; }
+  .node {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px 24px; text-align: center; position: relative; width: 100%; max-width: 460px;
+  }
+  .node .tag {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--faint); display: block; margin-bottom: 4px;
+  }
+  .node .name { font-size: 20px; font-weight: 650; }
+  .node .desc { color: var(--muted); font-size: 14px; margin-top: 4px; }
+  .node.human { border-color: color-mix(in srgb, var(--human) 50%, var(--line)); }
+  .node.human .name { color: var(--human); }
+  .node.pm { border-color: color-mix(in srgb, var(--pm) 55%, var(--line)); max-width: 560px; }
+  .node.pm .name { color: var(--pm); }
+
+  .connector { width: 2px; height: 30px; background: linear-gradient(var(--line), var(--line)); }
+  .rail-label {
+    font-family: var(--mono); font-size: 11px; color: var(--faint);
+    background: var(--bg); padding: 3px 10px; border: 1px solid var(--line); border-radius: 20px;
+    margin: -1px 0; position: relative; z-index: 2;
+  }
+
+  .workers {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px;
+    width: 100%; margin-top: 8px;
+  }
+  .worker {
+    background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--c);
+    border-radius: 12px; padding: 16px 14px; text-align: center;
+  }
+  .worker .name { font-weight: 650; font-size: 16px; color: var(--c); }
+  .worker .one { color: var(--muted); font-size: 12.5px; margin-top: 6px; line-height: 1.45; }
+  .workers-cap {
+    text-align: center; color: var(--faint); font-size: 13px; margin-top: 18px;
+    font-family: var(--mono); max-width: 640px; margin-left: auto; margin-right: auto;
+  }
+
+  /* ---- role detail cards ---- */
+  .roles-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+  .role-card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px 22px 20px; border-left: 4px solid var(--c);
+  }
+  .role-card.span { grid-column: 1 / -1; }
+  .role-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  .role-head .title { font-size: 20px; font-weight: 650; color: var(--c); }
+  .role-head .reports {
+    font-family: var(--mono); font-size: 11px; color: var(--faint);
+    border: 1px solid var(--line); border-radius: 20px; padding: 2px 10px;
+  }
+  .role-mission { color: var(--muted); margin: 2px 0 14px; }
+  .role-card h4 {
+    font-size: 11px; font-family: var(--mono); letter-spacing: .12em; text-transform: uppercase;
+    color: var(--faint); margin: 16px 0 8px;
+  }
+  .role-card ul { margin: 0; padding-left: 18px; }
+  .role-card li { margin: 5px 0; font-size: 14.5px; }
+  .role-card li::marker { color: var(--c); }
+  .dod { background: var(--panel-2); border-radius: 10px; padding: 12px 14px 12px 4px; margin-top: 6px; }
+  .dod ul { padding-left: 26px; }
+  .dod li { color: var(--muted); }
+
+  /* ---- generic info cards ---- */
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .cards.two { grid-template-columns: repeat(2, 1fr); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px;
+  }
+  .card .ico { font-size: 22px; margin-bottom: 8px; }
+  .card h3 { margin: 0 0 6px; font-size: 16px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; }
+  .card code { font-family: var(--mono); font-size: 12.5px; color: var(--accent); background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
+
+  /* ---- markers row ---- */
+  .markers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .marker {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px;
+    border-top: 3px solid var(--c);
+  }
+  .marker .token { font-family: var(--mono); font-size: 15px; color: var(--c); font-weight: 600; }
+  .marker .meaning { color: var(--muted); font-size: 14px; margin-top: 8px; }
+
+  /* ---- flow ---- */
+  .flow { display: flex; flex-direction: column; gap: 0; }
+  .flow-step { display: grid; grid-template-columns: 44px 1fr; gap: 16px; }
+  .flow-step .num {
+    font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--accent);
+    width: 36px; height: 36px; display: grid; place-items: center;
+    border: 1px solid var(--line); border-radius: 50%; background: var(--panel);
+  }
+  .flow-step .stem { width: 2px; background: var(--line); margin: 0 auto; flex: 1; }
+  .flow-col { display: flex; flex-direction: column; align-items: center; }
+  .flow-body { padding-bottom: 22px; }
+  .flow-body .t { font-weight: 600; font-size: 16px; }
+  .flow-body .d { color: var(--muted); font-size: 14px; margin-top: 3px; }
+  .flow-body .d code { font-family: var(--mono); font-size: 12.5px; color: var(--accent); }
+
+  /* ---- lifecycle pills ---- */
+  .pills { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .pill {
+    font-family: var(--mono); font-size: 13px; padding: 6px 13px; border-radius: 20px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  }
+  .pill.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+  .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+  .pill.stop { color: var(--stop); border-color: color-mix(in srgb, var(--stop) 45%, var(--line)); }
+  .arrow { color: var(--faint); }
+  .lc-note { color: var(--faint); font-size: 13px; margin-top: 14px; }
+
+  /* ---- autonomy dial ---- */
+  .dial { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .level {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+  }
+  .level .lv { font-family: var(--mono); font-size: 13px; color: var(--accent); font-weight: 600; }
+  .level.def { border-color: color-mix(in srgb, var(--pm) 50%, var(--line)); }
+  .level .name2 { font-weight: 600; margin: 6px 0 4px; }
+  .level p { margin: 0; color: var(--muted); font-size: 13px; }
+  .level .badge { font-family: var(--mono); font-size: 10px; color: var(--pm); text-transform: uppercase; letter-spacing: .1em; }
+
+  /* ---- cli ---- */
+  .cli {
+    background: #0a0c10; border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px;
+    font-family: var(--mono); font-size: 13.5px; overflow-x: auto;
+  }
+  .cli .line { display: block; white-space: pre; }
+  .cli .cmd { color: var(--ink); }
+  .cli .cmd b { color: var(--accent); font-weight: 600; }
+  .cli .c { color: var(--faint); }
+
+  footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--line); color: var(--faint); font-size: 13px; }
+  footer code { font-family: var(--mono); color: var(--muted); }
+
+  @media (max-width: 860px) {
+    .roles-grid, .cards, .cards.two, .markers, .dial { grid-template-columns: 1fr; }
+    .workers { grid-template-columns: repeat(2, 1fr); }
+    .role-card.span { grid-column: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <p class="kicker">Org chart · how the agents work</p>
+    <h1>Inside a <span class="mark">hark</span> orchestration</h1>
+    <p class="lede">
+      hark runs a project as a small, role-playing company of Claude&nbsp;Code sessions.
+      A <strong>human</strong> sets direction. A <strong>PM-head</strong> owns the plan and
+      delegates. A team of <strong>worker agents</strong> — each in its own isolated git
+      worktree — does the building. Everyone is the same model; the <em>role</em> is carried
+      entirely by the briefing each one receives.
+    </p>
+  </header>
+
+  <!-- ============ ORG CHART ============ -->
+  <section>
+    <h2>The hierarchy</h2>
+    <p class="h2sub">Who reports to whom</p>
+
+    <div class="org">
+      <div class="node human">
+        <span class="tag">Owner</span>
+        <span class="name">Human</span>
+        <div class="desc">Sets direction, sets the autonomy dial, and owns every landing — the final merge &amp; deploy are always theirs.</div>
+      </div>
+
+      <div class="connector"></div>
+      <span class="rail-label">steers in natural language · receives escalations</span>
+      <div class="connector"></div>
+
+      <div class="node pm">
+        <span class="tag">Foreman · persistent role</span>
+        <span class="name">PM-head</span>
+        <div class="desc">Product manager for one project. Ideates with the human, keeps PLAN.md honest, decomposes work, and dispatches the team. <strong>Read-only on the code — never writes, runs, or lands it.</strong></div>
+      </div>
+
+      <div class="connector"></div>
+      <span class="rail-label">spawns on demand · harvests finished branches</span>
+      <div class="connector"></div>
+
+      <div class="workers">
+        <div class="worker" style="--c:var(--role-researcher)">
+          <div class="name">Researcher</div>
+          <div class="one">Maps the problem, returns a findings brief</div>
+        </div>
+        <div class="worker" style="--c:var(--role-coder)">
+          <div class="name">Coder</div>
+          <div class="one">Implements on an isolated branch</div>
+        </div>
+        <div class="worker" style="--c:var(--role-tester)">
+          <div class="name">Tester</div>
+          <div class="one">Proves it works, guards it with tests</div>
+        </div>
+        <div class="worker" style="--c:var(--role-documenter)">
+          <div class="name">Documenter</div>
+          <div class="one">Records what changed, updates PLAN.md</div>
+        </div>
+        <div class="worker" style="--c:var(--role-reviewer)">
+          <div class="name">Reviewer</div>
+          <div class="one">Adversarially reviews before it merges</div>
+        </div>
+      </div>
+      <p class="workers-cap">Roles are a palette, not a fixed roster — the PM spawns what a task needs and skips what it doesn't. Each worker gets its own git worktree + branch, so two agents never collide on the working tree.</p>
+    </div>
+  </section>
+
+  <!-- ============ ROLE DETAIL ============ -->
+  <section>
+    <h2>The roster</h2>
+    <p class="h2sub">What each role does &amp; when it's "done"</p>
+    <p class="section-note">Every agent is an ordinary Claude Code session driven over tmux. Its role is a <em>charter</em> — a mission, a way of working, and a definition of done — delivered as the first message it receives.</p>
+
+    <div class="roles-grid">
+
+      <!-- PM-head full width -->
+      <div class="role-card span" style="--c:var(--pm)">
+        <div class="role-head">
+          <span class="title">PM-head</span>
+          <span class="reports">reports to → Human</span>
+          <span class="reports">manages → all workers</span>
+        </div>
+        <p class="role-mission">A persistent, project-scoped product manager — a role, not a task with an end. PLAN.md is its durable brain; a fresh session resumes the role by re-reading it.</p>
+        <h4>How it works</h4>
+        <ul>
+          <li><strong>Pure PM, read-only on the tree</strong> — a <code>PreToolUse</code> hook denies any edit / write / tree-mutating git against the project. Only <code>PLAN.md</code> and <code>.hark/</code> are writable. This is enforced, not a guideline.</li>
+          <li><strong>Picks the cheapest path per item</strong> — apply a one-liner the human runs, paste a small patch in chat, or dispatch a worker for substantial / parallel work.</li>
+          <li><strong>Works from summaries, never transcripts</strong> — context discipline is make-or-break: a PM that slurps transcripts runs out of context and the orchestration dies.</li>
+          <li><strong>Never lands</strong> — it prepares ready branches and opens PRs; the human owns the final merge.</li>
+        </ul>
+        <h4>Never "done"</h4>
+        <div class="dod"><ul><li>An ongoing role — it emits no completion marker; it just keeps the plan honest and the team moving.</li></ul></div>
+      </div>
+
+      <!-- Researcher -->
+      <div class="role-card" style="--c:var(--role-researcher)">
+        <div class="role-head">
+          <span class="title">Researcher</span>
+          <span class="reports">reports to → PM-head</span>
+        </div>
+        <p class="role-mission">Maps the problem space and produces a concrete findings brief.</p>
+        <h4>Charter</h4>
+        <ul>
+          <li>Read before you write — explore the code, docs, and prior art.</li>
+          <li>Produce a brief, not code: files that matter, constraints, recommended approach with trade-offs.</li>
+          <li>Surface risks &amp; edge cases the Coder and Tester will hit.</li>
+          <li>Cite concrete <code>file:line</code> references so downstream roles don't re-derive the work.</li>
+        </ul>
+        <h4>Definition of done</h4>
+        <div class="dod"><ul>
+          <li>A brief covers files, constraints, approach, risks, and open questions.</li>
+          <li>Every claim is backed by a <code>file:line</code> or tagged "unverified".</li>
+          <li>The approach is specific enough that a Coder could start immediately.</li>
+        </ul></div>
+      </div>
+
+      <!-- Coder -->
+      <div class="role-card" style="--c:var(--role-coder)">
+        <div class="role-head">
+          <span class="title">Coder</span>
+          <span class="reports">reports to → PM-head</span>
+        </div>
+        <p class="role-mission">Implements the change on an isolated branch, in small commits.</p>
+        <h4>Charter</h4>
+        <ul>
+          <li>Work in <em>this worktree only</em> — never touch other agents' trees or the human's checkout.</li>
+          <li>Match the surrounding code: naming, comment density, idioms.</li>
+          <li>Small, reviewable commits; keep the build green as you go.</li>
+          <li>Follow the Researcher's brief if there is one; deviate only with a recorded reason.</li>
+        </ul>
+        <h4>Definition of done</h4>
+        <div class="dod"><ul>
+          <li>Change implemented; project builds / type-checks cleanly.</li>
+          <li>Work committed with descriptive messages.</li>
+          <li>No scaffolding, dead code, or unrelated edits left behind.</li>
+          <li>A short change summary recorded for the Reviewer.</li>
+        </ul></div>
+      </div>
+
+      <!-- Tester -->
+      <div class="role-card" style="--c:var(--role-tester)">
+        <div class="role-head">
+          <span class="title">Tester</span>
+          <span class="reports">reports to → PM-head</span>
+        </div>
+        <p class="role-mission">Proves the change works and guards it with tests.</p>
+        <h4>Charter</h4>
+        <ul>
+          <li>Write and run tests for the change, including the Researcher's flagged edge cases.</li>
+          <li>Use the project's existing framework &amp; conventions — discover them, don't impose.</li>
+          <li>Run the full suite, linter, and type-checker; report <em>actual</em> output, not a summary.</li>
+          <li>A red test that exposes a real bug is a success — report it, don't paper over it.</li>
+        </ul>
+        <h4>Definition of done</h4>
+        <div class="dod"><ul>
+          <li>Tests cover the change and its known edge cases.</li>
+          <li>Full suite + linter + type-checker run, real results reported.</li>
+          <li>Any failure is fixed or escalated with a precise reproduction.</li>
+        </ul></div>
+      </div>
+
+      <!-- Documenter -->
+      <div class="role-card" style="--c:var(--role-documenter)">
+        <div class="role-head">
+          <span class="title">Documenter</span>
+          <span class="reports">reports to → PM-head</span>
+        </div>
+        <p class="role-mission">Records what changed for humans and the next session.</p>
+        <h4>Charter</h4>
+        <ul>
+          <li>Update the user- and developer-facing docs the change touches.</li>
+          <li>Keep PLAN.md honest — move shipped work, drain the inbox lines this change resolves.</li>
+          <li>Write for a cold-start session: explain the <em>why</em>, not just the what.</li>
+          <li>Document only what the Coder and Tester actually produced — never invent behaviour.</li>
+        </ul>
+        <h4>Definition of done</h4>
+        <div class="dod"><ul>
+          <li>Affected docs are updated and accurate.</li>
+          <li>PLAN.md reflects reality; inbox triaged.</li>
+          <li>No doc claims behaviour the code doesn't have.</li>
+        </ul></div>
+      </div>
+
+      <!-- Reviewer -->
+      <div class="role-card" style="--c:var(--role-reviewer)">
+        <div class="role-head">
+          <span class="title">Reviewer</span>
+          <span class="reports">reports to → PM-head</span>
+        </div>
+        <p class="role-mission">Adversarially reviews the result before it merges.</p>
+        <h4>Charter</h4>
+        <ul>
+          <li>Review the diff against the goal and the brief — assume there's a bug until convinced otherwise.</li>
+          <li>Check correctness, edge cases, security, and that tests really exercise the change.</li>
+          <li>Verify the Coder's claims by reading (and cheaply running) the code — don't trust the summary.</li>
+          <li>Produce a prioritized list: blocking / should-fix / nit.</li>
+        </ul>
+        <h4>Definition of done</h4>
+        <div class="dod"><ul>
+          <li>Full diff reviewed for correctness, edge cases, security.</li>
+          <li>Findings recorded with <code>file:line</code> references.</li>
+          <li>A clear verdict: <em>APPROVED</em> or <em>CHANGES-REQUESTED</em> with the blocking items.</li>
+        </ul></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ HOW THEY COMMUNICATE ============ -->
+  <section>
+    <h2>Communication</h2>
+    <p class="h2sub">How a report travels up the chain</p>
+    <p class="section-note">A worker never "calls a meeting." It prints a bracketed marker token at the end of its final message; the autonomy controller reads it off the transcript and routes the result up to the PM — who works from a compact notification, never the raw transcript.</p>
+
+    <h4 style="font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);margin:0 0 12px">The three signals a worker can raise</h4>
+    <div class="markers">
+      <div class="marker" style="--c:var(--ok)">
+        <span class="token">[[HARK:DONE]]</span>
+        <div class="meaning">Finished and self-reviewed against the definition of done. Preceded by a 2–4 line summary of what it produced.</div>
+      </div>
+      <div class="marker" style="--c:var(--warn)">
+        <span class="token">[[HARK:BLOCKED]]</span>
+        <div class="meaning">Genuinely stuck — needs a human decision. Preceded by the specific question. The PM escalates it to the human.</div>
+      </div>
+      <div class="marker" style="--c:var(--accent)">
+        <span class="token">[[HARK:HANDOFF]]</span>
+        <div class="meaning">Work is ready for another role (e.g. Coder → Reviewer). Preceded by the handoff summary that role will need.</div>
+      </div>
+    </div>
+
+    <div style="height:36px"></div>
+
+    <div class="flow">
+      <div class="flow-step">
+        <div class="flow-col"><div class="num">1</div><div class="stem"></div></div>
+        <div class="flow-body">
+          <div class="t">Briefing delivered</div>
+          <div class="d">Once a worker's session is past its trust prompt, the controller sends its role charter as the first message — over the same <code>tmux send-keys</code> path a human uses. Lifecycle flips to <code>running</code>.</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-col"><div class="num">2</div><div class="stem"></div></div>
+        <div class="flow-body">
+          <div class="t">Self-review loop</div>
+          <div class="d">If the worker ends a turn without a marker, the controller nudges it back toward its definition of done — up to 3 times, then escalates to <code>blocked</code> for a human.</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-col"><div class="num">3</div><div class="stem"></div></div>
+        <div class="flow-body">
+          <div class="t">Worker → PM notification</div>
+          <div class="d">On a terminal marker the PM is woken <em>exactly once</em> with a compact note: role, branch, marker, diffstat, and commit count — plus the summary. <strong>Never the transcript.</strong></div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-col"><div class="num">4</div><div class="stem"></div></div>
+        <div class="flow-body">
+          <div class="t">The newsroom</div>
+          <div class="d">At the top of each PM turn, a <em>"TEAM NEWS since your last turn"</em> block is injected — a filtered, time-ordered feed of every worker that hit done / blocked / handoff / failed across the project's live orchestrations. The PM triages: surface to the human now, or note it to PLAN.</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-col"><div class="num">5</div></div>
+        <div class="flow-body">
+          <div class="t">Routing the result</div>
+          <div class="d">A <span style="color:var(--warn)">blocker</span> always pages the human. An <span style="color:var(--ok)">advance</span> (done/handoff) is pulled in via the newsroom while the human is chatting — or, if the human is quiet and the dial allows, the PM is pushed a single turn to move the pipeline forward on its own. It never lands work.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ LIFECYCLE ============ -->
+  <section>
+    <h2>State</h2>
+    <p class="h2sub">A worker's lifecycle</p>
+    <div class="pills">
+      <span class="pill">pending</span><span class="arrow">→</span>
+      <span class="pill">spawning</span><span class="arrow">→</span>
+      <span class="pill active">running</span><span class="arrow">→</span>
+      <span class="pill warn">blocked</span>
+      <span class="pill">review</span>
+      <span class="pill ok">done</span>
+      <span class="pill stop">failed</span>
+      <span class="pill stop">stopped</span>
+      <span class="pill stop">cancelled</span>
+    </div>
+    <p class="lc-note">
+      <code style="font-family:var(--mono);color:var(--muted)">pending</code> → record created · <code style="font-family:var(--mono);color:var(--muted)">spawning</code> → worktree ready, session launching · <code style="font-family:var(--mono);color:var(--muted)">running</code> → working toward its definition of done.
+      The terminal states (blocked / done / failed / stopped / cancelled) are end states — a finished worker is reaped (its process killed) but its worktree and branch are kept so the PM can still read the work.
+    </p>
+  </section>
+
+  <!-- ============ GUARDRAILS ============ -->
+  <section>
+    <h2>Safety</h2>
+    <p class="h2sub">Guardrails that keep autonomy safe</p>
+    <div class="cards">
+      <div class="card">
+        <div class="ico">🌳</div>
+        <h3>Worktree isolation</h3>
+        <p>Every agent — workers and the executor head — gets its own git worktree + branch. They share one object store but never one live tree, so parallel agents can't collide.</p>
+      </div>
+      <div class="card">
+        <div class="ico">🔒</div>
+        <h3>Read-only PM</h3>
+        <p>A <code>PreToolUse</code> hook runs every PM tool call through a guard that denies writes to the source tree. Only <code>PLAN.md</code> and <code>.hark/</code> are writable — "pure PM" is a system property, not trust.</p>
+      </div>
+      <div class="card">
+        <div class="ico">⚡</div>
+        <h3>Runaway circuit-breaker</h3>
+        <p>A worker that repeats identical no-op commands without advancing its branch is tripped to <code>blocked</code> and reaped — defending against the token-burning spiral, independent of the autonomy dial.</p>
+      </div>
+      <div class="card">
+        <div class="ico">🛑</div>
+        <h3>Manual stop</h3>
+        <p><code>hark agent stop &lt;id&gt;</code> SIGTERMs a worker's session — idempotent and zombie-safe — while keeping its worktree so the work survives.</p>
+      </div>
+      <div class="card">
+        <div class="ico">🙋</div>
+        <h3>Human owns landing</h3>
+        <p>The PM prepares branches and opens PRs but never merges into the working tree. The final fast-forward / merge stays the human's, at a moment they choose.</p>
+      </div>
+      <div class="card">
+        <div class="ico">📋</div>
+        <h3>PLAN.md as the brain</h3>
+        <p>Durable decisions live in PLAN.md via targeted edits (concurrent-session safe), so any fresh session resumes the project by re-reading it — not by trusting a chat history.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ AUTONOMY DIAL ============ -->
+  <section>
+    <h2>Autonomy</h2>
+    <p class="h2sub">The dial the human controls</p>
+    <p class="section-note">A per-project setting governs only how far the PM advances the pipeline <em>on its own while the human is quiet</em>. Blockers always escalate to the human, and the PM never lands work — at any level.</p>
+    <div class="dial">
+      <div class="level">
+        <span class="lv">L0</span>
+        <div class="name2">Propose</div>
+        <p>Only suggests plans &amp; diffs; the human dispatches and applies everything.</p>
+      </div>
+      <div class="level">
+        <span class="lv">L1</span>
+        <div class="name2">Assisted</div>
+        <p>Dispatches on the human's approval; advances on the human's nod.</p>
+      </div>
+      <div class="level def">
+        <span class="lv">L2</span> <span class="badge">default</span>
+        <div class="name2">Supervised-auto</div>
+        <p>When idle, autonomously advances the pipeline (done → next stage, spawn a tester, open a PR). Still escalates blockers, never lands.</p>
+      </div>
+      <div class="level">
+        <span class="lv">L3</span>
+        <div class="name2">Background</div>
+        <p>Runs whole features end-to-end while the human is away.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ACTION SURFACE ============ -->
+  <section>
+    <h2>Action surface</h2>
+    <p class="h2sub">How the PM acts — the <code style="font-family:var(--mono);color:var(--accent)">hark</code> CLI</p>
+    <p class="section-note">The PM does everything through one thin CLI (already on its PATH, auto-targeting its project). It dispatches, harvests, and prepares PRs — but never checks a branch out against the project root.</p>
+    <div class="cli">
+<span class="line cmd"><b>hark orch status</b>                       <span class="c"># one compact line per worker: role / lifecycle / branch / diffstat / turns</span></span>
+<span class="line cmd"><b>hark agent spawn</b> &lt;role&gt; --task "…"      <span class="c"># spawn a worker with a charter; prints its agentId  (--depends-on &lt;id&gt;)</span></span>
+<span class="line cmd"><b>hark agent send</b>  &lt;id&gt; "…"              <span class="c"># steer / message a running worker</span></span>
+<span class="line cmd"><b>hark agent brief</b> &lt;id&gt; "&lt;task&gt;"        <span class="c"># assign the worker its next task</span></span>
+<span class="line cmd"><b>hark agent diff</b>  &lt;id&gt; [--stat|--full]  <span class="c"># worker branch vs base</span></span>
+<span class="line cmd"><b>hark agent log</b>   &lt;id&gt;                  <span class="c"># recent commits on the worker branch</span></span>
+<span class="line cmd"><b>hark agent summary</b> &lt;id&gt;               <span class="c"># the worker's full terminal marker text (survives reaping)</span></span>
+<span class="line cmd"><b>hark agent stop</b>  &lt;id&gt;                  <span class="c"># SIGTERM the worker, keep its worktree</span></span>
+<span class="line cmd"><b>hark pr</b> &lt;id&gt; [--title "…"] [--base &lt;ref&gt;] <span class="c"># push the branch + open a PR — the human still merges it</span></span>
+    </div>
+    <p class="lc-note">For a genuine branch collision the PM doesn't merge by hand — it dispatches an <strong>integrator</strong> worker (<code style="font-family:var(--mono);color:var(--muted)">hark agent spawn coder --task "merge A into B, resolve conflicts"</code>), because conflict resolution is judgment and stays in an isolated worktree. With no remote, <code style="font-family:var(--mono);color:var(--muted)">hark pr</code> degrades gracefully to "branch ready, here's the diff."</p>
+  </section>
+
+  <footer>
+    <p>This overview is drawn directly from the hark codebase — chiefly
+    <code>src/lib/orch/roles.ts</code> (the charters &amp; briefings),
+    <code>src/lib/orch/controller.ts</code> (the autonomy loop, markers &amp; circuit-breaker),
+    <code>src/lib/orch/newsroom.ts</code> (the team-news feed),
+    <code>src/lib/orch/pmGuard.ts</code> (read-only enforcement), and
+    <code>src/shared/protocol.ts</code> (roles, lifecycle &amp; the autonomy dial).
+    It describes only behaviour present in the current code.</p>
+  </footer>
+
+</div>
+</body>
+</html>
