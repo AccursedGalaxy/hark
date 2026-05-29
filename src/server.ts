@@ -28,7 +28,8 @@ import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
 import { OrchStore } from "./lib/orch/store.js";
 import { Orchestrator } from "./lib/orch/orchestrator.js";
-import { AutonomyController } from "./lib/orch/controller.js";
+import { AutonomyController, type TranscriptMetrics } from "./lib/orch/controller.js";
+import { MetricsDb, headAgentId } from "./lib/orch/metricsDb.js";
 import {
   correlateAgentSessions,
   correlateHeadSessions,
@@ -293,6 +294,17 @@ const promptState = new PromptState();
 // orchestrator wires it to real git-worktree isolation and the existing tmux
 // spawn path so each agent is a normal Claude Code session in its own branch.
 const orchStore = new OrchStore();
+// Central metrics datastore (Phase 0): a DERIVED, rebuildable SQLite read-model
+// that AUGMENTS the JSON store, ingested off the reconcile loop below. Best
+// effort — if the DB can't be opened (e.g. an unexpected runtime), the harness
+// must still run, so we null it out and every ingest call no-ops. The JSON
+// files remain the source of truth.
+let metricsDb: MetricsDb | null = null;
+try {
+  metricsDb = new MetricsDb();
+} catch (err) {
+  console.error("metrics DB unavailable — continuing without it:", err);
+}
 // The hark CLI lives at <repo>/bin/hark; __dirname is dist/ after build (or
 // src/ under tsx) — ../bin resolves to <repo>/bin in both. Prepended to the
 // head/worker session PATH so `hark …` just works inside them.
@@ -1559,6 +1571,19 @@ app.post("/api/orchestrations/:id/agents/:agentId/pr", async (req, res) => {
         data: { kind: "pr", url: result.url },
       });
     }
+    // Record EVERY outcome in the metrics DB — not just `created`. The dropped
+    // statuses (no_remote/no_base/no_gh/error) carry a `message` but no event
+    // was ever persisted for them, so a failed PR attempt left no trace.
+    metricsDb?.insertPrOutcome({
+      orchId: orch.id,
+      agentId: agent.id,
+      ts: Date.now(),
+      status: result.status,
+      url: result.status === "created" ? result.url : undefined,
+      baseRef,
+      branch: result.branch,
+      message: result.status === "created" ? undefined : result.message,
+    });
     res.json({ ok: true, result });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -1772,6 +1797,72 @@ async function findOrchRoleForSession(
   return null;
 }
 
+// Ingest one orchestration's state into the metrics DB for this reconcile
+// tick. AUGMENT-only and best-effort: any failure is swallowed so a DB hiccup
+// can never stall reconcile (the JSON store stays authoritative). Reuses the
+// transcript metrics the loop already computed (`samples`/`headTm`) so we
+// never re-read a transcript here. Steps: (a) upsert the orchestration + agent
+// + head snapshots; (b) APPEND a token_samples row per session from the
+// already-read metrics (cost priced inside the DB layer); (c) tail events.jsonl
+// from the stored byte offset into the events table.
+async function ingestMetrics(
+  orchId: string,
+  samples: Map<string, TranscriptMetrics>,
+  headTm: TranscriptMetrics | null,
+): Promise<void> {
+  if (!metricsDb) return;
+  const db = metricsDb;
+  try {
+    // Re-read so the snapshot reflects this tick's mutations (session-id
+    // backfill, lifecycle flips, killedAt/headWokeAt) that happened above.
+    const fresh = await orchStore.getOrchestration(orchId);
+    if (!fresh) return;
+    const now = Date.now();
+    db.upsertOrchestration(fresh);
+    for (const a of fresh.agents) {
+      db.upsertAgent(orchId, a);
+      const tm = samples.get(a.id);
+      if (!tm) continue; // no session/transcript read this tick
+      db.insertTokenSample({
+        sessionId: a.sessionId, // tolerates null (uncorrelated agent)
+        agentId: a.id,
+        orchId,
+        ts: now,
+        inputTokens: tm.inputTokens,
+        outputTokens: tm.outputTokens,
+        cacheReadTokens: tm.cacheReadTokens,
+        cacheCreationTokens: tm.cacheCreationTokens,
+        turns: tm.turns,
+        model: tm.model,
+      });
+    }
+    if (fresh.head) {
+      db.upsertHead(orchId, fresh.head);
+      if (headTm) {
+        db.insertTokenSample({
+          sessionId: fresh.head.sessionId,
+          agentId: headAgentId(orchId),
+          orchId,
+          ts: now,
+          inputTokens: headTm.inputTokens,
+          outputTokens: headTm.outputTokens,
+          cacheReadTokens: headTm.cacheReadTokens,
+          cacheCreationTokens: headTm.cacheCreationTokens,
+          turns: headTm.turns,
+          model: headTm.model,
+        });
+      }
+    }
+    // Tail just the bytes appended to events.jsonl since the stored offset.
+    const prev = db.getEventsOffset(orchId);
+    const { events, offset } = await orchStore.readEventsFromOffset(orchId, prev);
+    if (events.length > 0) db.appendEvents(events);
+    if (offset !== prev) db.setEventsOffset(orchId, offset);
+  } catch (err) {
+    if (TIMING) console.error("metrics ingest failed for", orchId, err);
+  }
+}
+
 // Reconcile orchestration state against the live-session view: backfill
 // session ids for agents whose session has registered, keep metrics fresh,
 // and (when active autonomy is on) deliver briefings to newly-ready agents.
@@ -1801,8 +1892,12 @@ async function reconcileOrchestrations(): Promise<void> {
   //    delivery for ready agents (and worker→head notifications) when autonomy
   //    is enabled. The head is driven separately (it's not in agents[]).
   for (const o of active) {
+    // Collect this tick's fresh transcript metrics so the DB ingest below can
+    // reuse them (a token_samples row per session) without re-reading.
+    const samples = new Map<string, TranscriptMetrics>();
     for (const agent of o.agents) {
-      await orchController.refreshMetrics(o.id, agent.id);
+      const tm = await orchController.refreshMetrics(o.id, agent.id);
+      if (tm) samples.set(agent.id, tm);
       if (
         agent.lifecycle === "done" ||
         agent.lifecycle === "blocked" ||
@@ -1836,17 +1931,21 @@ async function reconcileOrchestrations(): Promise<void> {
         await orchController.wakeHeadForTerminal(o.id, agent.id);
       }
     }
+    let headTm: TranscriptMetrics | null = null;
     if (o.head) {
-      // onHeadSignal refreshes head metrics on every tick and (under autonomy)
-      // delivers the head briefing + interprets a head DONE as orch-complete.
-      // With autonomy off we still want fresh head metrics for the dashboard,
-      // so call it either way — it only types keystrokes when ORCH_AUTONOMY.
+      // Under autonomy onHeadSignal delivers the head briefing + interprets a
+      // head DONE as orch-complete (and refreshes metrics as a side effect).
       if (ORCH_AUTONOMY) {
         await orchController.onHeadSignal(o.id, { stopped: false });
-      } else {
-        await orchController.refreshHeadMetrics(o.id);
       }
+      // refreshHeadMetrics keeps the dashboard's head card fresh AND returns
+      // the sample for the DB ingest. The head is a single session, so calling
+      // it even under autonomy (a second cheap read) is fine and keeps the
+      // sample path uniform with the agents'.
+      headTm = await orchController.refreshHeadMetrics(o.id);
     }
+    // Mirror this tick into the derived metrics DB (best-effort, never throws).
+    await ingestMetrics(o.id, samples, headTm);
   }
 }
 
