@@ -5,6 +5,7 @@ stays bounded at 10. Newest first within this file too — append at the
 top when rotating. Git history is the real archive; this file is just
 the readable trail for cold starts that want more than 10.*
 
+- Pending prompt no longer disappears on a second client: `noteTranscriptEvents` Phase 2 only fires on `assistant` events, so a queued-prompt `user` event with `ts > requestedAt` (replayed when any client opens the transcript stream) can no longer broadcast `pending=undefined` to every connected client.
 - Mobile horizontal-overflow fix: markdown tables wrap in a scroll container, `.md pre` clamped, transcript and slash menu pin `overflow-x: hidden` to defeat the implicit `auto` from `overflow-y`.
 - Sidebar ASKING pill no longer sticks on stale `status="waiting"`; `deriveState` requires a real pending payload (b3dc80e).
 - Bootstrap-from-codebase directive added to the CLAUDE.md managed block (7220b74).
