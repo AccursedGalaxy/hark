@@ -1,7 +1,8 @@
-import type {
-  AgentStatusLine,
-  OrchStatusView,
-  Orchestration,
+import {
+  isTerminalLifecycle,
+  type AgentStatusLine,
+  type OrchStatusView,
+  type Orchestration,
 } from "../../shared/protocol.js";
 
 // Build the lean status view the `hark orch status` command renders. Pure:
@@ -9,11 +10,20 @@ import type {
 // as a map, keeping this testable without a repo. Token totals collapse the
 // per-agent input+output into one figure (the head wants a glance, not a
 // breakdown). No transcripts, ever — context discipline.
+//
+// By default terminal workers (done/blocked/failed/stopped/cancelled) are
+// hidden so landed/halted workers stop re-cluttering the PM's primary surface;
+// active workers always show. `opts.all` reveals everything. Records are never
+// deleted — this is a view-level filter only.
 export function buildStatusView(
   orch: Orchestration,
   diffstats: Record<string, string> = {},
+  opts: { all?: boolean } = {},
 ): OrchStatusView {
-  const agents: AgentStatusLine[] = orch.agents.map((a) => ({
+  const visible = opts.all
+    ? orch.agents
+    : orch.agents.filter((a) => !isTerminalLifecycle(a.lifecycle));
+  const agents: AgentStatusLine[] = visible.map((a) => ({
     id: a.id,
     role: a.role,
     lifecycle: a.lifecycle,
