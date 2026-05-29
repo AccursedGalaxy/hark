@@ -168,6 +168,35 @@ describe("metricsFromTranscript", () => {
     expect(m.outputTokens).toBe(50);
     expect(m.cacheReadTokens).toBe(10);
   });
+
+  it("computes costUsd per-turn and captures the last-seen model", () => {
+    const assistant = (
+      model: string,
+      input: number,
+      output: number,
+    ): TranscriptEvent => ({
+      kind: "assistant",
+      uuid: "a",
+      ts: "t",
+      blocks: [{ type: "text", text: "x" }],
+      model,
+      usage: {
+        inputTokens: input,
+        outputTokens: output,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+        webSearchRequests: 0,
+        webFetchRequests: 0,
+      },
+    });
+    // 1M opus input ($15) + 1M sonnet output ($15) = $30; model = last seen.
+    const m = metricsFromTranscript([
+      assistant("claude-opus-4-7", 1_000_000, 0),
+      assistant("claude-sonnet-4-6", 0, 1_000_000),
+    ]);
+    expect(m.costUsd).toBeCloseTo(30, 6);
+    expect(m.model).toBe("claude-sonnet-4-6");
+  });
 });
 
 describe("decideAutonomyAction", () => {

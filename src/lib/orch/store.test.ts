@@ -148,3 +148,49 @@ describe("OrchStore concurrency", () => {
     expect(got!.agents).toHaveLength(10);
   });
 });
+
+describe("readEventsFromOffset (incremental tail)", () => {
+  it("returns [] and offset 0 for a log that doesn't exist yet", async () => {
+    const r = await store.readEventsFromOffset("orch-nope", 0);
+    expect(r.events).toEqual([]);
+    expect(r.offset).toBe(0);
+  });
+
+  it("tails only the bytes appended since the prior offset", async () => {
+    const o = await store.createOrchestration(baseInput); // appends 1 event
+    const first = await store.readEventsFromOffset(o.id, 0);
+    expect(first.events).toHaveLength(1);
+    expect(first.offset).toBeGreaterThan(0);
+
+    // Nothing new since `first.offset`.
+    const none = await store.readEventsFromOffset(o.id, first.offset);
+    expect(none.events).toEqual([]);
+    expect(none.offset).toBe(first.offset);
+
+    // Append two more, then tail from the saved offset → exactly the new two.
+    await store.appendEvent({
+      ts: 1,
+      orchestrationId: o.id,
+      kind: "note",
+      message: "one",
+    });
+    await store.appendEvent({
+      ts: 2,
+      orchestrationId: o.id,
+      kind: "note",
+      message: "two",
+    });
+    const next = await store.readEventsFromOffset(o.id, first.offset);
+    expect(next.events.map((e) => e.message)).toEqual(["one", "two"]);
+    expect(next.offset).toBeGreaterThan(first.offset);
+  });
+
+  it("restarts from 0 when the file shrank below the offset (rotation/truncation)", async () => {
+    const o = await store.createOrchestration(baseInput);
+    const all = await store.readEventsFromOffset(o.id, 0);
+    // Offset past EOF (file was rotated smaller) → re-read from the start.
+    const r = await store.readEventsFromOffset(o.id, all.offset + 10_000);
+    expect(r.events).toHaveLength(1);
+    expect(r.offset).toBe(all.offset);
+  });
+});

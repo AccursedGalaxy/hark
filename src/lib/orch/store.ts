@@ -487,6 +487,46 @@ export class OrchStore {
     );
   }
 
+  // Incremental tail of the event log from a byte offset, mirroring the
+  // transcript offset-read (src/lib/transcript.ts). Reads only the bytes
+  // appended since `offset` and returns them plus the new offset, so a caller
+  // (the metrics-DB ingest) can cheaply pull just-new events each tick instead
+  // of re-reading the whole file. Append-only + kernel-atomic line writes make
+  // reading to EOF safe; the new offset is always the file size.
+  async readEventsFromOffset(
+    orchId: string,
+    offset: number,
+  ): Promise<{ events: OrchEvent[]; offset: number }> {
+    let handle: fs.FileHandle;
+    try {
+      handle = await fs.open(this.eventsPath(orchId), "r");
+    } catch {
+      return { events: [], offset };
+    }
+    try {
+      const stat = await handle.stat();
+      // Truncated/rotated (or first read past a smaller file): restart from 0.
+      const from = stat.size < offset ? 0 : offset;
+      if (stat.size <= from) return { events: [], offset: stat.size };
+      const length = stat.size - from;
+      const buf = Buffer.alloc(length);
+      await handle.read(buf, 0, length, from);
+      const events: OrchEvent[] = [];
+      for (const line of buf.toString("utf8").split("\n")) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          events.push(JSON.parse(t) as OrchEvent);
+        } catch {
+          /* skip a corrupt/torn line rather than failing the whole read */
+        }
+      }
+      return { events, offset: stat.size };
+    } finally {
+      await handle.close();
+    }
+  }
+
   async readEvents(orchId: string): Promise<OrchEvent[]> {
     let raw: string;
     try {
