@@ -66,9 +66,9 @@ const USAGE = `hark — orchestration head CLI
   hark orch status                          show every agent + the head (compact)
   hark orch watch                           block until the next event, print it, exit
   hark orch set-base <ref>                  re-point the orchestration's base branch
-  hark agent spawn <role> --task "…" [--depends-on <id>]   spawn a worker (head only)
+  hark agent spawn <role> (--task "…" | --task-file <path|->) [--depends-on <id>]   spawn a worker (head only)
   hark agent send  <id> "<message>"         steer a worker
-  hark agent brief <id> "<task>"            assign a worker its next task
+  hark agent brief <id> ("<task>" | --task-file <path|->)   assign a worker its next task
   hark agent diff  <id> [--stat|--full]     worker branch vs base (--stat default)
   hark agent log   <id>                     recent commits on the worker branch
   hark pr          <id> [--title "…"] [--base <ref>]   push the worker branch + open a PR (human lands)
@@ -79,7 +79,13 @@ project's promoted PM-head is resolved from the cwd.`;
 
 // Split argv into positionals + flags. Value flags (--task, --depends-on) take
 // the next token; boolean flags (--stat, --full) don't.
-const VALUE_FLAGS = new Set(["--task", "--depends-on", "--title", "--base"]);
+const VALUE_FLAGS = new Set([
+  "--task",
+  "--task-file",
+  "--depends-on",
+  "--title",
+  "--base",
+]);
 interface ParsedArgs {
   positionals: string[];
   flags: Record<string, string | true>;
@@ -105,6 +111,33 @@ function parseArgs(args: string[]): ParsedArgs {
 
 function err(message: string): CliPlan {
   return { kind: "error", message };
+}
+
+// PURE. Return the `--task-file` value if present, else null. The runner
+// (bin/hark) uses this to decide whether to read a file/stdin before planning —
+// all the IO stays there; this only inspects argv.
+export function taskFileArg(argv: string[]): string | null {
+  const v = parseArgs(argv).flags["--task-file"];
+  return typeof v === "string" ? v : null;
+}
+
+// PURE. Return a NEW argv with `task` spliced in as `--task <task>` and any
+// `--task-file <path>` token pair removed, so the normal spawn/brief handling
+// sees a plain `--task`. If an inline `--task` is already present, argv is
+// returned untouched (the `--task-file` token kept) so planCommand surfaces the
+// "use either --task or --task-file, not both" error. Never mutates the input.
+export function injectTask(argv: string[], task: string): string[] {
+  if (argv.includes("--task")) return argv.slice();
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--task-file") {
+      i++; // also skip the path token that follows it
+      continue;
+    }
+    out.push(argv[i]);
+  }
+  out.push("--task", task);
+  return out;
 }
 
 export function planCommand(argv: string[], env: CliEnv): CliPlan {
@@ -224,6 +257,9 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
         if (!role || !(AGENT_ROLES as string[]).includes(role)) {
           return err(`spawn needs a valid role (${AGENT_ROLES.join(", ")})`);
         }
+        if (flags["--task"] !== undefined && flags["--task-file"] !== undefined) {
+          return err("use either --task or --task-file, not both");
+        }
         const task = typeof flags["--task"] === "string" ? flags["--task"] : "";
         if (!task.trim()) return err('spawn needs a task: --task "…"');
         const body: Record<string, unknown> = { role, task };
@@ -248,7 +284,15 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
       }
       case "brief": {
         const id = rest[0];
-        const task = rest.slice(1).join(" ");
+        if (flags["--task"] !== undefined && flags["--task-file"] !== undefined) {
+          return err("use either --task or --task-file, not both");
+        }
+        // After bin/hark injects a --task-file, the task arrives as --task;
+        // otherwise it's the trailing positional ("<task>").
+        const task =
+          typeof flags["--task"] === "string"
+            ? flags["--task"]
+            : rest.slice(1).join(" ");
         if (!id || !task.trim()) return err('brief needs: <agentId> "<task>"');
         return {
           kind: "request",
