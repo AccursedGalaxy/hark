@@ -310,6 +310,10 @@ export interface OrchAgent {
   lifecycle: AgentLifecycle;
   createdAt: number;
   updatedAt: number;
+  // When the role briefing was delivered to the session (the autonomy
+  // controller sends it once the session is past its trust prompt). Undefined
+  // until then; its presence is how the controller avoids re-briefing.
+  briefedAt?: number;
   // Set when lifecycle is "blocked" — the question the agent is waiting on.
   blockedReason?: string;
   metrics: AgentMetrics;
