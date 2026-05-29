@@ -296,3 +296,79 @@ after rc files load. See `buildLoginShellCommand` in `spawnSession.ts`.
 1. **No-remote case:** if the project has no `origin` / `gh` auth, should the head
    stop at "branch ready, here's the diff" (no PR), or should hark help set up the
    remote? Default to the former unless told otherwise.
+
+---
+
+# Direction: the persistent PM-head (design in progress, NOT built)
+
+*Reasoned 2026-05-29. This evolves the head from a task-scoped executor (born with
+a goal, dies when done) into a **persistent, project-scoped, conversational product
+manager**. Two pillars are decided; others are open. Captured so the reasoning
+survives — do not implement yet.*
+
+## The shift
+
+You open Claude Code in a project and just chat — no upfront goal. The session acts
+as a PM: it reasons with you about features/bugs/direction, keeps `PLAN.md` current,
+tracks open work, and **dispatches the head→worker→worktree engine we already built**
+only once you converge on something to build. The orchestration engine is unchanged;
+this is a new persistent, conversational *persona* in front of it. Keep the
+goal-first orchestration flow alongside it (decision #4 below is whether/how).
+
+## Pillar 1 (key insight): `PLAN.md` is the PM's externalized brain
+
+A PM that lives for the whole project can't fit in one context window. Resolution:
+its durable memory is **`PLAN.md` + the inbox + issues**, not its context. The
+session is just current working memory; every new session / compaction re-reads
+`PLAN.md` and resumes. So **"head" is a role a session plays for a project**, backed
+by durable project state — close a session, open another, it resumes by reading
+`PLAN.md`. This reuses substrate hark already has (per-project PLAN, capture
+shortcut, project grouping) and finally connects the planning layer to execution.
+The `CLAUDE.md` "edit PLAN via targeted edits — captures from other sessions can
+land between read and write" rule and the planned "modified by another session"
+indicator were written for exactly this concurrent-editing world.
+
+## Pillar 2 (DECIDED): the head is a pure PM — never writes or runs code
+
+The head has **zero write access to the working tree**, making it provably safe by
+construction (not by trust):
+
+- Tool surface = read + coordinate: `Read`/`Grep`/`Glob`, `Bash` limited to git
+  *reads* + `gh` + the `hark` CLI, and `Write`/`Edit` **scoped to `PLAN.md` +
+  coordination files only** (`.hark/`, issues via `gh`). Enforceable via a
+  `PreToolUse` hook that denies any `Edit`/`Write`/mutating-git whose path resolves
+  to source or the project root. "Pure PM" becomes a system property.
+- It **never runs source either** → verification delegates too: the worker runs its
+  own tests in its worktree, or the head dispatches a tester. Bonus: the head stays
+  context-lean (lives on diffs/summaries, never implementation weeds) — which
+  directly serves Pillar 1's longevity need.
+
+### Resolved git-safety model (the "head in your dirty working dir" problem)
+
+The danger was only **mutating git against the shared tree**. Resolution:
+- **Reads in place** — `git diff base..branch`, `log`, `show <ref>:<path>`, and your
+  uncommitted WIP. Safe; the head reviews from your dir and *sees your live WIP*
+  (a feature — situational awareness a worktree-isolated head lacks).
+- **Mutations routed elsewhere** — PRs pushed from branches with **no checkout**
+  (`git push` + `gh pr create`); real merges/conflict-resolution in a hark-managed
+  integration worktree via `git -C <dir>` (cwd stays your main dir), or by
+  dispatching an **integrator worker** for genuine conflicts (judgment, not
+  `merge -X`).
+- **The one mutation of *your* tree — the final fast-forward — stays yours**, at a
+  moment you choose. Covers the no-remote case too (head hands you a ready branch).
+- **Tree writers are partitioned**: *you* (hand/editor, head observes read-only) +
+  *workers* (isolated worktrees). The head writes neither code.
+- **Cost** of pure-PM = no instant head-authored micro-fix. Absorbed by three
+  patterns: trivial → you apply (head's right there); head **proposes a patch in
+  chat**, you apply (pure *and* fast); substantial/parallel → dispatch a worker.
+
+## Still open (to reason through next)
+
+- **Worker→head notifications vs the conversation** — push (typed into the head's
+  pane, derails your reasoning) vs pull (head polls `hark orch watch`, weaves
+  updates in at natural breaks). *Next topic.*
+- **Promotion** — auto-attach-the-first-session-with-announcement vs explicit
+  `/head`. (Leaning announce-then-attach.)
+- **One head per project, always-on**, or opt-in "managed" mode per project?
+- **Coexist with goal-first orchestration**, or replace it? (Leaning coexist:
+  PM-head as daily driver, goal-first for "just build this one thing".)
