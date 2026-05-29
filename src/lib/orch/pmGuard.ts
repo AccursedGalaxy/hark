@@ -70,15 +70,42 @@ function resolveTarget(p: string, cwd: string): string {
 
 // ---- Bash command parsing (best-effort) -------------------------------------
 
-// Split a command line into statements on shell control operators. Quotes are
-// not honoured here (an operator inside a quoted string would over-split) — a
-// conservative bias: over-splitting can only cause us to inspect more tokens,
-// never fewer.
+// Split a command line into statements on shell control operators (`&&`, `||`,
+// `|`, `;`, `&`, newline), honouring single + double quotes so an operator that
+// appears INSIDE a quoted string does not over-split the command. This matters
+// for worker-dispatch: a `--task` brief routinely contains `;`, `|`, `&` and
+// newlines as prose, and splitting on them would shred the quoted payload into
+// fragments that `inspectStatement` then misreads as shell. Quote state is
+// tracked across the whole string; `tokenize` honours quotes within a statement.
 function splitStatements(command: string): string[] {
-  return command
-    .split(/(?:&&|\|\||[|;\n&])/g)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const stmts: string[] = [];
+  let cur = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === ";" || ch === "\n" || ch === "&" || ch === "|") {
+      // Consume the paired second char of `&&` / `||` so it isn't left dangling.
+      if ((ch === "&" && command[i + 1] === "&") || (ch === "|" && command[i + 1] === "|")) {
+        i++;
+      }
+      stmts.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  stmts.push(cur);
+  return stmts.map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
 // Tokenize a statement, honouring single + double quotes so paths with spaces
@@ -139,6 +166,28 @@ function commandWord(tokens: string[]): { cmd: string; args: string[] } | null {
   if (i >= tokens.length) return null;
   const base = path.basename(tokens[i]);
   return { cmd: base, args: tokens.slice(i + 1) };
+}
+
+// Script runners that execute a script supplied as their first non-flag
+// argument (e.g. `node ./bin/hark …`). Used to recognise a hark dispatch
+// launched indirectly.
+const SCRIPT_RUNNERS = new Set(["node", "npx", "tsx", "ts-node", "bun", "deno"]);
+
+// Whether a statement is a sanctioned hark worker-dispatch invocation: the
+// command word is `hark`, or a script runner whose first non-flag argument
+// resolves to a `bin/hark` script. Such statements carry opaque `--task` /
+// `--title` payloads (prose, not shell), so the caller must not parse their
+// arguments as tree mutations. Applied per-statement — a real mutation chained
+// after a dispatch is its own statement and is still inspected.
+function isHarkDispatch(cw: { cmd: string; args: string[] }): boolean {
+  if (cw.cmd === "hark") return true;
+  if (SCRIPT_RUNNERS.has(cw.cmd)) {
+    const script = cw.args.find((a) => !a.startsWith("-"));
+    if (script) {
+      return path.basename(script) === "hark" && path.basename(path.dirname(script)) === "bin";
+    }
+  }
+  return false;
 }
 
 const GIT_TREE_MUTATORS = new Set([
@@ -228,6 +277,13 @@ function inspectStatement(
   planPath: string,
 ): string | null {
   const tokens = tokenize(stmt);
+  const cw = commandWord(tokens);
+
+  // A sanctioned hark worker-dispatch carries opaque prose in `--task` /
+  // `--title`; treat the whole statement as data and skip mutation parsing.
+  // (Per-statement: anything chained after it is a separate statement and is
+  // still inspected.)
+  if (cw && isHarkDispatch(cw)) return null;
 
   // Redirections (`>`/`>>` target) mutate the target file regardless of the
   // command. Scan token pairs.
@@ -240,7 +296,6 @@ function inspectStatement(
     }
   }
 
-  const cw = commandWord(tokens);
   if (!cw) return null;
 
   if (cw.cmd === "git") {
