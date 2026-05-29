@@ -3,6 +3,7 @@ import { CaptureModal } from "./components/CaptureModal";
 import { Composer } from "./components/Composer";
 import { ContextRail } from "./components/ContextRail";
 import { PlanPanel } from "./components/PlanPanel";
+import { OrchestrationPanel } from "./components/OrchestrationPanel";
 import { Sidebar } from "./components/Sidebar";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { TaskListPanel } from "./components/TaskListPanel";
@@ -11,6 +12,7 @@ import { Transcript } from "./components/Transcript";
 import { TrustPrompt } from "./components/TrustPrompt";
 import { useCaptureShortcut } from "./hooks/useCaptureShortcut";
 import { useMediaQuery } from "./hooks/useMediaQuery";
+import { useOrchestrations } from "./hooks/useOrchestrations";
 import { useProjects } from "./hooks/useProjects";
 import { useSessions } from "./hooks/useSessions";
 import { pickCaptureDefaultProject } from "./lib/captureDefaults";
@@ -57,27 +59,41 @@ export default function App() {
   } = useSessions();
 
   const { projects, refresh: refreshProjects } = useProjects();
+  const orchestrations = useOrchestrations();
 
-  // Mutually-exclusive selection: a session OR a project owns the main pane.
-  // Selecting one always clears the other; this matches the user's mental
-  // model where the rail row they clicked drives what's on screen.
+  // Mutually-exclusive selection: a session, a project, OR the orchestration
+  // view owns the main pane. Picking one always clears the others; this
+  // matches the user's mental model where the rail row they clicked drives
+  // what's on screen.
   const [currentProject, setCurrentProjectState] = useState<string | null>(
     null,
   );
+  const [orchView, setOrchView] = useState(false);
   const setCurrent = useCallback(
     (id: string | null) => {
       setCurrentRaw(id);
-      if (id !== null) setCurrentProjectState(null);
+      if (id !== null) {
+        setCurrentProjectState(null);
+        setOrchView(false);
+      }
     },
     [setCurrentRaw],
   );
   const setCurrentProject = useCallback(
     (key: string | null) => {
       setCurrentProjectState(key);
-      if (key !== null) setCurrentRaw(null);
+      if (key !== null) {
+        setCurrentRaw(null);
+        setOrchView(false);
+      }
     },
     [setCurrentRaw],
   );
+  const openOrchestrations = useCallback(() => {
+    setOrchView(true);
+    setCurrentRaw(null);
+    setCurrentProjectState(null);
+  }, [setCurrentRaw]);
 
   const [captureOpen, setCaptureOpen] = useState(false);
   useCaptureShortcut(useCallback(() => setCaptureOpen(true), []));
@@ -102,9 +118,10 @@ export default function App() {
     if (!wide) return;
     if (current) return;
     if (currentProject) return;
+    if (orchView) return;
     const first = sessions[0];
     if (first) setCurrent(first.sessionId);
-  }, [wide, current, currentProject, sessions, setCurrent]);
+  }, [wide, current, currentProject, orchView, sessions, setCurrent]);
 
   // If a previously-selected project disappears (e.g. install rolled back),
   // drop the selection so the main pane reverts to session/empty instead of
@@ -143,12 +160,13 @@ export default function App() {
   }, [awaitingPid, sessions, setCurrent]);
 
   const showSidebar = wide;
-  const showMain = wide || !!current || !!currentProject;
-  const showRailOnNarrow = !wide && !current && !currentProject;
+  const showMain = wide || !!current || !!currentProject || orchView;
+  const showRailOnNarrow = !wide && !current && !currentProject && !orchView;
   const ctxVisible =
     wide &&
     showContext &&
     !currentProject &&
+    !orchView &&
     !!currentSession &&
     currentSession.kind !== "pending";
 
@@ -182,6 +200,9 @@ export default function App() {
           currentProject={currentProject}
           onPickProject={setCurrentProject}
           onCapture={() => setCaptureOpen(true)}
+          orchestrationsActive={orchView}
+          orchestrationCount={orchestrations.orchestrations.length}
+          onOpenOrchestrations={openOrchestrations}
         />
       )}
 
@@ -195,7 +216,14 @@ export default function App() {
             />
           )}
 
-          {currentProjectInfo ? (
+          {orchView ? (
+            <OrchestrationPanel
+              api={orchestrations}
+              projects={projects}
+              onOpenSession={(sessionId) => setCurrent(sessionId)}
+              onBack={!wide ? () => setOrchView(false) : undefined}
+            />
+          ) : currentProjectInfo ? (
             <PlanPanel
               project={currentProjectInfo}
               onBack={!wide ? () => setCurrentProject(null) : undefined}

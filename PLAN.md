@@ -16,8 +16,8 @@ hark is a notification and remote-control hub for Claude Code sessions running o
 *Active threads being shipped right now. Hard cap: 3 items. One bullet
 per thread; one line of context allowed beneath it.*
 
-- **Orchestration layer** (branch `orchestration`) — multi-agent glue on the existing foundation. **Backend complete**: hardened tmux send path, `git worktree` isolation, 5 role charters + briefing builder, file-backed store + event log, orchestrator service (DI, rollback), autonomy controller (marker scan, bounded self-review loop, metrics) wired into server (3s reconcile loop + Stop-hook), endpoints (`POST/GET /api/orchestrations[/:id]`, teardown, agent `brief`). Active autonomy is opt-in (`HARK_ORCH_AUTONOMY=1`). Worktree flow verified end-to-end against a real repo. See `docs/orchestration.md`. All tested (460 green); not merged to main.
-  Next: frontend dashboard, then validate the active autonomy loop against live Claude sessions before defaulting it on.
+- **Orchestration layer** (branch `orchestration`) — multi-agent glue on the existing foundation. **Backend complete + dashboard shipped**: hardened tmux send path, `git worktree` isolation, 5 role charters + briefing builder, store + event log, orchestrator service, autonomy controller (marker scan, self-review loop, metrics) wired into server (3s reconcile + Stop-hook), endpoints, and a web dashboard (list / spawn form / agent cards / metrics / event timeline) reachable from the rail. Active autonomy opt-in via `HARK_ORCH_AUTONOMY=1`. Worktree flow verified vs a real repo; UI verified in-browser. See `docs/orchestration.md`. 465 tests green + web build clean; not merged to main.
+  Last step before merge: validate the active autonomy loop against live Claude sessions, then decide whether to default it on.
 
 ## Next
 
@@ -28,8 +28,7 @@ or out of the doc.*
 - **Capture modal: image attachment** — drag-and-drop and Ctrl+V paste in the capture textarea, mirroring the session composer's upload flow.
 - **Passive "modified by another session" indicator** — `PlanPanel` shows a small dot when `planMtime` advanced since this view's last fetch. Designed-but-deferred during the project-state build.
 - **Web Push** — service worker + VAPID for closed-app mobile notifications. Last open item from the original Phase 2+ list.
-- **Orchestration: frontend** — dashboard (agents, lifecycle, live metrics/cost/autonomy time), spawn flow (pick project + roles), per-orchestration event-log timeline, per-agent "brief"/"open session"/"teardown" actions. New `useOrchestrations` hook mirroring `useSessions`; consume `GET /api/orchestrations[/:id]`. Backend contract is in `src/shared/protocol.ts` (Orchestration/OrchAgent/AgentMetrics/OrchEvent).
-- **Orchestration: validate active autonomy on live sessions** — exercise `HARK_ORCH_AUTONOMY=1` against real Claude Code sessions: confirm briefing delivery only fires after trust clears, the self-review nudge loop terminates, and `autonomyMs`/`costUsd` get populated (currently only token/turn metrics are wired). Then decide whether to default it on.
+- **Orchestration: validate active autonomy on live sessions** — exercise `HARK_ORCH_AUTONOMY=1` against real Claude Code sessions: confirm briefing delivery only fires after trust clears, the self-review nudge loop terminates, and `costUsd` gets populated (currently tokens/turns + briefed→updated autonomy time are wired; per-agent cost needs the pricing table from `web/src/lib/usage.ts` shared server-side). Then decide whether to default it on, and merge `orchestration` → main.
 
 ## Shipped
 

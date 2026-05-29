@@ -1,30 +1,16 @@
 import type {
   AgentLifecycle,
   Orchestration,
+  OrchestrationSummary,
 } from "../../shared/protocol.js";
 
 // Orchestration-level roll-up — the "metrics" the brief asks for (tokens,
 // autonomy time, success rate), aggregated across an orchestration's agents.
 // Pure and derived entirely from the record, so it's safe to compute on the
 // server for the dashboard or in the client; no IO, fully testable.
+// OrchestrationSummary's shape lives in shared/protocol.ts (it crosses the wire).
 
-export interface OrchestrationSummary {
-  agentCount: number;
-  // Counts per lifecycle bucket — every agent lands in exactly one.
-  byLifecycle: Record<AgentLifecycle, number>;
-  // done / (done + failed). null when no agent has reached a terminal verdict
-  // yet (avoids reporting a misleading 0% or 100% on an in-flight run).
-  successRate: number | null;
-  totalInputTokens: number;
-  totalOutputTokens: number;
-  totalTokens: number;
-  totalCostUsd: number;
-  totalTurns: number;
-  totalInterventions: number;
-  // Sum of each briefed agent's wall-clock from briefing to its last update —
-  // a wall-clock proxy for autonomy time (refined per-agent tracking later).
-  totalAutonomyMs: number;
-}
+export type { OrchestrationSummary };
 
 const LIFECYCLES: AgentLifecycle[] = [
   "pending",

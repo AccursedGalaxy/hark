@@ -7,10 +7,11 @@ still an ordinary Claude Code session driven by `tmux send-keys`. The
 interaction model is unchanged — orchestration adds isolation, roles, autonomy,
 and bookkeeping around it.
 
-> Status: **backend complete** (branch `orchestration`). The libraries, the
-> orchestrator service, the autonomy controller, and the server endpoints +
-> reconcile loop below all exist and are tested (worktree flow verified
-> end-to-end against a real git repo). What remains: a frontend dashboard, and
+> Status: **backend complete + dashboard shipped** (branch `orchestration`).
+> The libraries, orchestrator service, autonomy controller, server endpoints +
+> reconcile loop, and the web dashboard (list / spawn form / agent cards /
+> metrics / event timeline) all exist and are tested. Worktree flow verified
+> end-to-end against a real git repo; the UI verified in-browser. What remains:
 > validating the active autonomy loop against live Claude sessions before
 > defaulting it on. See PLAN.md.
 
@@ -162,6 +163,8 @@ src/lib/orch/orchestrator.ts    # service: worktree + spawn + roles, DI, rollbac
 src/lib/orch/controller.ts      # autonomy: marker scan, self-review loop, metrics
 src/lib/orch/correlation.ts     # match live sessions to agents by pid
 src/server.ts                   # endpoints + reconcile loop + Stop-hook wiring
+web/src/hooks/useOrchestrations.ts        # polling hook (list + detail)
+web/src/components/OrchestrationPanel.tsx # dashboard: list, spawn form, agents, metrics, events
 ```
 
 ## HTTP API

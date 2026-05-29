@@ -5,17 +5,10 @@
 // the role is entirely carried by the briefing text, which keeps the
 // "interact with Claude exactly the way we do today" contract intact.
 
-import type { AgentRole } from "../../shared/protocol.js";
+import { AGENT_ROLES, type AgentRole } from "../../shared/protocol.js";
 
 export type { AgentRole };
-
-export const AGENT_ROLES: AgentRole[] = [
-  "researcher",
-  "coder",
-  "tester",
-  "documenter",
-  "reviewer",
-];
+export { AGENT_ROLES };
 
 // Marker tokens an agent prints to signal autonomy state. The orchestration
 // controller (stop-hook side) scans transcript text for these to decide

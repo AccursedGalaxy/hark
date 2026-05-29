@@ -251,6 +251,15 @@ export type AgentRole =
   | "documenter"
   | "reviewer";
 
+// Canonical role order — the default full team, and the spawn-form options.
+export const AGENT_ROLES: AgentRole[] = [
+  "researcher",
+  "coder",
+  "tester",
+  "documenter",
+  "reviewer",
+];
+
 // Where an agent is in its lifecycle. Distinct from a session's live/idle
 // status: this tracks the agent's progress through the orchestration, derived
 // from worktree/spawn steps + the autonomy markers it prints.
@@ -364,6 +373,23 @@ export interface OrchEvent {
   message: string;
   // Arbitrary structured payload (e.g. a metric delta, a decision's options).
   data?: unknown;
+}
+
+// Orchestration-level roll-up (computed by summarizeOrchestration), embedded
+// in the list/detail responses so the dashboard renders metrics without
+// re-aggregating client-side.
+export interface OrchestrationSummary {
+  agentCount: number;
+  byLifecycle: Record<AgentLifecycle, number>;
+  // done / (done + failed); null until an agent reaches a terminal verdict.
+  successRate: number | null;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  totalTurns: number;
+  totalInterventions: number;
+  totalAutonomyMs: number;
 }
 
 // ---- Transcript events (exactly what /api/sessions/:id/transcript returns) ----

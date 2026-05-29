@@ -1866,3 +1866,242 @@
     font-size: 16px;
   }
 }
+
+/* ─────────────────────────────────────────────
+   Orchestration panel — multi-agent dashboard.
+   Reuses the .topbar/.plan-pane shell; these rules cover the
+   orchestration-specific list, create-form, agent cards, and event log.
+   Built from the shared tokens so it tracks theme + accent presets.
+   ───────────────────────────────────────────── */
+.orch-empty {
+  padding: 24px;
+  max-width: 560px;
+}
+.orch-empty h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.orch-empty p {
+  margin: 0;
+  color: var(--fg-3);
+  line-height: 1.5;
+}
+
+.orch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+.orch-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--ink-1);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color var(--dur-hover) var(--ease-out-quart);
+}
+.orch-card:hover,
+.orch-card:focus-visible {
+  border-color: var(--line-strong);
+  outline: none;
+}
+.orch-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.orch-card-name {
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.orch-card-goal {
+  color: var(--fg-2);
+  font-size: 13px;
+  margin: 6px 0 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.orch-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.orch-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  max-width: 620px;
+}
+.orch-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.orch-field > span {
+  font-size: 12px;
+  color: var(--fg-3);
+  font-family: var(--mono);
+}
+.orch-field input,
+.orch-field textarea,
+.orch-field select {
+  background: var(--ink-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--fg-0);
+  padding: 8px 10px;
+  font: inherit;
+}
+.orch-field textarea {
+  resize: vertical;
+}
+.orch-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.orch-roles .tag {
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: transparent;
+}
+
+.orch-goal {
+  padding: 14px 16px 0;
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+.orch-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 14px 16px 4px;
+}
+.orch-metric-value {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--mono);
+}
+.orch-metric-label {
+  font-size: 11px;
+  color: var(--fg-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.orch-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 14px 14px;
+}
+.orch-agent {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--ink-1);
+  padding: 10px 12px;
+}
+.orch-agent-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.orch-agent-role {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.orch-agent-branch {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-3);
+  margin: 4px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.orch-agent-blocked {
+  font-size: 12px;
+  color: var(--amber);
+  margin: 4px 0;
+}
+.orch-agent-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.orch-agent-meta .btn-sm {
+  margin-left: 4px;
+}
+.orch-agent-meta .btn-sm:first-of-type {
+  margin-left: auto;
+}
+
+.orch-events {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 16px 24px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.orch-event {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line);
+}
+.orch-event-kind {
+  color: var(--accent);
+  flex-shrink: 0;
+  min-width: 130px;
+}
+.orch-event-msg {
+  color: var(--fg-2);
+}
+
+/* Orchestrations rail nav button — sits between New session and the session
+   list. Styled as a quiet nav row that lights up when its view is active. */
+.orch-nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-1);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color var(--dur-hover) var(--ease-out-quart),
+    background var(--dur-hover) var(--ease-out-quart);
+}
+.orch-nav-btn:hover {
+  border-color: var(--line-strong);
+}
+.orch-nav-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg-0);
+}
+.orch-nav-icn {
+  display: inline-flex;
+  color: var(--fg-3);
+}
+.orch-nav-btn.active .orch-nav-icn {
+  color: var(--accent);
+}
