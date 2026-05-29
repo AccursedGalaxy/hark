@@ -143,7 +143,7 @@ export const DEFAULT_RUNAWAY_LIMIT = 5;
 // its diff moves) is never caught, while a worker burning dozens of turns with
 // nothing landed on its branch is. Workers are told to commit incrementally
 // (see roles.ts), so a long no-commit stretch is itself the anomaly.
-export const DEFAULT_NO_PROGRESS_TURNS = 40;
+export const DEFAULT_NO_PROGRESS_TURNS = 100;
 export const DEFAULT_NO_PROGRESS_TOOL_CALLS = 80;
 
 // Hard ceiling: an absolute backstop that trips REGARDLESS of progress, so no
@@ -153,7 +153,7 @@ export const DEFAULT_NO_PROGRESS_TOOL_CALLS = 80;
 // The token bound trips a high-tokens-per-turn spiral well before the observed
 // 7.6M-token miss. Both are deliberately well above any healthy single-slice
 // worker.
-export const DEFAULT_HARD_TURN_CEILING = 120;
+export const DEFAULT_HARD_TURN_CEILING = 250;
 export const DEFAULT_HARD_TOKEN_CEILING = 4_000_000;
 
 // Normalise a tool call into a signature for the "identical command" test.
