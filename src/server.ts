@@ -36,6 +36,7 @@ import {
 } from "./lib/orch/correlation.js";
 import {
   addWorktree,
+  baseOnOrigin,
   branchGitSummary,
   diffBranch,
   hasOrigin,
@@ -1416,6 +1417,7 @@ app.post("/api/orchestrations/:id/agents/:agentId/pr", async (req, res) => {
       },
       {
         hasOrigin: (r) => hasOrigin(r),
+        baseOnOrigin: (r, base) => baseOnOrigin(r, base),
         ghReady: () => ghReady(),
         push: (r, b) => pushBranch(r, b),
         createPr: (r, base, b, t) => ghCreatePr(r, base, b, t),

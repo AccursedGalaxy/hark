@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildGhPrArgs,
+  buildLsRemoteArgs,
   buildPushArgs,
   preparePr,
   renderPrResult,
@@ -9,6 +10,7 @@ import {
 
 const baseDeps: PrDeps = {
   hasOrigin: async () => true,
+  baseOnOrigin: async () => true,
   ghReady: async () => true,
   push: async () => {},
   createPr: async () => "https://github.com/o/r/pull/7\n",
@@ -30,10 +32,15 @@ describe("arg builders", () => {
     expect(withTitle).toContain("Add X");
     expect(withTitle).not.toContain("--fill");
   });
+  it("checks the base on origin with ls-remote --heads", () => {
+    expect(buildLsRemoteArgs("/repo", "pm-head-harness")).toEqual([
+      "-C", "/repo", "ls-remote", "--heads", "origin", "pm-head-harness",
+    ]);
+  });
 });
 
 describe("preparePr", () => {
-  it("pushes + opens a PR when origin + gh are ready", async () => {
+  it("pushes + opens a PR when origin, base, and gh are ready", async () => {
     const calls: string[] = [];
     const r = await preparePr(input, {
       ...baseDeps,
@@ -42,6 +49,30 @@ describe("preparePr", () => {
     });
     expect(r).toEqual({ status: "created", url: "url-7", branch: "feat/x" });
     expect(calls).toEqual(["push:feat/x", "pr:main:feat/x"]);
+  });
+
+  it("hands back a ready branch when the base isn't on origin (no raw gh error)", async () => {
+    const calls: string[] = [];
+    const r = await preparePr(
+      { repoRoot: "/repo", baseRef: "pm-head-harness", branch: "feat/x" },
+      {
+        ...baseDeps,
+        baseOnOrigin: async (_r, base) => { calls.push(`lsremote:${base}`); return false; },
+        // A real gh against a local-only base would throw a GraphQL error — prove
+        // we never reach it (and never push the human's WIP base or the head).
+        push: async (_r, b) => { calls.push(`push:${b}`); },
+        createPr: async () => { calls.push("pr"); throw new Error("Base ref must be a branch"); },
+      },
+    );
+    expect(r.status).toBe("no_base");
+    if (r.status === "no_base") {
+      expect(r.branch).toBe("feat/x");
+      expect(r.diffstat).toBe("2 files +30/-4");
+      expect(r.message).toContain("pm-head-harness");
+      expect(r.message).toContain("ready");
+    }
+    // Checked the base, then degraded — no push, no gh pr create.
+    expect(calls).toEqual(["lsremote:pm-head-harness"]);
   });
 
   it("hands back a ready branch when there is no origin (never fails)", async () => {
@@ -80,6 +111,9 @@ describe("renderPrResult", () => {
     expect(renderPrResult({ status: "created", url: "u", branch: "b" })).toContain("u");
     expect(
       renderPrResult({ status: "no_remote", branch: "b", diffstat: "d", message: "m" }),
+    ).toContain("m");
+    expect(
+      renderPrResult({ status: "no_base", branch: "b", diffstat: "d", message: "m" }),
     ).toContain("m");
     expect(renderPrResult({ status: "error", branch: "b", message: "boom" })).toContain(
       "boom",

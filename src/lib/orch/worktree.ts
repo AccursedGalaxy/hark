@@ -386,6 +386,22 @@ export async function hasOrigin(repoRoot: string): Promise<boolean> {
   }
 }
 
+// Whether a base ref exists on origin — a PR target must be a real remote
+// branch. `git ls-remote --heads origin <base>` prints a line per match, so
+// empty stdout means the base (often a local-only WIP branch) was never pushed.
+// False on any failure, so the caller degrades to the ready-branch handoff.
+export async function baseOnOrigin(
+  repoRoot: string,
+  baseRef: string,
+): Promise<boolean> {
+  try {
+    const out = await runGit(["-C", repoRoot, "ls-remote", "--heads", "origin", baseRef]);
+    return out.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 // Push a branch to origin with upstream tracking. Throws on failure (the caller
 // reports it) — no checkout happens, so the project root tree is never touched.
 export async function pushBranch(
