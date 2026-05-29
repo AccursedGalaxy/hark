@@ -1,6 +1,7 @@
 import { AGENT_ROLES, AUTONOMY_LEVELS, type AgentRole } from "../../shared/protocol.js";
 import type { OrchStatusView } from "../../shared/protocol.js";
 import { renderPrResult, type PrResult } from "./pr.js";
+import { planBoard, type BoardOp } from "./boardCli.js";
 
 // The `hark` CLI is the head's action surface (Bash-invokable). A Claude Code
 // session can't call hark's HTTP API out of the box, so the head acts through
@@ -56,6 +57,9 @@ export type RenderKind =
 
 export type CliPlan =
   | { kind: "request"; request: RequestSpec; render: RenderKind }
+  // A board op acts DIRECTLY on the SQLite source of truth, not via the server
+  // HTTP API — bin/hark opens a BoardStore and runs it. (See boardCli.ts.)
+  | { kind: "board"; op: BoardOp }
   // Help / version text — print to stdout, exit 0.
   | { kind: "message"; text: string }
   // A usage error — print to stderr, exit 2.
@@ -76,6 +80,7 @@ const USAGE = `hark — orchestration head CLI
   hark agent log   <id>                     recent commits on the worker branch
   hark agent summary <id>                   the worker's persisted DONE/BLOCKED/HANDOFF text (survives reaping)
   hark pr          <id> [--title "…"] [--base <ref>]   push the worker branch + open a PR (human lands)
+  hark board       <add|list|show|set|link|assign|close> …   the PM's keyed task store (run \`hark board --help\`)
 
 Roles: ${AGENT_ROLES.join(", ")}
 Targets the orchestration in $HARK_ORCH_ID against $HARK_API; if unset, the
@@ -146,7 +151,12 @@ export function injectTask(argv: string[], task: string): string[] {
 
 export function planCommand(argv: string[], env: CliEnv): CliPlan {
   const { positionals, flags } = parseArgs(argv);
-  if (positionals.length === 0 || flags["--help"] || flags["-h"]) {
+  // `hark board --help` is routed to the board branch for its own usage; only a
+  // bare/help invocation of the top-level CLI shows the global usage.
+  if (
+    (positionals.length === 0 || flags["--help"] || flags["-h"]) &&
+    positionals[0] !== "board"
+  ) {
     return { kind: "message", text: USAGE };
   }
 
@@ -347,6 +357,15 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
       default:
         return err(`unknown agent command: ${sub ?? "(none)"}`);
     }
+  }
+
+  if (group === "board") {
+    // The board is a self-contained source of truth — no orchId / server needed.
+    // planBoard parses the rest of argv into a BoardOp (or a help/error message);
+    // bin/hark executes it against a BoardStore.
+    const plan = planBoard(positionals.slice(1), flags);
+    if (plan.kind === "op") return { kind: "board", op: plan.op };
+    return plan;
   }
 
   return err(`unknown command: ${group}`);
