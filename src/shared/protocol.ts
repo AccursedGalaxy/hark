@@ -310,6 +310,24 @@ export interface AgentMetrics {
   turns: number;
 }
 
+// Persisted state for the runaway circuit-breaker. The breaker (in the
+// autonomy controller) trips when a worker repeats an identical no-op command
+// `limit` times without advancing its branch; this snapshot is what lets a 3s
+// reconcile tick measure new repeats against the window that's already open.
+export interface BreakerState {
+  // Digit-normalised signature of the command currently being repeated (so a
+  // counter-suffixed probe like `recover-check-1`/`recover-check-2` collapses
+  // to one signature).
+  signature: string;
+  // commitCount + diffstat at the time the current no-progress window opened.
+  // The breaker resets its window whenever this changes — that's a worker
+  // making progress, which must never trip.
+  progressKey: string;
+  // Trailing-repeat count captured when the window opened; repeats beyond this
+  // (signature + progressKey unchanged) are what trip the breaker.
+  baseline: number;
+}
+
 export function emptyAgentMetrics(): AgentMetrics {
   return {
     inputTokens: 0,
@@ -348,6 +366,11 @@ export interface OrchAgent {
   killedAt?: number;
   // Set when lifecycle is "blocked" — the question the agent is waiting on.
   blockedReason?: string;
+  // Runaway circuit-breaker bookkeeping (see decideCircuitBreaker). Persisted
+  // across reconcile ticks so the breaker tells a fresh repeat from one it has
+  // already counted, and resets its window the moment the worker advances its
+  // branch. Undefined until the breaker first observes a tool call.
+  breaker?: BreakerState;
   // The specific task the head dispatched this worker (head-session model).
   // Undefined for legacy cold-team agents (their charter is the whole goal).
   // Threaded into the briefing so the worker knows what slice it owns.
@@ -512,6 +535,10 @@ export interface AgentStatusLine {
   turns: number;
   tokens: number;
   task?: string;
+  // Why a worker stopped, when it carries one — currently the `blocked` reason
+  // (a human question or a tripped circuit-breaker). Surfaced so `orch status`
+  // tells the PM WHY without a separate lookup.
+  reason?: string;
 }
 
 export interface HeadStatusLine {

@@ -10,9 +10,14 @@ import {
   buildHeadNotification,
   buildNudge,
   decideAutonomyAction,
+  decideCircuitBreaker,
   decideHeadRouting,
+  DEFAULT_RUNAWAY_LIMIT,
   metricsFromTranscript,
   scanMarkers,
+  toolUseSignature,
+  toolUseSignatures,
+  trailingRepeat,
   transcriptText,
   type AutonomyState,
   type HeadNotification,
@@ -730,5 +735,189 @@ describe("AutonomyController.onHeadSignal", () => {
     const o = await store.getOrchestration(orchId);
     expect(o!.head!.metrics.inputTokens).toBe(800);
     expect(o!.head!.metrics.turns).toBe(1);
+  });
+});
+
+// ---- runaway circuit-breaker ------------------------------------------------
+
+// Build an assistant turn that issues a single Bash command (the runaway
+// vector). Counter-suffixed commands normalise to one signature.
+const bashTurn = (command: string): TranscriptEvent => ({
+  kind: "assistant",
+  uuid: "u",
+  ts: "t",
+  blocks: [{ type: "tool_use", id: "x", name: "Bash", input: { command } }],
+});
+
+describe("toolUseSignature", () => {
+  it("normalises a Bash command, collapsing digit runs (counter-suffixed spam)", () => {
+    expect(toolUseSignature({ type: "tool_use", id: "1", name: "Bash", input: { command: "recover-check-1" } })).toBe(
+      toolUseSignature({ type: "tool_use", id: "2", name: "Bash", input: { command: "recover-check-2" } }),
+    );
+    expect(
+      toolUseSignature({ type: "tool_use", id: "1", name: "Bash", input: { command: "  ls   -la " } }),
+    ).toBe("bash:ls -la");
+  });
+
+  it("returns null for non-tool blocks", () => {
+    expect(toolUseSignature({ type: "text", text: "hi" })).toBeNull();
+    expect(toolUseSignature({ type: "thinking", text: "hmm" })).toBeNull();
+  });
+
+  it("distinguishes different tools so genuine varied work breaks the run", () => {
+    const edit = toolUseSignature({ type: "tool_use", id: "1", name: "Edit", input: { file_path: "a.ts" } });
+    const bash = toolUseSignature({ type: "tool_use", id: "2", name: "Bash", input: { command: "npm test" } });
+    expect(edit).not.toBe(bash);
+  });
+});
+
+describe("toolUseSignatures + trailingRepeat", () => {
+  it("collects tool-call signatures oldest→newest, ignoring text", () => {
+    const sigs = toolUseSignatures([
+      { kind: "user", uuid: "u", ts: "t", text: "go" },
+      bashTurn("a"),
+      { kind: "assistant", uuid: "u2", ts: "t", blocks: [{ type: "text", text: "thinking" }] },
+      bashTurn("b"),
+    ]);
+    expect(sigs).toEqual(["bash:a", "bash:b"]);
+  });
+
+  it("counts the trailing run of the last signature", () => {
+    expect(trailingRepeat(["a", "a", "b", "b", "b"])).toEqual({ signature: "b", count: 3 });
+    expect(trailingRepeat(["a"])).toEqual({ signature: "a", count: 1 });
+    expect(trailingRepeat([])).toEqual({ signature: null, count: 0 });
+  });
+});
+
+describe("decideCircuitBreaker", () => {
+  const base = { signature: "bash:probe", progressKey: "0:", limit: 5 };
+
+  it("trips once the no-progress run reaches the limit", () => {
+    const d = decideCircuitBreaker({
+      ...base,
+      repeatCount: 5,
+      prior: { signature: "bash:probe", progressKey: "0:", baseline: 0 },
+    });
+    expect(d.tripped).toBe(true);
+    expect(d.reason).toContain("circuit-breaker");
+    expect(d.reason).toContain("5 consecutive");
+  });
+
+  it("does NOT trip when the branch advanced (progressKey changed), even mid-run", () => {
+    const d = decideCircuitBreaker({
+      signature: "bash:probe",
+      progressKey: "1:2 files +9/-0", // diff advanced since the window opened
+      limit: 5,
+      repeatCount: 9,
+      prior: { signature: "bash:probe", progressKey: "0:", baseline: 0 },
+    });
+    expect(d.tripped).toBe(false);
+    // window reopened against the new progress baseline
+    expect(d.snapshot.baseline).toBe(9);
+    expect(d.snapshot.progressKey).toBe("1:2 files +9/-0");
+  });
+
+  it("never trips on the first observation of a window (no prior)", () => {
+    const d = decideCircuitBreaker({ ...base, repeatCount: 100 });
+    expect(d.tripped).toBe(false);
+    expect(d.snapshot.baseline).toBe(100);
+  });
+
+  it("resets the window when the repeated command changes", () => {
+    const d = decideCircuitBreaker({
+      signature: "bash:other",
+      progressKey: "0:",
+      limit: 5,
+      repeatCount: 3,
+      prior: { signature: "bash:probe", progressKey: "0:", baseline: 0 },
+    });
+    expect(d.tripped).toBe(false);
+    expect(d.snapshot.baseline).toBe(3);
+  });
+
+  it("no-ops with no tool calls to judge", () => {
+    expect(decideCircuitBreaker({ ...base, signature: null, repeatCount: 0 }).tripped).toBe(false);
+  });
+});
+
+function makeBreakerController(opts: {
+  transcript: () => TranscriptEvent[];
+  git: () => { diffstat: string; commitCount: number };
+  limit?: number;
+}) {
+  const escalations: { agentId: string; reason: string }[] = [];
+  const controller = new AutonomyController({
+    store,
+    orchestrator,
+    readTranscript: async () => opts.transcript(),
+    sendText: async () => {},
+    sessionReady: async () => true,
+    agentGitSummary: async () => opts.git(),
+    escalateToHuman: async (_o, a, reason) => {
+      escalations.push({ agentId: a.id, reason });
+    },
+    runawayLimit: opts.limit,
+    now: () => 1_000_000,
+  });
+  return { controller, escalations };
+}
+
+describe("AutonomyController.checkCircuitBreaker", () => {
+  it("trips a worker spiralling on identical no-op commands → blocked with a reason", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    const { controller } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: "", commitCount: 0 }), // never advances
+      limit: 3,
+    });
+
+    // First sighting opens the window (baseline), can't trip yet.
+    probes.push(bashTurn("recover-check-1"), bashTurn("recover-check-2"));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+
+    // Worker keeps spamming the same (counter-suffixed) probe — no commits/diff.
+    for (let n = 3; n <= 8; n++) probes.push(bashTurn(`recover-check-${n}`));
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(true);
+
+    const o = await store.getOrchestration(orchId);
+    const a = o!.agents.find((x) => x.id === agentId)!;
+    expect(a.lifecycle).toBe("blocked");
+    expect(a.blockedReason).toContain("circuit-breaker");
+  });
+
+  it("does NOT trip a worker that repeats a command while its branch advances", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const probes: TranscriptEvent[] = [];
+    let commits = 0;
+    const { controller } = makeBreakerController({
+      transcript: () => probes,
+      git: () => ({ diffstat: `${commits} files`, commitCount: commits }),
+      limit: 3,
+    });
+
+    // Same command every time, but a commit lands between each observation.
+    for (let tick = 0; tick < 6; tick++) {
+      probes.push(bashTurn("npm test"));
+      commits++; // progress advances → window resets every tick
+      expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+    }
+    const o = await store.getOrchestration(orchId);
+    expect(o!.agents.find((x) => x.id === agentId)!.lifecycle).toBe("running");
+  });
+
+  it("ignores a worker that isn't running (terminal / no session)", async () => {
+    const { orchId, agentId } = await makeAgent(null, "running"); // no session id
+    const { controller } = makeBreakerController({
+      transcript: () => [bashTurn("x"), bashTurn("x"), bashTurn("x")],
+      git: () => ({ diffstat: "", commitCount: 0 }),
+      limit: 1,
+    });
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+  });
+
+  it("uses DEFAULT_RUNAWAY_LIMIT when no override is given", () => {
+    expect(DEFAULT_RUNAWAY_LIMIT).toBeGreaterThanOrEqual(4);
+    expect(DEFAULT_RUNAWAY_LIMIT).toBeLessThanOrEqual(5);
   });
 });

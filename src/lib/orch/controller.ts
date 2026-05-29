@@ -11,6 +11,8 @@ import {
   type AgentMetrics,
   type AgentRole,
   type AutonomyLevel,
+  type BreakerState,
+  type ContentBlock,
   type OrchAgent,
   type Orchestration,
   type TranscriptEvent,
@@ -74,6 +76,136 @@ export function transcriptText(events: TranscriptEvent[]): string {
     }
   }
   return parts.join("\n");
+}
+
+// ---- Runaway circuit-breaker ------------------------------------------------
+
+// A worker that lost confidence its tools ran has been observed spiralling into
+// repeated identical no-op probe commands (recover-check-N / retry-burst-N),
+// never reaching a terminal state and burning 1M+ tokens until a human kills
+// it. The breaker watches each worker's transcript and trips when it issues a
+// run of identical tool calls WITHOUT advancing its branch (no new commits, no
+// diff change). Tripping flips the worker to `blocked` with a reason; the
+// reconcile loop's existing terminal-reap then SIGTERMs it. A worker that IS
+// progressing — its commit count or diffstat moves — resets the window and
+// never trips, even if it repeats a command.
+
+// Default run length that trips the breaker. Five identical no-progress calls
+// in a row is well past any legitimate retry (a real retry loop changes
+// something between attempts, which breaks the identical run) while leaving
+// headroom against a twitchy false positive.
+export const DEFAULT_RUNAWAY_LIMIT = 5;
+
+// Normalise a tool call into a signature for the "identical command" test.
+// Runs of digits collapse to `#` so a counter-incrementing probe
+// (`recover-check-1`, `recover-check-2`, …) reads as one repeated command.
+// Returns null for non-tool blocks (text/thinking).
+export function toolUseSignature(block: ContentBlock): string | null {
+  if (block.type !== "tool_use") return null;
+  const norm = (s: string) =>
+    s.trim().replace(/\s+/g, " ").replace(/\d+/g, "#");
+  if (block.name === "Bash") {
+    const cmd = (block.input as { command?: unknown } | null)?.command;
+    if (typeof cmd === "string") return `bash:${norm(cmd)}`;
+  }
+  // Any other tool: name + a normalised view of its input, so a differing tool
+  // call (an Edit landed between two probes) breaks the identical run.
+  let input = "";
+  try {
+    input = norm(JSON.stringify(block.input ?? ""));
+  } catch {
+    /* unserialisable input — the tool name alone still distinguishes it */
+  }
+  return `${block.name}:${input}`;
+}
+
+// The ordered signatures of every tool call in the transcript, oldest→newest.
+export function toolUseSignatures(events: TranscriptEvent[]): string[] {
+  const out: string[] = [];
+  for (const e of events) {
+    if (e.kind !== "assistant") continue;
+    for (const b of e.blocks) {
+      const sig = toolUseSignature(b);
+      if (sig) out.push(sig);
+    }
+  }
+  return out;
+}
+
+// Length of the trailing run of the SAME signature at the end of the list.
+// `{ signature: null, count: 0 }` when there are no tool calls.
+export function trailingRepeat(signatures: string[]): {
+  signature: string | null;
+  count: number;
+} {
+  if (signatures.length === 0) return { signature: null, count: 0 };
+  const signature = signatures[signatures.length - 1];
+  let count = 0;
+  for (
+    let i = signatures.length - 1;
+    i >= 0 && signatures[i] === signature;
+    i--
+  ) {
+    count++;
+  }
+  return { signature, count };
+}
+
+export interface BreakerInput {
+  // Trailing identical-run signature + length from the transcript.
+  signature: string | null;
+  repeatCount: number;
+  // Key that changes whenever the worker advances its branch: commitCount +
+  // committed diffstat. A run spent making progress moves this; a no-op spiral
+  // leaves it frozen.
+  progressKey: string;
+  // The snapshot persisted from the previous observation (agent.breaker).
+  prior?: BreakerState;
+  limit: number;
+}
+
+export interface BreakerDecision {
+  tripped: boolean;
+  reason?: string;
+  // Always returned — persisted onto the agent so the next tick measures
+  // against it.
+  snapshot: BreakerState;
+}
+
+// Pure breaker policy. The window of "consecutive no-progress repeats" opens
+// fresh whenever the repeated command changes OR progress advances; inside an
+// open window we count repeats beyond the baseline captured when it opened.
+// Deliberately conservative: the first observation of any window never trips
+// (baseline == repeatCount), so a worker already mid-run when we start watching
+// gets a clean window first — and a worker that advances its branch resets the
+// window every time, so genuine progress can never trip even while repeating.
+export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
+  const { signature, repeatCount, progressKey, prior, limit } = input;
+  if (!signature) {
+    return {
+      tripped: false,
+      snapshot: { signature: "", progressKey, baseline: 0 },
+    };
+  }
+  const windowReset =
+    !prior ||
+    prior.signature !== signature ||
+    prior.progressKey !== progressKey;
+  const baseline = windowReset ? repeatCount : prior.baseline;
+  const snapshot: BreakerState = { signature, progressKey, baseline };
+  const streak = repeatCount - baseline;
+  if (streak >= limit) {
+    return {
+      tripped: true,
+      reason: `circuit-breaker: ${repeatCount} consecutive identical no-op commands with no new commits or diff (\`${truncateSignature(signature)}\`)`,
+      snapshot,
+    };
+  }
+  return { tripped: false, snapshot };
+}
+
+function truncateSignature(sig: string, max = 60): string {
+  return sig.length <= max ? sig : `${sig.slice(0, max - 1)}…`;
 }
 
 // ---- Metrics ----------------------------------------------------------------
@@ -321,6 +453,9 @@ export interface ControllerDeps {
   idleThresholdMs?: number;
   now?: () => number;
   maxNudges?: number;
+  // Consecutive identical no-op commands that trip the runaway breaker.
+  // Defaults to DEFAULT_RUNAWAY_LIMIT.
+  runawayLimit?: number;
 }
 
 const DEFAULT_MAX_NUDGES = 3;
@@ -401,6 +536,88 @@ export class AutonomyController {
     }
 
     return action;
+  }
+
+  // Runaway circuit-breaker: trip a worker that's spiralling on identical no-op
+  // commands without advancing its branch. Called on every reconcile tick for a
+  // running worker, INDEPENDENT of the autonomy dial — a spiral burns tokens
+  // regardless of whether hark is actively driving the team, so the harness
+  // must self-defend either way. Reads only the transcript + a git progress
+  // summary; on a trip it flips the worker to `blocked` with a reason (the
+  // reconcile loop's terminal-reap then SIGTERMs it — termination is not
+  // re-implemented here). Returns whether the breaker tripped this tick.
+  async checkCircuitBreaker(orchId: string, agentId: string): Promise<boolean> {
+    const orch = await this.deps.store.getOrchestration(orchId);
+    if (!orch) return false;
+    const agent = orch.agents.find((a) => a.id === agentId);
+    // Only an actively-running worker can be a runaway. A terminal/blocked/
+    // pending agent isn't spiralling, and one already reaped (killedAt) is done.
+    if (
+      !agent ||
+      agent.lifecycle !== "running" ||
+      agent.killedAt != null ||
+      !agent.sessionId
+    ) {
+      return false;
+    }
+
+    const events = await this.deps.readTranscript(agent.sessionId);
+    const { signature, count } = trailingRepeat(toolUseSignatures(events));
+
+    // Progress signal: a worker advancing its branch moves commit count / diff.
+    // Best-effort — if it can't be computed the window simply won't reset on
+    // progress, and the identical-run requirement alone still guards a trip.
+    let progressKey = "";
+    if (this.deps.agentGitSummary) {
+      try {
+        const s = await this.deps.agentGitSummary(orch, agent);
+        progressKey = `${s.commitCount}:${s.diffstat}`;
+      } catch {
+        /* best-effort */
+      }
+    }
+
+    const decision = decideCircuitBreaker({
+      signature,
+      repeatCount: count,
+      progressKey,
+      prior: agent.breaker,
+      limit: this.deps.runawayLimit ?? DEFAULT_RUNAWAY_LIMIT,
+    });
+
+    // Persist the snapshot every tick so the next observation measures the run
+    // against this window.
+    await this.deps.store.updateAgent(orchId, agentId, (a) => {
+      a.breaker = decision.snapshot;
+    });
+
+    if (!decision.tripped) return false;
+
+    const reason = decision.reason ?? "circuit-breaker tripped";
+    // setAgentLifecycle records the reason on the worker record (blockedReason)
+    // + an agent_lifecycle event, so the PM sees WHY in `orch status`.
+    await this.deps.store.setAgentLifecycle(orchId, agentId, "blocked", {
+      reason,
+    });
+    await this.deps.store.appendEvent({
+      ts: this.now(),
+      orchestrationId: orchId,
+      agentId,
+      kind: "failure",
+      message: reason,
+      data: { kind: "circuit_breaker" },
+    });
+    // A runaway is a needs-you event: page the human through the same path a
+    // worker BLOCKED marker uses, so the PM-head learns WHY it stopped (the
+    // reason is also on the record regardless). Best-effort.
+    if (orch.head && this.deps.escalateToHuman) {
+      try {
+        await this.deps.escalateToHuman(orch, agent, reason);
+      } catch {
+        /* best-effort — the record + event already carry the reason */
+      }
+    }
+    return true;
   }
 
   // Whether the managed head's human has been quiet long enough to be "idle".
