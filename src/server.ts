@@ -33,6 +33,7 @@ import {
   type LiveSessionRef,
 } from "./lib/orch/correlation.js";
 import { addWorktree, removeWorktree } from "./lib/orch/worktree.js";
+import { summarizeOrchestration } from "./lib/orch/summary.js";
 import { AGENT_ROLES } from "./lib/orch/roles.js";
 import type { AgentRole, OrchAgent } from "./shared/protocol.js";
 import { applyManagedBlock } from "./lib/claudemdBlock.js";
@@ -829,7 +830,13 @@ app.post("/api/projects/:key/install", async (req, res) => {
 
 app.get("/api/orchestrations", async (_req, res) => {
   try {
-    res.json({ orchestrations: await orchStore.listOrchestrations() });
+    const orchestrations = await orchStore.listOrchestrations();
+    res.json({
+      orchestrations: orchestrations.map((o) => ({
+        ...o,
+        summary: summarizeOrchestration(o),
+      })),
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -843,7 +850,11 @@ app.get("/api/orchestrations/:id", async (req, res) => {
       return;
     }
     const events = await orchStore.readEvents(req.params.id);
-    res.json({ orchestration, events });
+    res.json({
+      orchestration,
+      summary: summarizeOrchestration(orchestration),
+      events,
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
