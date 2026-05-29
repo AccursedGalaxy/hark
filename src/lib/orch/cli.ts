@@ -69,7 +69,7 @@ const USAGE = `hark — orchestration head CLI
   hark agent brief <id> "<task>"            assign a worker its next task
   hark agent diff  <id> [--stat|--full]     worker branch vs base (--stat default)
   hark agent log   <id>                     recent commits on the worker branch
-  hark pr          <id> [--title "…"]        push the worker branch + open a PR (human lands)
+  hark pr          <id> [--title "…"] [--base <ref>]   push the worker branch + open a PR (human lands)
 
 Roles: ${AGENT_ROLES.join(", ")}
 Targets the orchestration in $HARK_ORCH_ID against $HARK_API; if unset, the
@@ -77,7 +77,7 @@ project's promoted PM-head is resolved from the cwd.`;
 
 // Split argv into positionals + flags. Value flags (--task, --depends-on) take
 // the next token; boolean flags (--stat, --full) don't.
-const VALUE_FLAGS = new Set(["--task", "--depends-on", "--title"]);
+const VALUE_FLAGS = new Set(["--task", "--depends-on", "--title", "--base"]);
 interface ParsedArgs {
   positionals: string[];
   flags: Record<string, string | true>;
@@ -152,11 +152,13 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
 
   if (group === "pr") {
     if (!env.orchId) return err("HARK_ORCH_ID is not set");
-    const id = sub; // `hark pr <agentId> [--title "…"]`
+    const id = sub; // `hark pr <agentId> [--title "…"] [--base <ref>]`
     if (!id) return err('pr needs an agentId: hark pr <agentId> [--title "…"]');
     const title = typeof flags["--title"] === "string" ? flags["--title"] : undefined;
+    const base = typeof flags["--base"] === "string" ? flags["--base"] : undefined;
     const body: Record<string, unknown> = {};
     if (title) body.title = title;
+    if (base) body.base = base;
     return {
       kind: "request",
       request: {
