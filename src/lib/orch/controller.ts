@@ -914,12 +914,13 @@ export class AutonomyController {
         return;
       }
       case "set_lifecycle": {
-        // A human-blocking transition counts as an intervention point.
+        // A human-blocking transition counts as an intervention point. The full
+        // marker text (action.summary) is persisted so it survives reaping.
         await this.deps.store.setAgentLifecycle(
           orchId,
           agent.id,
           action.lifecycle,
-          { reason: action.reason },
+          { reason: action.reason, summary: action.summary },
         );
         if (action.lifecycle === "blocked") {
           await this.deps.store.updateAgent(orchId, agent.id, (a) => {
