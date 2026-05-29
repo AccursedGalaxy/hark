@@ -32,6 +32,24 @@ describe("arg builders", () => {
     expect(withTitle).toContain("Add X");
     expect(withTitle).not.toContain("--fill");
   });
+  it("passes a non-empty body through as --body <body>", () => {
+    const args = buildGhPrArgs("main", "feat/x", "Add X", "## Task\n\ndo the thing");
+    const i = args.indexOf("--body");
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(args[i + 1]).toBe("## Task\n\ndo the thing");
+    expect(args).not.toContain("--fill");
+  });
+  it("keeps the title-without-body behavior (--body \"\")", () => {
+    const args = buildGhPrArgs("main", "feat/x", "Add X");
+    const i = args.indexOf("--body");
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(args[i + 1]).toBe("");
+  });
+  it("ignores a body when there is no title (still --fill)", () => {
+    const args = buildGhPrArgs("main", "feat/x", undefined, "some body");
+    expect(args).toContain("--fill");
+    expect(args).not.toContain("--body");
+  });
   it("checks the base on origin with ls-remote --heads", () => {
     expect(buildLsRemoteArgs("/repo", "pm-head-harness")).toEqual([
       "-C", "/repo", "ls-remote", "--heads", "origin", "pm-head-harness",
@@ -49,6 +67,22 @@ describe("preparePr", () => {
     });
     expect(r).toEqual({ status: "created", url: "url-7", branch: "feat/x" });
     expect(calls).toEqual(["push:feat/x", "pr:main:feat/x"]);
+  });
+
+  it("threads input.body through to the createPr dep", async () => {
+    let received: string | undefined = "UNSET";
+    const r = await preparePr(
+      { ...input, title: "Add X", body: "## Task\n\nimplement X" },
+      {
+        ...baseDeps,
+        createPr: async (_r, _base, _b, _t, body) => {
+          received = body;
+          return "url-9";
+        },
+      },
+    );
+    expect(r).toEqual({ status: "created", url: "url-9", branch: "feat/x" });
+    expect(received).toBe("## Task\n\nimplement X");
   });
 
   it("hands back a ready branch when the base isn't on origin (no raw gh error)", async () => {

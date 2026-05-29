@@ -28,10 +28,15 @@ export function buildGhPrArgs(
   baseRef: string,
   branch: string,
   title?: string,
+  body?: string,
 ): string[] {
   const args = ["pr", "create", "--base", baseRef, "--head", branch];
   if (title && title.trim().length > 0) {
-    args.push("--title", title.trim(), "--body", "");
+    // gh requires a title; the only change from the original behavior is that a
+    // non-empty body is passed through as `--body <body>` instead of being
+    // dropped (`--body ""`). Title-with-empty-body keeps the old `--body ""`.
+    args.push("--title", title.trim());
+    args.push("--body", body && body.length > 0 ? body : "");
   } else {
     args.push("--fill");
   }
@@ -54,6 +59,7 @@ export interface PrDeps {
     baseRef: string,
     branch: string,
     title?: string,
+    body?: string,
   ) => Promise<string>;
   // Compact diffstat for the ready-branch message in the no-remote case.
   diffstat: () => Promise<string>;
@@ -64,6 +70,10 @@ export interface PrInput {
   baseRef: string;
   branch: string;
   title?: string;
+  // Generated markdown description for the PR. Passed through to `--body` so
+  // the PR doesn't open with "No description provided." When empty/undefined
+  // the title-with-empty-body / `--fill` behavior is preserved.
+  body?: string;
 }
 
 export type PrResult =
@@ -82,7 +92,7 @@ export async function preparePr(
   input: PrInput,
   deps: PrDeps,
 ): Promise<PrResult> {
-  const { repoRoot, baseRef, branch, title } = input;
+  const { repoRoot, baseRef, branch, title, body } = input;
   if (!(await deps.hasOrigin(repoRoot))) {
     const diffstat = await deps.diffstat().catch(() => "");
     return {
@@ -127,7 +137,7 @@ export async function preparePr(
   }
   try {
     await deps.push(repoRoot, branch);
-    const url = await deps.createPr(repoRoot, baseRef, branch, title);
+    const url = await deps.createPr(repoRoot, baseRef, branch, title, body);
     return { status: "created", url: url.trim(), branch };
   } catch (err) {
     return { status: "error", branch, message: String(err) };
