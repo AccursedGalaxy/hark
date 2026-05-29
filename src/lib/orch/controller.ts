@@ -310,6 +310,25 @@ export class AutonomyController {
     }
   }
 
+  // Refresh an agent's token/turn metrics from its transcript without making
+  // any decision or sending anything. Safe to call on a tick regardless of
+  // whether active autonomy (briefing/nudging) is enabled, so the dashboard
+  // stays current either way.
+  async refreshMetrics(orchId: string, agentId: string): Promise<void> {
+    const orch = await this.deps.store.getOrchestration(orchId);
+    const agent = orch?.agents.find((a) => a.id === agentId);
+    if (!agent?.sessionId) return;
+    const events = await this.deps.readTranscript(agent.sessionId);
+    const tm = metricsFromTranscript(events);
+    await this.deps.store.updateAgent(orchId, agentId, (a) => {
+      a.metrics.inputTokens = tm.inputTokens;
+      a.metrics.outputTokens = tm.outputTokens;
+      a.metrics.cacheReadTokens = tm.cacheReadTokens;
+      a.metrics.cacheCreationTokens = tm.cacheCreationTokens;
+      a.metrics.turns = tm.turns;
+    });
+  }
+
   // Count the self-review nudges already sent to an agent, from the event log.
   private async countNudges(orchId: string, agentId: string): Promise<number> {
     const events = await this.deps.store.readEvents(orchId);

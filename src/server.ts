@@ -27,9 +27,14 @@ import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
 import { OrchStore } from "./lib/orch/store.js";
 import { Orchestrator } from "./lib/orch/orchestrator.js";
+import { AutonomyController } from "./lib/orch/controller.js";
+import {
+  correlateAgentSessions,
+  type LiveSessionRef,
+} from "./lib/orch/correlation.js";
 import { addWorktree, removeWorktree } from "./lib/orch/worktree.js";
 import { AGENT_ROLES } from "./lib/orch/roles.js";
-import type { AgentRole } from "./shared/protocol.js";
+import type { AgentRole, OrchAgent } from "./shared/protocol.js";
 import { applyManagedBlock } from "./lib/claudemdBlock.js";
 import { appendCapture } from "./lib/projectCapture.js";
 import {
@@ -267,6 +272,50 @@ const orchestrator = new Orchestrator({
   spawnSession: ({ cwd, command }) => spawnClaudeSession({ cwd, command }),
 });
 
+// Active autonomy (auto-delivering briefings + self-review nudges to live
+// sessions) types real keystrokes on the user's behalf, so it's opt-in via
+// HARK_ORCH_AUTONOMY=1. With it off, orchestrations still spawn agents and the
+// dashboard still tracks them; the user drives each agent manually (the
+// unchanged tmux-send model) and can deliver a briefing on demand.
+const ORCH_AUTONOMY = process.env.HARK_ORCH_AUTONOMY === "1";
+
+// Resolve the tmux pane for an orchestration agent and deliver text through
+// the hardened send path. Prefers the registered session id; falls back to the
+// spawn-time pid before the session has registered.
+async function sendToAgent(agent: OrchAgent, text: string): Promise<void> {
+  let pane: { socket: string; paneId: string } | null = null;
+  if (agent.sessionId) {
+    const resolved = await resolveSessionPane(agent.sessionId);
+    pane = resolved?.pane ?? null;
+  }
+  if (!pane && agent.pid != null && isAlive(agent.pid)) {
+    pane = await resolveTmuxPaneForPid(agent.pid);
+  }
+  if (!pane) throw new Error("agent session has no live tmux pane");
+  await sendInput(pane.socket, pane.paneId, { text, submit: true });
+}
+
+const orchController = new AutonomyController({
+  store: orchStore,
+  orchestrator,
+  readTranscript: async (sessionId) => {
+    const filePath = await findTranscriptPath(sessionId);
+    if (!filePath) return [];
+    try {
+      const { events } = await readTranscriptFile(filePath);
+      return events;
+    } catch {
+      return [];
+    }
+  },
+  sendText: sendToAgent,
+  sessionReady: async (agent) => {
+    if (!agent.sessionId) return false;
+    const live = await listLiveSessions();
+    return live.some((s) => s.sessionId === agent.sessionId);
+  },
+});
+
 type HookSubscriber = (ev: HookBroadcast) => void;
 const hookSubscribers = new Set<HookSubscriber>();
 
@@ -366,6 +415,22 @@ app.post("/api/hook", (req, res) => {
   try {
     const ev = promptState.record(req.body);
     broadcastHook(ev);
+    // Turn-boundary hooks for orchestration-owned sessions drive the autonomy
+    // loop (marker scan → advance/nudge/block). Fire-and-forget so the hook
+    // POST stays fast; gated behind the opt-in flag.
+    const evName = (req.body?.hook_event_name ?? "") as string;
+    const sid = (req.body?.session_id ?? "") as string;
+    if (ORCH_AUTONOMY && sid && (evName === "Stop" || evName === "SubagentStop")) {
+      void findAgentForSession(sid)
+        .then((found) =>
+          found
+            ? orchController.onAgentSignal(found.orchId, found.agentId, {
+                stopped: true,
+              })
+            : undefined,
+        )
+        .catch(() => {});
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: String(err) });
@@ -847,6 +912,89 @@ app.post("/api/orchestrations/:id/teardown", async (req, res) => {
   }
 });
 
+// User-initiated briefing delivery — send an agent its role briefing through
+// the tmux send path and mark it running. Always available (even with active
+// autonomy off) so the human stays in control of when an agent starts.
+app.post(
+  "/api/orchestrations/:id/agents/:agentId/brief",
+  async (req, res) => {
+    const orch = await orchStore.getOrchestration(req.params.id);
+    if (!orch) {
+      res.status(404).json({ error: "orchestration not found" });
+      return;
+    }
+    const agent = orch.agents.find((a) => a.id === req.params.agentId);
+    if (!agent) {
+      res.status(404).json({ error: "agent not found" });
+      return;
+    }
+    try {
+      await sendToAgent(agent, orchestrator.briefingFor(orch, agent));
+      await orchStore.updateAgent(orch.id, agent.id, (a) => {
+        a.briefedAt = Date.now();
+        if (a.lifecycle === "pending" || a.lifecycle === "spawning") {
+          a.lifecycle = "running";
+        }
+      });
+      await orchStore.appendEvent({
+        ts: Date.now(),
+        orchestrationId: orch.id,
+        agentId: agent.id,
+        kind: "checkpoint",
+        message: `briefing delivered to ${agent.role} (manual)`,
+        data: { kind: "briefing" },
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  },
+);
+
+// Map a live session id back to its orchestration agent (active only).
+async function findAgentForSession(
+  sessionId: string,
+): Promise<{ orchId: string; agentId: string } | null> {
+  for (const o of await orchStore.listOrchestrations()) {
+    if (o.status !== "active") continue;
+    const a = o.agents.find((x) => x.sessionId === sessionId);
+    if (a) return { orchId: o.id, agentId: a.id };
+  }
+  return null;
+}
+
+// Reconcile orchestration state against the live-session view: backfill
+// session ids for agents whose session has registered, keep metrics fresh,
+// and (when active autonomy is on) deliver briefings to newly-ready agents.
+async function reconcileOrchestrations(): Promise<void> {
+  const active = (await orchStore.listOrchestrations()).filter(
+    (o) => o.status === "active",
+  );
+  if (active.length === 0) return;
+
+  const liveRefs: LiveSessionRef[] = (await listLiveSessions()).map((s) => ({
+    sessionId: s.sessionId,
+    pid: s.pid,
+  }));
+  // 1. Backfill registered sessions onto their agents.
+  for (const link of correlateAgentSessions(active, liveRefs)) {
+    await orchStore.updateAgent(link.orchId, link.agentId, (a) => {
+      a.sessionId = link.sessionId;
+    });
+  }
+
+  // 2. Per agent: refresh metrics always; let the controller drive briefing
+  //    delivery for ready agents when autonomy is enabled.
+  for (const o of active) {
+    for (const agent of o.agents) {
+      await orchController.refreshMetrics(o.id, agent.id);
+      if (ORCH_AUTONOMY) {
+        await orchController.onAgentSignal(o.id, agent.id, { stopped: false });
+      }
+    }
+  }
+}
+
 // Periodic safety net for the fs.watch-based resolver above: while a
 // client has an SSE transcript stream open we get watch fires, but mobile
 // suspends backgrounded SSE connections and missed events aren't replayed.
@@ -861,6 +1009,14 @@ setInterval(() => {
       for (const b of broadcasts) broadcastHook(b);
     });
 }, PERMISSION_RESOLVE_TICK_MS).unref?.();
+
+// Orchestration reconcile loop: backfills session ids, refreshes agent
+// metrics, and (when autonomy is enabled) delivers briefings to ready agents.
+// No-ops cheaply when there are no active orchestrations.
+const ORCH_RECONCILE_TICK_MS = 3000;
+setInterval(() => {
+  void reconcileOrchestrations().catch(() => {});
+}, ORCH_RECONCILE_TICK_MS).unref?.();
 
 app.use(express.static(path.join(__dirname, "..", "public")));
 

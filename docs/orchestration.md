@@ -7,10 +7,12 @@ still an ordinary Claude Code session driven by `tmux send-keys`. The
 interaction model is unchanged — orchestration adds isolation, roles, autonomy,
 and bookkeeping around it.
 
-> Status: **foundation + spawn flow landed** (branch `orchestration`). The
-> libraries, the orchestrator service, and the server endpoints below exist,
-> are tested, and have been verified end-to-end against a real git repo. The
-> autonomy controller and the frontend are the next increments — see PLAN.md.
+> Status: **backend complete** (branch `orchestration`). The libraries, the
+> orchestrator service, the autonomy controller, and the server endpoints +
+> reconcile loop below all exist and are tested (worktree flow verified
+> end-to-end against a real git repo). What remains: a frontend dashboard, and
+> validating the active autonomy loop against live Claude sessions before
+> defaulting it on. See PLAN.md.
 
 ## The model
 
@@ -96,8 +98,22 @@ transcript tail, and:
 - see `BLOCKED` → mark `blocked`, surface the question for the human (existing
   attention machinery), record an `intervention` when resumed;
 - see neither → the self-review loop: nudge the agent to continue toward its
-  definition of done (a bounded number of times), the "don't stop until the
-  condition holds" pattern hark's own `/goal` uses.
+  definition of done (a bounded number of times, default 3), then escalate to
+  `blocked` — the "don't stop until the condition holds" pattern hark's own
+  `/goal` uses.
+
+This is implemented in `src/lib/orch/controller.ts`: `decideAutonomyAction` is
+the pure policy, `AutonomyController.onAgentSignal(stopped)` the IO shell.
+`src/server.ts` wires it — a 3 s reconcile loop backfills session ids
+(`correlation.ts`, matching live sessions to agents by pid), refreshes metrics,
+and drives delivery; the `/api/hook` `Stop` path triggers a turn-boundary
+decision.
+
+**Active autonomy is opt-in** via `HARK_ORCH_AUTONOMY=1`, because it types real
+keystrokes (briefings, nudges) into live sessions on your behalf. With it off,
+orchestrations still spawn agents and the dashboard still tracks metrics; you
+deliver briefings yourself with `POST .../agents/:agentId/brief` and drive each
+agent through the normal session view (the unchanged tmux-send model).
 
 **Plan-as-code:** the briefing instructs each agent to record significant
 decisions; those, plus lifecycle transitions, land in `events.jsonl`.
@@ -143,7 +159,9 @@ src/lib/orch/worktree.ts        # git worktree isolation
 src/lib/orch/roles.ts           # role charters + briefing + autonomy markers
 src/lib/orch/store.ts           # file-backed registry + append-only event log
 src/lib/orch/orchestrator.ts    # service: worktree + spawn + roles, DI, rollback
-src/server.ts                   # endpoints: POST/GET /api/orchestrations[/:id], teardown
+src/lib/orch/controller.ts      # autonomy: marker scan, self-review loop, metrics
+src/lib/orch/correlation.ts     # match live sessions to agents by pid
+src/server.ts                   # endpoints + reconcile loop + Stop-hook wiring
 ```
 
 ## HTTP API
@@ -154,3 +172,4 @@ src/server.ts                   # endpoints: POST/GET /api/orchestrations[/:id],
 | `GET` | `/api/orchestrations` | List orchestrations, newest first. |
 | `GET` | `/api/orchestrations/:id` | One orchestration record + its `events.jsonl`. |
 | `POST` | `/api/orchestrations/:id/teardown` | Remove all agent worktrees, archive the orchestration (branches kept). |
+| `POST` | `/api/orchestrations/:id/agents/:agentId/brief` | Deliver an agent its role briefing via the tmux send path and mark it running. User-initiated; works regardless of the autonomy flag. |
