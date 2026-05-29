@@ -1,5 +1,4 @@
 import type {
-  AgentRole,
   HookBroadcast,
   Orchestration,
   OrchestrationSummary,
@@ -263,7 +262,6 @@ export interface CreateOrchestrationBody {
   goal: string;
   projectKey: string;
   baseRef?: string;
-  roles?: AgentRole[];
 }
 
 async function postJson(url: string, body?: unknown): Promise<unknown> {
@@ -302,6 +300,12 @@ export async function briefAgent(
 
 export async function teardownOrchestration(orchId: string): Promise<void> {
   await postJson(`/api/orchestrations/${encodeURIComponent(orchId)}/teardown`);
+}
+
+// (Re-)spawn the coordinating head for an orchestration. Idempotent on the
+// server when a live head already exists.
+export async function respawnHead(orchId: string): Promise<void> {
+  await postJson(`/api/orchestrations/${encodeURIComponent(orchId)}/head`);
 }
 
 // ---- SSE wrappers. EventSource auto-reconnects on its own; we only need

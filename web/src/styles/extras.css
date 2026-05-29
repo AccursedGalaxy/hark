@@ -2011,6 +2011,22 @@
   background: var(--ink-1);
   padding: 10px 12px;
 }
+/* The head is the coordinator — give its card a faint accent edge so it reads
+   as distinct from the worker list below it. */
+.orch-head {
+  border-color: var(--accent, var(--line));
+  background: var(--ink-2, var(--ink-1));
+}
+.orch-form-hint {
+  font-size: 12px;
+  color: var(--fg-3);
+  margin: 4px 0 0;
+}
+.orch-empty-inline {
+  font-size: 12px;
+  color: var(--fg-3);
+  padding: 8px 2px;
+}
 .orch-agent-top {
   display: flex;
   align-items: center;

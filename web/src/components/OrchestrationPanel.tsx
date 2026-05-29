@@ -1,14 +1,14 @@
 import { useState } from "react";
 import {
-  AGENT_ROLES,
   type AgentLifecycle,
-  type AgentRole,
   type OrchAgent,
+  type OrchHead,
   type ProjectInfo,
 } from "../lib/protocol";
 import {
   briefAgent,
   createOrchestration,
+  respawnHead,
   teardownOrchestration,
 } from "../lib/transport";
 import type { OrchestrationsApi } from "../hooks/useOrchestrations";
@@ -170,9 +170,10 @@ function OrchestrationListView({
           <div className="orch-empty">
             <h2>No orchestrations yet</h2>
             <p>
-              An orchestration spins up a team of role-playing Claude agents —
-              each in its own isolated git worktree — against one project.
-              Create one to get started.
+              An orchestration spins up a <strong>head</strong> Claude session
+              that decomposes your goal and spawns worker agents on demand —
+              each in its own isolated git worktree. You talk to the head in
+              natural language. Create one to get started.
             </p>
           </div>
         ) : (
@@ -238,21 +239,11 @@ function CreateForm({
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
   const [projectKey, setProjectKey] = useState(projects[0]?.key ?? "");
-  const [roles, setRoles] = useState<Set<AgentRole>>(new Set(AGENT_ROLES));
   const [baseRef, setBaseRef] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const toggleRole = (r: AgentRole) =>
-    setRoles((prev) => {
-      const next = new Set(prev);
-      if (next.has(r)) next.delete(r);
-      else next.add(r);
-      return next;
-    });
-
-  const canSubmit =
-    name.trim() && goal.trim() && projectKey && roles.size > 0 && !busy;
+  const canSubmit = name.trim() && goal.trim() && projectKey && !busy;
 
   const submit = async () => {
     if (!canSubmit) return;
@@ -264,7 +255,6 @@ function CreateForm({
         goal: goal.trim(),
         projectKey,
         baseRef: baseRef.trim() || undefined,
-        roles: AGENT_ROLES.filter((r) => roles.has(r)),
       });
       onCreated();
     } catch (err) {
@@ -321,22 +311,10 @@ function CreateForm({
               placeholder="HEAD"
             />
           </label>
-          <div className="orch-field">
-            <span>Roles</span>
-            <div className="orch-roles">
-              {AGENT_ROLES.map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  className={"tag " + (roles.has(r) ? "accent" : "")}
-                  onClick={() => toggleRole(r)}
-                  aria-pressed={roles.has(r)}
-                >
-                  {r}
-                </button>
-              ))}
-            </div>
-          </div>
+          <p className="orch-form-hint">
+            hark spawns a <strong>head</strong> session that decomposes the goal
+            and spawns worker agents on demand — no roster to pick.
+          </p>
           {error && <div className="plan-error">{error}</div>}
           <div style={{ display: "flex", gap: 8 }}>
             <button
@@ -345,7 +323,7 @@ function CreateForm({
               disabled={!canSubmit}
               onClick={() => void submit()}
             >
-              {busy ? "Spawning team…" : "Create & spawn"}
+              {busy ? "Spawning head…" : "Create & spawn head"}
             </button>
           </div>
         </>
@@ -420,10 +398,26 @@ function OrchestrationDetailView({
         </div>
 
         <div className="section-label">
-          <span>Agents</span>
+          <span>Head</span>
+        </div>
+        <HeadCard
+          orchId={o.id}
+          head={o.head}
+          onOpenSession={onOpenSession}
+          onChanged={onChanged}
+        />
+
+        <div className="section-label">
+          <span>Workers</span>
           <span className="count">{o.agents.length}</span>
         </div>
         <div className="orch-agents">
+          {o.agents.length === 0 && (
+            <div className="orch-empty-inline">
+              No workers yet — the head spawns them on demand as it decomposes
+              the goal.
+            </div>
+          )}
           {o.agents.map((a) => (
             <AgentCard
               key={a.id}
@@ -457,6 +451,107 @@ function Metric({ label, value }: { label: string; value: string }) {
     <div className="orch-metric">
       <div className="orch-metric-value">{value}</div>
       <div className="orch-metric-label">{label}</div>
+    </div>
+  );
+}
+
+// The coordinating head, surfaced prominently — it's the session the user
+// mainly talks to. Observability + an "Open head" affordance; respawn if it
+// died or a legacy headless record has none.
+function HeadCard({
+  orchId,
+  head,
+  onOpenSession,
+  onChanged,
+}: {
+  orchId: string;
+  head: OrchHead | undefined;
+  onOpenSession: (sessionId: string) => void;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const respawn = async () => {
+    setBusy(true);
+    try {
+      await respawnHead(orchId);
+      onChanged();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "spawn head failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!head) {
+    return (
+      <div className="orch-agent orch-head">
+        <div className="orch-agent-top">
+          <span className="orch-agent-role">head</span>
+          <span className="session-status">
+            <span className="dot idle" />
+            NONE
+          </span>
+        </div>
+        <div className="orch-agent-blocked">
+          This orchestration has no head (legacy headless record).
+        </div>
+        <div className="orch-agent-meta">
+          <button
+            type="button"
+            className="btn-sm"
+            disabled={busy}
+            onClick={() => void respawn()}
+          >
+            Spawn head
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const dot = head.sessionId ? "live" : "idle";
+  const label = head.sessionId
+    ? head.briefedAt != null
+      ? "BRIEFED"
+      : "STARTING"
+    : "SPAWNING";
+
+  return (
+    <div className="orch-agent orch-head">
+      <div className="orch-agent-top">
+        <span className="orch-agent-role">head</span>
+        <span className="session-status">
+          <span className={"dot " + dot} />
+          {label}
+        </span>
+      </div>
+      <div className="orch-agent-branch">{head.branch}</div>
+      <div className="orch-agent-meta">
+        <span className="tag">
+          {fmtTokens(head.metrics.inputTokens + head.metrics.outputTokens)} tok
+        </span>
+        <span className="tag">{head.metrics.turns} turns</span>
+        {head.sessionId && (
+          <button
+            type="button"
+            className="btn-sm"
+            onClick={() => onOpenSession(head.sessionId!)}
+          >
+            Open head
+          </button>
+        )}
+        {!head.sessionId && (
+          <button
+            type="button"
+            className="btn-sm"
+            disabled={busy}
+            onClick={() => void respawn()}
+          >
+            Respawn
+          </button>
+        )}
+      </div>
     </div>
   );
 }
