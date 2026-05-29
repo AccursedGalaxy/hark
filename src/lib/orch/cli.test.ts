@@ -5,6 +5,7 @@ import {
   mergeResolved,
   planCommand,
   renderResponse,
+  truncateTask,
   type CliEnv,
 } from "./cli.js";
 import type { OrchStatusView } from "../../shared/protocol.js";
@@ -354,6 +355,62 @@ describe("renderResponse — status", () => {
     expect(out).toContain("done");
     // One line per agent (+ a header line + a head line). No giant dumps.
     expect(out.split("\n").length).toBeLessThan(12);
+  });
+});
+
+describe("truncateTask", () => {
+  it("passes a short single-line task through unchanged", () => {
+    expect(truncateTask("Build the parser")).toBe("Build the parser");
+  });
+
+  it("collapses a multi-line task to one space-separated line", () => {
+    const multi = "Build the parser\n\n  - handle quotes\n  - handle escapes";
+    expect(truncateTask(multi)).toBe(
+      "Build the parser - handle quotes - handle escapes",
+    );
+  });
+
+  it("cuts an over-length task to max chars and appends an ellipsis", () => {
+    const long = "x".repeat(80);
+    const out = truncateTask(long, 60);
+    expect(out).toBe("x".repeat(60) + "…");
+    expect(out.endsWith("…")).toBe(true);
+    // 60 content chars + the single ellipsis character.
+    expect(out.length).toBe(61);
+  });
+
+  it("keeps a task exactly at the limit without an ellipsis", () => {
+    const exact = "y".repeat(60);
+    expect(truncateTask(exact, 60)).toBe(exact);
+  });
+});
+
+describe("renderResponse — status truncates the task", () => {
+  it("renders a flooded multi-paragraph task as one compact line", () => {
+    const view: OrchStatusView = {
+      id: "orch-1",
+      name: "Ship login",
+      goal: "Add OAuth",
+      status: "active",
+      agents: [
+        {
+          id: "agent-2",
+          role: "coder",
+          lifecycle: "running",
+          branch: "hark/ship-login/coder-aaa",
+          turns: 8,
+          tokens: 22000,
+          task:
+            "You are the Coder.\n\nImplement the change across many files.\n" +
+            "  - step one\n  - step two\n".repeat(20),
+        },
+      ],
+    };
+    const out = renderResponse("status", view);
+    // The whole status fits on a handful of lines despite the giant brief.
+    expect(out.split("\n").length).toBeLessThan(5);
+    expect(out).toContain("…");
+    expect(out).not.toContain("step two\n  - step");
   });
 });
 
