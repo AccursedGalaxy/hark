@@ -7,13 +7,27 @@
 // works from any cwd). Run `npm run build` before spawning orchestration
 // sessions. The orchestrator prepends this dir to the session's PATH and sets
 // HARK_ORCH_ID / HARK_ROLE / HARK_API, so `hark …` just works inside the head.
+import fs from "node:fs";
 import {
   planCommand,
   renderResponse,
   envFromProcess,
   buildResolveRequest,
   mergeResolved,
+  taskFileArg,
+  injectTask,
 } from "../dist/lib/orch/cli.js";
+
+// Read all of stdin to end (used for `--task-file -`). Returns the full text.
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => (data += chunk));
+    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("error", reject);
+  });
+}
 
 async function getJson(api, path) {
   const res = await fetch(api + path, { headers: { "content-type": "application/json" } });
@@ -27,8 +41,26 @@ async function getJson(api, path) {
 }
 
 async function main() {
-  const argv = process.argv.slice(2);
+  let argv = process.argv.slice(2);
   let env = envFromProcess(process.env, process.cwd());
+
+  // --task-file <path|->: read the brief from a file (or stdin for "-") and
+  // splice it in as a normal --task, so big multi-paragraph briefs don't need
+  // shell-escaping. The only IO for this lives here; the parsing is pure.
+  const taskFile = taskFileArg(argv);
+  if (taskFile != null) {
+    let contents;
+    try {
+      contents = taskFile === "-" ? await readStdin() : fs.readFileSync(taskFile, "utf8");
+    } catch (e) {
+      process.stderr.write(`hark: cannot read task file ${taskFile}: ${e.message}\n`);
+      return 1;
+    }
+    // Drop a single trailing newline (common with files/heredocs); the rest is
+    // opaque task data, passed through verbatim.
+    contents = contents.replace(/\n$/, "");
+    argv = injectTask(argv, contents);
+  }
 
   // Env-fallback: a promoted PM-head has no HARK_ORCH_ID/ROLE (it was never
   // spawned by hark), so resolve the project's active managed head from cwd.
