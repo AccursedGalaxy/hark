@@ -29,7 +29,7 @@ import { spawnClaudeSession } from "./lib/spawnSession.js";
 import { OrchStore } from "./lib/orch/store.js";
 import { Orchestrator } from "./lib/orch/orchestrator.js";
 import { AutonomyController, type TranscriptMetrics } from "./lib/orch/controller.js";
-import { MetricsDb, headAgentId } from "./lib/orch/metricsDb.js";
+import { MetricsDb, captureTurns, headAgentId } from "./lib/orch/metricsDb.js";
 import {
   correlateAgentSessions,
   correlateHeadSessions,
@@ -1800,15 +1800,19 @@ async function findOrchRoleForSession(
 // Ingest one orchestration's state into the metrics DB for this reconcile
 // tick. AUGMENT-only and best-effort: any failure is swallowed so a DB hiccup
 // can never stall reconcile (the JSON store stays authoritative). Reuses the
-// transcript metrics the loop already computed (`samples`/`headTm`) so we
-// never re-read a transcript here. Steps: (a) upsert the orchestration + agent
-// + head snapshots; (b) APPEND a token_samples row per session from the
-// already-read metrics (cost priced inside the DB layer); (c) tail events.jsonl
-// from the stored byte offset into the events table.
+// transcript metrics AND raw events the loop already read (`samples`/`headTm`,
+// `agentEvents`/`headEvents`) so we never re-read a transcript here. Steps:
+// (a) upsert the orchestration + agent + head snapshots; (b) APPEND a
+// token_samples row per session from the already-read metrics (cost priced
+// inside the DB layer); (c) capture the assistant turns + tool calls from the
+// already-read events (cursored, idempotent); (d) tail events.jsonl from the
+// stored byte offset into the events table.
 async function ingestMetrics(
   orchId: string,
   samples: Map<string, TranscriptMetrics>,
   headTm: TranscriptMetrics | null,
+  agentEvents: Map<string, TranscriptEvent[]>,
+  headEvents: TranscriptEvent[] | null,
 ): Promise<void> {
   if (!metricsDb) return;
   const db = metricsDb;
@@ -1821,6 +1825,11 @@ async function ingestMetrics(
     db.upsertOrchestration(fresh);
     for (const a of fresh.agents) {
       db.upsertAgent(orchId, a);
+      // Capture tool-call intent from the already-read transcript (cursored +
+      // idempotent). Independent of the token sample below — intent is recorded
+      // whenever we read the transcript, never gated on a tool result.
+      const events = agentEvents.get(a.id);
+      if (events) db.ingestTurns(a.id, orchId, a.sessionId, captureTurns(events));
       const tm = samples.get(a.id);
       if (!tm) continue; // no session/transcript read this tick
       db.insertTokenSample({
@@ -1838,6 +1847,14 @@ async function ingestMetrics(
     }
     if (fresh.head) {
       db.upsertHead(orchId, fresh.head);
+      if (headEvents) {
+        db.ingestTurns(
+          headAgentId(orchId),
+          orchId,
+          fresh.head.sessionId,
+          captureTurns(headEvents),
+        );
+      }
       if (headTm) {
         db.insertTokenSample({
           sessionId: fresh.head.sessionId,
@@ -1892,12 +1909,17 @@ async function reconcileOrchestrations(): Promise<void> {
   //    delivery for ready agents (and worker→head notifications) when autonomy
   //    is enabled. The head is driven separately (it's not in agents[]).
   for (const o of active) {
-    // Collect this tick's fresh transcript metrics so the DB ingest below can
-    // reuse them (a token_samples row per session) without re-reading.
+    // Collect this tick's fresh transcript metrics AND the raw events the
+    // refresh read, so the DB ingest below can feed both the token_samples
+    // time-series and the turns/tool_calls capture without re-reading.
     const samples = new Map<string, TranscriptMetrics>();
+    const agentEvents = new Map<string, TranscriptEvent[]>();
     for (const agent of o.agents) {
-      const tm = await orchController.refreshMetrics(o.id, agent.id);
-      if (tm) samples.set(agent.id, tm);
+      const refreshed = await orchController.refreshMetrics(o.id, agent.id);
+      if (refreshed) {
+        samples.set(agent.id, refreshed.metrics);
+        agentEvents.set(agent.id, refreshed.events);
+      }
       if (
         agent.lifecycle === "done" ||
         agent.lifecycle === "blocked" ||
@@ -1932,6 +1954,7 @@ async function reconcileOrchestrations(): Promise<void> {
       }
     }
     let headTm: TranscriptMetrics | null = null;
+    let headEvents: TranscriptEvent[] | null = null;
     if (o.head) {
       // Under autonomy onHeadSignal delivers the head briefing + interprets a
       // head DONE as orch-complete (and refreshes metrics as a side effect).
@@ -1939,13 +1962,17 @@ async function reconcileOrchestrations(): Promise<void> {
         await orchController.onHeadSignal(o.id, { stopped: false });
       }
       // refreshHeadMetrics keeps the dashboard's head card fresh AND returns
-      // the sample for the DB ingest. The head is a single session, so calling
-      // it even under autonomy (a second cheap read) is fine and keeps the
-      // sample path uniform with the agents'.
-      headTm = await orchController.refreshHeadMetrics(o.id);
+      // the sample + raw events for the DB ingest. The head is a single
+      // session, so calling it even under autonomy (a second cheap read) is
+      // fine and keeps the sample path uniform with the agents'.
+      const refreshed = await orchController.refreshHeadMetrics(o.id);
+      if (refreshed) {
+        headTm = refreshed.metrics;
+        headEvents = refreshed.events;
+      }
     }
     // Mirror this tick into the derived metrics DB (best-effort, never throws).
-    await ingestMetrics(o.id, samples, headTm);
+    await ingestMetrics(o.id, samples, headTm, agentEvents, headEvents);
   }
 }
 
