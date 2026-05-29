@@ -89,6 +89,25 @@ export function buildWorktreeAddArgs(
   ];
 }
 
+// Decide how to base a new worktree, given whether the requested base is a real
+// branch on origin. Pure so it's unit-testable without a real repo (the IO —
+// the actual fetch / origin probe — happens in addWorktree).
+//
+// - HEAD / empty base, or no matching branch on origin: keep today's behavior —
+//   branch off the LOCAL ref, no fetch. This preserves the local-only-WIP-base
+//   and no-remote cases (no regression).
+// - Otherwise: fetch that branch from origin and branch off the freshly-updated
+//   remote-tracking ref, so workers fork the live remote tip, not a stale local.
+export function resolveWorktreeBase(
+  baseRef: string,
+  originHasBase: boolean,
+): { fetchRef: string | null; checkoutRef: string } {
+  if (baseRef === "HEAD" || baseRef === "" || !originHasBase) {
+    return { fetchRef: null, checkoutRef: baseRef };
+  }
+  return { fetchRef: baseRef, checkoutRef: `origin/${baseRef}` };
+}
+
 // `git -C <repoRoot> worktree remove [--force] <path>`. Force is needed when
 // the worktree has uncommitted changes — callers decide whether that's
 // acceptable (usually: keep the branch, discard the throwaway checkout).
@@ -322,12 +341,32 @@ export async function addWorktree(opts: {
   branch: string;
   baseRef?: string;
 }): Promise<void> {
+  const baseRef = opts.baseRef ?? "HEAD";
+  // Fork the LIVE remote tip, not a stale local ref: when the base is a real
+  // branch on origin, fetch it first and branch off `origin/<base>`. Falls back
+  // to the local ref for HEAD, local-only WIP bases, and no-remote repos.
+  const originHasBase =
+    baseRef !== "HEAD" &&
+    baseRef !== "" &&
+    (await hasOrigin(opts.repoRoot)) &&
+    (await baseOnOrigin(opts.repoRoot, baseRef));
+  const resolved = resolveWorktreeBase(baseRef, originHasBase);
+  let checkoutRef = resolved.checkoutRef;
+  if (resolved.fetchRef) {
+    try {
+      await runGit(["-C", opts.repoRoot, "fetch", "origin", resolved.fetchRef]);
+    } catch {
+      // Best-effort, like linkNodeModules: a failed fetch (offline, auth, etc.)
+      // must not abort the spawn — branch off the local ref instead.
+      checkoutRef = baseRef;
+    }
+  }
   await runGit(
     buildWorktreeAddArgs(
       opts.repoRoot,
       opts.worktreeDir,
       opts.branch,
-      opts.baseRef ?? "HEAD",
+      checkoutRef,
     ),
   );
   linkNodeModules(opts.repoRoot, opts.worktreeDir);
