@@ -243,6 +243,10 @@ export interface BreakerInput {
 export interface BreakerDecision {
   tripped: boolean;
   reason?: string;
+  // Which trigger fired (only meaningful when tripped). The controller gates ONLY
+  // `no_progress` on the stuck-judge; `signature` and `hard_ceiling` stay
+  // immediate auto-kills, never gated on a judge.
+  trigger?: "signature" | "no_progress" | "hard_ceiling";
   // Always returned — persisted onto the agent so the next tick measures
   // against it.
   snapshot: BreakerState;
@@ -289,6 +293,14 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     prior.progressKey !== progressKey;
   const baseline = sigReset ? repeatCount : prior.baseline;
 
+  // The stuck-judge flag lives on the no-progress window: carry it forward while
+  // the window holds (committed diff unchanged), drop it the moment the window
+  // resets (worker advanced its diff -> resumed real progress). This makes
+  // "re-judge only once per window" and "clear the flag on recovery" fall out of
+  // the same reset the no-progress trigger already keys on.
+  const flaggedAt = progressReset ? undefined : prior?.flaggedAt;
+  const flaggedReason = progressReset ? undefined : prior?.flaggedReason;
+
   // Always carry every window's bookkeeping forward, regardless of which (if
   // any) trigger fires this tick.
   const snapshot: BreakerState = {
@@ -298,6 +310,8 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     diffKey,
     progressTurns,
     progressToolCalls,
+    flaggedAt,
+    flaggedReason,
   };
 
   // Trigger 3 (checked first — it's the hard guarantee): an absolute ceiling on
@@ -306,6 +320,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
   if (turns >= hardTurnCeiling) {
     return {
       tripped: true,
+      trigger: "hard_ceiling",
       reason: `circuit-breaker: hard ceiling — ${turns} turns ≥ ${hardTurnCeiling} (no worker may burn unbounded, progress or not)`,
       snapshot,
     };
@@ -313,6 +328,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
   if (tokens >= hardTokenCeiling) {
     return {
       tripped: true,
+      trigger: "hard_ceiling",
       reason: `circuit-breaker: hard ceiling — ${tokens} tokens ≥ ${hardTokenCeiling} (no worker may burn unbounded, progress or not)`,
       snapshot,
     };
@@ -326,6 +342,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     if (turnStreak >= noProgressTurns) {
       return {
         tripped: true,
+        trigger: "no_progress",
         reason: `circuit-breaker: ${turnStreak} turns with no committed-diff progress (varied-probe spiral)`,
         snapshot,
       };
@@ -334,6 +351,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     if (callStreak >= noProgressToolCalls) {
       return {
         tripped: true,
+        trigger: "no_progress",
         reason: `circuit-breaker: ${callStreak} tool calls with no committed-diff progress (varied-probe spiral)`,
         snapshot,
       };
@@ -346,6 +364,7 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     if (streak >= limit) {
       return {
         tripped: true,
+        trigger: "signature",
         reason: `circuit-breaker: ${repeatCount} consecutive identical no-op commands with no new commits or diff (\`${truncateSignature(signature)}\`)`,
         snapshot,
       };
@@ -357,6 +376,142 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
 
 function truncateSignature(sig: string, max = 60): string {
   return sig.length <= max ? sig : `${sig.slice(0, max - 1)}…`;
+}
+
+// ---- Stuck-judge (Trigger-2 gating) -----------------------------------------
+//
+// The no-progress trigger (Trigger 2) can't tell convergent research from a
+// spiral — it only sees "N turns, no committed diff". A worker front-loading
+// legitimate reads across many files looks identical to a varied-probe spiral
+// to a commit-counter. So instead of auto-killing on Trigger 2, we hand the
+// bounded recent-activity view + the task brief to a cheap Haiku judge and let
+// it decide. Only stuck/drifting escalates — and it escalates to the PM, it
+// does not kill. progressing re-arms the window and the worker runs on. A judge
+// error/timeout falls back to the OLD block behavior (fail safe). Triggers 1
+// and 3 are never gated on the judge.
+
+export type StuckVerdict = "progressing" | "stuck" | "drifting";
+
+export interface JudgeResult {
+  verdict: StuckVerdict;
+  reason: string;
+}
+
+// A compact, human-readable target for one tool call — what the judge needs to
+// tell reading-new-files from re-running probes. Bash → its command; the file
+// tools → their path; anything else → a short view of the input. Bounded so a
+// huge input can't blow the activity view's size budget.
+export function summarizeToolCall(block: ContentBlock, max = 80): string {
+  if (block.type !== "tool_use") return "";
+  const clip = (s: string) =>
+    s.replace(/\s+/g, " ").trim().slice(0, max);
+  const input = block.input as Record<string, unknown> | null;
+  if (block.name === "Bash" && typeof input?.command === "string") {
+    return `Bash(${clip(input.command)})`;
+  }
+  const target =
+    (typeof input?.file_path === "string" && input.file_path) ||
+    (typeof input?.path === "string" && input.path) ||
+    (typeof input?.pattern === "string" && input.pattern) ||
+    (typeof input?.query === "string" && input.query) ||
+    "";
+  if (target) return `${block.name}(${clip(target)})`;
+  // No recognised target field — the tool name alone still distinguishes it.
+  return block.name;
+}
+
+// Build the bounded activity view the judge reasons over: the last `maxTurns`
+// assistant turns, each shown as its tool calls (name + target) plus a short
+// snippet of any assistant text. NEVER the raw growing transcript — this is the
+// distilled, size-capped stream (mirrors the metrics-DB capture's name/target
+// view, built from the same assistant-side tool_use blocks so it honors the
+// intent-from-transcript invariant). Oldest→newest.
+export function buildJudgeActivityView(
+  events: TranscriptEvent[],
+  opts: { maxTurns?: number; maxTextLen?: number } = {},
+): string {
+  const maxTurns = opts.maxTurns ?? 20;
+  const maxTextLen = opts.maxTextLen ?? 200;
+  const assistant = events.filter(
+    (e): e is Extract<TranscriptEvent, { kind: "assistant" }> =>
+      e.kind === "assistant",
+  );
+  const recent = assistant.slice(-maxTurns);
+  const lines: string[] = [];
+  recent.forEach((e, i) => {
+    const calls: string[] = [];
+    const texts: string[] = [];
+    for (const b of e.blocks) {
+      if (b.type === "tool_use") calls.push(summarizeToolCall(b));
+      else if (b.type === "text" && b.text.trim()) texts.push(b.text.trim());
+    }
+    const parts: string[] = [`T${i + 1}:`];
+    if (calls.length) parts.push(calls.join(", "));
+    if (texts.length) {
+      const snippet = texts.join(" ").replace(/\s+/g, " ").slice(0, maxTextLen);
+      parts.push(`"${snippet}"`);
+    }
+    if (calls.length === 0 && texts.length === 0) parts.push("(no output)");
+    lines.push(parts.join(" "));
+  });
+  return lines.join("\n");
+}
+
+// The judge prompt. Time-boxed Haiku call; we force a one-line structured
+// answer so the parse is trivial and the cost is tiny. The distinction we
+// learned drives the instruction: reading new files / writing new code toward
+// the task = progressing; repeating probes, no new information, or wandering
+// off the brief = stuck/drifting.
+export function buildStuckJudgePrompt(task: string, activityView: string): string {
+  return [
+    "You are a circuit-breaker judge for an autonomous coding agent. The agent",
+    "has gone many turns without committing any new code. That ALONE does not",
+    "mean it is stuck: front-loaded research (reading many distinct files, running",
+    "distinct searches to understand a codebase before writing) is legitimate and",
+    "converges. A spiral is the opposite: re-running the same kinds of probes,",
+    "surfacing no new information, or wandering off the task.",
+    "",
+    "Decide which this is. Judge ONLY from the activity below.",
+    "",
+    `TASK THE AGENT IS WORKING ON:\n${task}`,
+    "",
+    `RECENT ACTIVITY (oldest first, one line per turn):\n${activityView}`,
+    "",
+    "Respond with ONE LINE of JSON and nothing else:",
+    '{"verdict":"progressing"|"stuck"|"drifting","reason":"<short reason>"}',
+    "- progressing: reading new files / writing new code, genuinely converging.",
+    "- stuck: repeating probes, no new information, spinning in place.",
+    "- drifting: active but wandering off the stated task.",
+  ].join("\n");
+}
+
+// Parse the judge's structured answer out of its stdout. `claude -p` may wrap
+// the JSON in prose or a code fence, so we scan for the first balanced object
+// and validate the verdict. Returns null on anything we can't trust — the
+// caller treats null as "judge failed" and falls back to the safe block path.
+export function parseJudgeVerdict(stdout: string): JudgeResult | null {
+  if (!stdout) return null;
+  // Find the first {...} that parses and carries a known verdict.
+  for (let i = stdout.indexOf("{"); i !== -1; i = stdout.indexOf("{", i + 1)) {
+    for (let j = stdout.lastIndexOf("}"); j > i; j = stdout.lastIndexOf("}", j - 1)) {
+      let obj: unknown;
+      try {
+        obj = JSON.parse(stdout.slice(i, j + 1));
+      } catch {
+        continue;
+      }
+      const v = (obj as { verdict?: unknown; reason?: unknown }).verdict;
+      if (v === "progressing" || v === "stuck" || v === "drifting") {
+        const reason = (obj as { reason?: unknown }).reason;
+        return {
+          verdict: v,
+          reason: typeof reason === "string" ? reason : "",
+        };
+      }
+      break; // this opening brace's widest object parsed but had no verdict
+    }
+  }
+  return null;
 }
 
 // ---- Metrics ----------------------------------------------------------------
@@ -667,6 +822,14 @@ export interface ControllerDeps {
   // DEFAULT_HARD_TURN_CEILING / DEFAULT_HARD_TOKEN_CEILING.
   hardTurnCeiling?: number;
   hardTokenCeiling?: number;
+  // The Haiku stuck-judge: given a fully-built prompt, run a time-boxed
+  // `claude -p` subprocess (or a direct API call) and return its raw stdout.
+  // Throws/rejects on error or timeout — the controller treats that as a judge
+  // failure and falls back to the safe block path. Absent → no judge, so the
+  // no-progress trigger keeps its original immediate-block behavior (back-compat
+  // for legacy/headless records and tests). Only ever invoked when Trigger 2
+  // fired (cost-bounded — never per turn).
+  runStuckJudge?: (prompt: string) => Promise<string>;
 }
 
 const DEFAULT_MAX_NUDGES = 3;
@@ -871,6 +1034,85 @@ export class AutonomyController {
 
     if (!decision.tripped) return false;
 
+    // Trigger 2 (no-progress) does NOT auto-kill: a commit-counter can't tell
+    // convergent research from a spiral, which is exactly the false-positive
+    // this judge exists to fix. When a judge is wired and we haven't already
+    // flagged this no-progress window, hand the bounded activity view + task to
+    // the Haiku stuck-judge and act on its verdict instead of killing. Triggers
+    // 1 (signature) and 3 (hard ceiling) skip this entirely — they stay
+    // immediate auto-kills, immune to a hung or wrong judge.
+    if (decision.trigger === "no_progress" && this.deps.runStuckJudge) {
+      // Once flagged + PM-woken, do NOT re-judge until the diff moves (which
+      // clears the flag via the window reset) or the hard ceiling trips. The
+      // carried-forward flag on the snapshot is the once-per-window gate. The
+      // worker keeps running; the hard ceiling bounds any leak until the PM acts.
+      if (decision.snapshot.flaggedAt != null) return false;
+
+      const judged = await this.judgeStuck(orch, agent, events);
+      if (judged?.verdict === "progressing") {
+        // Re-arm the no-progress window (baseline = current turns/calls) and let
+        // it run, so the next streak is measured fresh. Note it for the audit
+        // trail. NOT a kill, NOT a flag.
+        await this.deps.store.updateAgent(orchId, agentId, (a) => {
+          if (a.breaker) {
+            a.breaker.progressTurns = m.turns;
+            a.breaker.progressToolCalls = toolCalls;
+            a.breaker.flaggedAt = undefined;
+            a.breaker.flaggedReason = undefined;
+          }
+        });
+        await this.deps.store.appendEvent({
+          ts: this.now(),
+          orchestrationId: orchId,
+          agentId,
+          kind: "note",
+          message: `stuck-judge: progressing — ${judged.reason}`,
+          data: { kind: "stuck_judge", verdict: "progressing" },
+        });
+        return false;
+      }
+      if (
+        judged &&
+        (judged.verdict === "stuck" || judged.verdict === "drifting")
+      ) {
+        // Flag (NOT kill): record the reason on the breaker window so `orch
+        // status` surfaces it while the worker keeps running, and wake the PM
+        // once so they can steer (`hark agent send`) or confirm the kill (`hark
+        // agent stop`). flaggedAt doubles as the once-per-window re-judge gate,
+        // so we do NOT touch the terminal `headWokeAt` guard — a later genuine
+        // terminal transition still gets its own wake.
+        await this.deps.store.updateAgent(orchId, agentId, (a) => {
+          if (a.breaker) {
+            a.breaker.flaggedAt = this.now();
+            a.breaker.flaggedReason = judged.reason || judged.verdict;
+          }
+        });
+        await this.deps.store.appendEvent({
+          ts: this.now(),
+          orchestrationId: orchId,
+          agentId,
+          kind: "note",
+          message: `stuck-judge: ${judged.verdict} — ${judged.reason}`,
+          data: { kind: "stuck_judge", verdict: judged.verdict },
+        });
+        if (orch.head && this.deps.escalateToHuman) {
+          try {
+            await this.deps.escalateToHuman(
+              orch,
+              agent,
+              `stuck-judge flagged ${agent.role} as ${judged.verdict}: ${judged.reason}`,
+            );
+          } catch {
+            /* best-effort — the flag is on the record + the event already */
+          }
+        }
+        return false;
+      }
+      // judged === null → judge error / timeout / unparseable. Fall through to
+      // the block path below (fail safe): a broken judge never makes us LESS
+      // safe than the original auto-kill.
+    }
+
     const reason = decision.reason ?? "circuit-breaker tripped";
     // setAgentLifecycle records the reason on the worker record (blockedReason)
     // + an agent_lifecycle event, so the PM sees WHY in `orch status`. The
@@ -904,6 +1146,27 @@ export class AutonomyController {
       }
     }
     return true;
+  }
+
+  // Run the Haiku stuck-judge over a worker's bounded recent activity + its
+  // task brief. Returns the structured verdict, or null on any failure (no
+  // judge wired, subprocess error/timeout, or an unparseable answer) — the
+  // caller treats null as "fall back to the safe block path". The judge sees
+  // only the distilled activity view, never the raw transcript.
+  private async judgeStuck(
+    orch: Orchestration,
+    agent: OrchAgent,
+    events: TranscriptEvent[],
+  ): Promise<JudgeResult | null> {
+    if (!this.deps.runStuckJudge) return null;
+    const view = buildJudgeActivityView(events);
+    const prompt = buildStuckJudgePrompt(agent.task ?? orch.goal, view);
+    try {
+      const stdout = await this.deps.runStuckJudge(prompt);
+      return parseJudgeVerdict(stdout);
+    } catch {
+      return null;
+    }
   }
 
   // Whether the managed head's human has been quiet long enough to be "idle".

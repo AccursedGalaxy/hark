@@ -33,6 +33,10 @@ export function buildStatusView(
     tokens: a.metrics.inputTokens + a.metrics.outputTokens,
     task: a.task,
     reason: a.blockedReason,
+    // A still-running worker the stuck-judge flagged (verdict stuck/drifting)
+    // carries its reason on the breaker window, not blockedReason — so the PM
+    // sees the flag without the worker being terminal. Clears when it commits.
+    flaggedReason: a.breaker?.flaggedReason,
   }));
 
   return {

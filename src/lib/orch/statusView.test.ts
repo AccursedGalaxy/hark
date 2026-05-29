@@ -82,6 +82,28 @@ describe("buildStatusView", () => {
     expect(buildStatusView(orch({})).head).toBeUndefined();
   });
 
+  it("surfaces the stuck-judge flaggedReason on a still-running flagged worker", () => {
+    const o = orch({
+      agents: [
+        agent({
+          id: "a1",
+          lifecycle: "running",
+          breaker: {
+            signature: "",
+            progressKey: "0:",
+            baseline: 0,
+            diffKey: "",
+            flaggedAt: 1_000_000,
+            flaggedReason: "re-running varied greps, no new info",
+          },
+        }),
+      ],
+    });
+    const line = buildStatusView(o).agents[0];
+    expect(line.lifecycle).toBe("running"); // flagged ≠ terminal
+    expect(line.flaggedReason).toBe("re-running varied greps, no new info");
+  });
+
   it("defaults diffstat to empty when not provided", () => {
     const view = buildStatusView(orch({ agents: [agent({ id: "a1" })] }));
     expect(view.agents[0].diffstat).toBe("");
