@@ -130,6 +130,38 @@ describe("planCommand — pr", () => {
     }
   });
 
+  it("passes a --base through", () => {
+    const plan = planCommand(["pr", "agent-3", "--base", "main"], headEnv);
+    if (plan.kind === "request") {
+      expect(plan.request.body).toEqual({ base: "main" });
+    } else {
+      throw new Error("expected request");
+    }
+  });
+
+  it("omits base when no --base flag is given", () => {
+    const plan = planCommand(["pr", "agent-3"], headEnv);
+    if (plan.kind === "request") {
+      const body = plan.request.body as Record<string, unknown>;
+      expect("base" in body).toBe(false);
+      expect(body.base).toBeUndefined();
+    } else {
+      throw new Error("expected request");
+    }
+  });
+
+  it("carries --base alongside --title", () => {
+    const plan = planCommand(
+      ["pr", "agent-3", "--title", "Add OAuth", "--base", "main"],
+      headEnv,
+    );
+    if (plan.kind === "request") {
+      expect(plan.request.body).toEqual({ title: "Add OAuth", base: "main" });
+    } else {
+      throw new Error("expected request");
+    }
+  });
+
   it("errors without an agentId", () => {
     expect(planCommand(["pr"], headEnv).kind).toBe("error");
   });
