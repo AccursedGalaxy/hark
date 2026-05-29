@@ -821,12 +821,12 @@ export class AutonomyController {
     const signatures = toolUseSignatures(events);
     const { signature, count } = trailingRepeat(signatures);
     const toolCalls = signatures.length;
-    // Total turns + tokens (incl. cache) drive the hard ceiling and the
-    // no-progress turn count. Cache-read tokens are the lion's share of a
-    // re-probe spiral's burn, so they belong in the ceiling.
+    // Total turns + tokens drive the hard ceiling and the no-progress turn
+    // count. Only input+output count: cache-read/creation tokens dominate a
+    // long-but-healthy session's totals and would trip the ceiling on
+    // legitimate work, so they're excluded.
     const m = metricsFromTranscript(events);
-    const tokens =
-      m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheCreationTokens;
+    const tokens = m.inputTokens + m.outputTokens;
 
     // Progress signal: a worker advancing its branch moves commit count / diff.
     // progressKey (commits + diff) gates the signature window; diffKey (diff
