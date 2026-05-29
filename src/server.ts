@@ -372,11 +372,57 @@ async function ghCreatePr(
   baseRef: string,
   branch: string,
   title?: string,
+  body?: string,
 ): Promise<string> {
+  // Mirrors buildGhPrArgs in lib/orch/pr.ts so the two stay consistent: a
+  // non-empty body is passed through as `--body <body>` rather than dropped.
   const args = ["pr", "create", "--base", baseRef, "--head", branch];
-  if (title && title.trim().length > 0) args.push("--title", title.trim(), "--body", "");
-  else args.push("--fill");
+  if (title && title.trim().length > 0) {
+    args.push("--title", title.trim());
+    args.push("--body", body && body.length > 0 ? body : "");
+  } else args.push("--fill");
   return runGh(args, repoRoot);
+}
+
+// Build a default markdown PR description for a worker branch from data we
+// already have: the worker's task/brief, the commit list (base..branch), and
+// the diffstat. Best-effort — each git read is guarded so a failure just omits
+// that section; this never throws.
+async function buildPrBody(
+  orch: Orchestration,
+  agent: OrchAgent,
+): Promise<string> {
+  const sections: string[] = [];
+  const task = agent.task?.trim();
+  if (task) {
+    // Trim so the body stays reasonable even for a long multi-paragraph brief.
+    const trimmed =
+      task.length > 600 ? `${task.slice(0, 600).trimEnd()}…` : task;
+    sections.push(`## Task\n\n${trimmed}`);
+  }
+  try {
+    const log = (
+      await logBranch({
+        repoRoot: orch.projectRoot,
+        baseRef: orch.baseRef,
+        branch: agent.branch,
+      })
+    ).trim();
+    if (log) sections.push(`## Commits\n\n${log}`);
+  } catch {
+    /* omit commits on failure */
+  }
+  try {
+    const { diffstat } = await branchGitSummary({
+      repoRoot: orch.projectRoot,
+      baseRef: orch.baseRef,
+      branch: agent.branch,
+    });
+    if (diffstat) sections.push(`## Changes\n\n${diffstat}`);
+  } catch {
+    /* omit changes on failure */
+  }
+  return sections.join("\n\n");
 }
 
 // Deliver text to an orchestration's head session (briefing, worker
@@ -1407,6 +1453,11 @@ app.post("/api/orchestrations/:id/agents/:agentId/pr", async (req, res) => {
     return;
   }
   const title = (req.body as { title?: unknown })?.title;
+  // Assemble a default PR body from data we already have for this worker so the
+  // PR opens with a useful description instead of "No description provided."
+  // Best-effort: every git read is guarded so a failure just omits that
+  // section — body assembly never throws out of this endpoint.
+  const body = await buildPrBody(orch, agent);
   try {
     const result = await preparePr(
       {
@@ -1414,13 +1465,14 @@ app.post("/api/orchestrations/:id/agents/:agentId/pr", async (req, res) => {
         baseRef: orch.baseRef,
         branch: agent.branch,
         title: typeof title === "string" ? title : undefined,
+        body,
       },
       {
         hasOrigin: (r) => hasOrigin(r),
         baseOnOrigin: (r, base) => baseOnOrigin(r, base),
         ghReady: () => ghReady(),
         push: (r, b) => pushBranch(r, b),
-        createPr: (r, base, b, t) => ghCreatePr(r, base, b, t),
+        createPr: (r, base, b, t, bd) => ghCreatePr(r, base, b, t, bd),
         diffstat: async () =>
           (
             await branchGitSummary({
