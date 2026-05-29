@@ -311,21 +311,36 @@ export interface AgentMetrics {
 }
 
 // Persisted state for the runaway circuit-breaker. The breaker (in the
-// autonomy controller) trips when a worker repeats an identical no-op command
-// `limit` times without advancing its branch; this snapshot is what lets a 3s
-// reconcile tick measure new repeats against the window that's already open.
+// autonomy controller) trips a worker on ANY of three independent triggers —
+// (1) a run of identical no-op commands, (2) N turns / K tool calls with no
+// committed-diff progress (signature-INDEPENDENT, catches a varied-probe
+// spiral), (3) a hard turn/token ceiling regardless of progress. This snapshot
+// is what lets a 3s reconcile tick measure new activity against the windows
+// that are already open.
 export interface BreakerState {
   // Digit-normalised signature of the command currently being repeated (so a
   // counter-suffixed probe like `recover-check-1`/`recover-check-2` collapses
   // to one signature).
   signature: string;
-  // commitCount + diffstat at the time the current no-progress window opened.
-  // The breaker resets its window whenever this changes — that's a worker
-  // making progress, which must never trip.
+  // commitCount + diffstat at the time the current signature window opened.
+  // The signature trigger resets its window whenever this changes — that's a
+  // worker making progress, which must never trip.
   progressKey: string;
-  // Trailing-repeat count captured when the window opened; repeats beyond this
-  // (signature + progressKey unchanged) are what trip the breaker.
+  // Trailing-repeat count captured when the signature window opened; repeats
+  // beyond this (signature + progressKey unchanged) trip the signature trigger.
   baseline: number;
+  // The committed DIFF alone (diffstat) at the time the no-progress window
+  // opened. Distinct from progressKey, which also folds in commitCount: a
+  // no-op/empty commit bumps commitCount but not the diff, so keying the
+  // no-progress window on the diff ALONE stops a trivial commit from
+  // laundering a token spiral past the breaker. Optional for forward-compat
+  // with snapshots persisted before this trigger existed.
+  diffKey?: string;
+  // Assistant turns / tool-call count captured when the no-progress window
+  // opened. Growth beyond these (with diffKey unchanged) is what trips the
+  // progress-based trigger. Optional for the same forward-compat reason.
+  progressTurns?: number;
+  progressToolCalls?: number;
 }
 
 export function emptyAgentMetrics(): AgentMetrics {
