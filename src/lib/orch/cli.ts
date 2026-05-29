@@ -405,6 +405,9 @@ function renderStatus(view: OrchStatusView): string {
     lines.push(
       `${pad(a.role, 11)} ${pad(a.lifecycle, 9)} ${pad(a.id, 22)} ${pad(a.branch, 28)} ${a.turns}t ${shortTokens(a.tokens)}${diff}${task}`,
     );
+    // Surface WHY a worker stopped (the blocked / circuit-breaker reason) on its
+    // own indented line so the PM sees it without a separate lookup.
+    if (a.reason) lines.push(`            ⚠ ${truncateTask(a.reason)}`);
   }
   return lines.join("\n");
 }

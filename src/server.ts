@@ -1798,8 +1798,17 @@ async function reconcileOrchestrations(): Promise<void> {
         // Independent of the autonomy dial — a finished worker should never keep
         // running. killTerminalAgent keeps the worktree/branch and fires once.
         await orchestrator.killTerminalAgent(o.id, agent.id);
-      } else if (ORCH_AUTONOMY) {
-        await orchController.onAgentSignal(o.id, agent.id, { stopped: false });
+      } else {
+        // Runaway circuit-breaker: trip a worker spiralling on identical no-op
+        // commands. Runs regardless of the autonomy dial — a spiral burns
+        // tokens either way, so the harness self-defends. On a trip the worker
+        // is now `blocked`; reap it this same tick so it stops immediately.
+        const tripped = await orchController.checkCircuitBreaker(o.id, agent.id);
+        if (tripped) {
+          await orchestrator.killTerminalAgent(o.id, agent.id);
+        } else if (ORCH_AUTONOMY) {
+          await orchController.onAgentSignal(o.id, agent.id, { stopped: false });
+        }
       }
     }
     if (o.head) {

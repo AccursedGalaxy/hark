@@ -32,6 +32,7 @@ export function buildStatusView(
     turns: a.metrics.turns,
     tokens: a.metrics.inputTokens + a.metrics.outputTokens,
     task: a.task,
+    reason: a.blockedReason,
   }));
 
   return {
