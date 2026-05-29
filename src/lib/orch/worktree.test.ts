@@ -23,6 +23,7 @@ import {
   buildWorktreeRemoveArgs,
   formatShortstat,
   parseWorktreeList,
+  resolveWorktreeBase,
   slugify,
   worktreeBranchName,
   worktreeHeadBranch,
@@ -123,6 +124,29 @@ describe("linkNodeModules", () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+describe("resolveWorktreeBase", () => {
+  it("branches off HEAD without fetching", () => {
+    expect(resolveWorktreeBase("HEAD", false)).toEqual({
+      fetchRef: null,
+      checkoutRef: "HEAD",
+    });
+  });
+
+  it("branches off the local ref (no fetch) when the base is not on origin", () => {
+    expect(resolveWorktreeBase("main", false)).toEqual({
+      fetchRef: null,
+      checkoutRef: "main",
+    });
+  });
+
+  it("fetches and branches off origin/<base> when the base is on origin", () => {
+    expect(resolveWorktreeBase("main", true)).toEqual({
+      fetchRef: "main",
+      checkoutRef: "origin/main",
+    });
   });
 });
 

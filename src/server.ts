@@ -1239,6 +1239,23 @@ app.post("/api/orchestrations/:id/autonomy", async (req, res) => {
   res.json({ ok: true, autonomyLevel: updated.autonomyLevel });
 });
 
+// Re-point the orchestration's base branch. Lets the head move workers off a
+// stale base (e.g. onto `main`) without recreating the run — pairs with the
+// fetch-before-branch in addWorktree so new workers fork the live tip.
+app.post("/api/orchestrations/:id/base", async (req, res) => {
+  const baseRef = (req.body as { baseRef?: unknown })?.baseRef;
+  if (typeof baseRef !== "string" || baseRef.trim().length === 0) {
+    res.status(400).json({ error: "baseRef must be a non-empty string" });
+    return;
+  }
+  const updated = await orchStore.setBaseRef(req.params.id, baseRef.trim());
+  if (!updated) {
+    res.status(404).json({ error: "orchestration not found" });
+    return;
+  }
+  res.json({ ok: true, baseRef: updated.baseRef });
+});
+
 app.post("/api/orchestrations/:id/teardown", async (req, res) => {
   try {
     const orchestration = await orchStore.getOrchestration(req.params.id);

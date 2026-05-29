@@ -44,6 +44,23 @@ describe("planCommand — orch status", () => {
       render: "watch",
     });
   });
+
+  it("POSTs the new base for orch set-base", () => {
+    const plan = planCommand(["orch", "set-base", "main"], headEnv);
+    expect(plan).toEqual({
+      kind: "request",
+      request: {
+        method: "POST",
+        path: "/api/orchestrations/orch-1/base",
+        body: { baseRef: "main" },
+      },
+      render: "set-base",
+    });
+  });
+
+  it("errors when set-base is given no ref", () => {
+    expect(planCommand(["orch", "set-base"], headEnv).kind).toBe("error");
+  });
 });
 
 describe("planCommand — head init (promotion)", () => {
