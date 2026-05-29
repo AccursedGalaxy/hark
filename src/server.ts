@@ -293,6 +293,13 @@ const orchestrator = new Orchestrator({
   clearTrust,
   spawnSession: ({ cwd, command, env, pathPrepend }) =>
     spawnClaudeSession({ cwd, command, env, pathPrepend }),
+  // Terminate the session's pane process on teardown. The spawn pid is the
+  // pane's process (sh → user shell → claude, same pid across the exec chain),
+  // so SIGTERM-ing it exits claude and lets tmux close the window. Wrapped so a
+  // dead pid (ESRCH) surfaces as a rejected promise the orchestrator swallows.
+  killSession: async (pid: number) => {
+    process.kill(pid, "SIGTERM");
+  },
 });
 
 // Active autonomy (auto-delivering briefings + self-review nudges to live

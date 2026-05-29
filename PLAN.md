@@ -39,7 +39,8 @@ or out of the doc.*
 section exists to answer "what just happened" for a cold start, not
 to be complete.*
 
-- Head-session orchestration model (Phase 1+2): `Orchestration.head`, atomic folder-trust pre-clear, `buildHeadBriefing`, `spawnHead`/`createWithHead`, worker `task`/`dependsOn`, env+`--permission-mode auto` spawn injection, worker→head notifications + `onHeadSignal`, the `hark` CLI (`bin/hark`) + backing endpoints, `orch watch` long-poll, dashboard head surfacing. Dogfood caught + fixed a head-worktree teardown leak. 521 green.
+- Orchestration teardown now kills each agent's + the head's session process (new `killSession` dep, SIGTERM to the pane pid) *before* removing its worktree — fixes the live-`:3000`-validation finding that a running `claude` orphaned and held its worktree dir busy, leaving the directory behind. Tolerant of an already-dead/null pid. 524 green.
+- Head-session orchestration model (Phase 1+2) validated live on `:3000` (2026-05-29): head spawned unattended, both permission gates cleared (folder-trust pre-clear + `--permission-mode auto`), head briefed → `hark agent spawn coder` → coder committed + DONE → `head_notified:done` → orchestration completed (~46k tok). Implementation: `Orchestration.head`, atomic folder-trust pre-clear, `buildHeadBriefing`, `spawnHead`/`createWithHead`, worker `task`/`dependsOn`, env+`--permission-mode auto` spawn injection, worker→head notifications + `onHeadSignal`, the `hark` CLI (`bin/hark`) + backing endpoints, `orch watch` long-poll, dashboard head surfacing.
 - Sidebar Live/Idle dot collision resolved: Idle is now a hollow jade ring (inset box-shadow), so it stays distinct from Live across every accent preset — including jade-accent, where both would otherwise be the same filled green.
 - Pending prompt no longer disappears on a second client: `noteTranscriptEvents` Phase 2 only fires on `assistant` events, so a queued-prompt `user` event with `ts > requestedAt` (replayed when any client opens the transcript stream) can no longer broadcast `pending=undefined` to every connected client.
 - Mobile horizontal-overflow fix: markdown tables wrap in a scroll container, `.md pre` clamped, transcript and slash menu pin `overflow-x: hidden` to defeat the implicit `auto` from `overflow-y`.
@@ -48,7 +49,6 @@ to be complete.*
 - Project-state feature: per-repo `PLAN.md`, capture shortcut, project grouping, idempotent `CLAUDE.md` block (5c34c1f).
 - Settings popover moved into the sidebar footer (d5bf559).
 - Context rail with per-message token accounting + cost metrics (1d4954a).
-- Hardware-keyboard detection so the composer doesn't double-trigger send (a2dcd78).
 
 ## Inbox
 

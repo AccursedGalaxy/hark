@@ -25,6 +25,10 @@ interface Calls {
   spawned: string[];
   spawnCalls: SpawnCall[];
   trustCleared: string[];
+  killed: number[];
+  // Interleaved record of kill/remove effects, so tests can assert ordering
+  // (a session must be killed before its worktree is removed).
+  order: string[];
 }
 
 function makeDeps(
@@ -37,6 +41,8 @@ function makeDeps(
     spawned: [],
     spawnCalls: [],
     trustCleared: [],
+    killed: [],
+    order: [],
   };
   let pidSeq = 1000;
   const deps: OrchestratorDeps = {
@@ -53,9 +59,14 @@ function makeDeps(
     },
     removeWorktree: async (o) => {
       calls.removed.push(o.worktreeDir);
+      calls.order.push(`remove:${o.worktreeDir}`);
     },
     clearTrust: async (dir) => {
       calls.trustCleared.push(dir);
+    },
+    killSession: async (pid) => {
+      calls.killed.push(pid);
+      calls.order.push(`kill:${pid}`);
     },
     spawnSession: async (o): Promise<SpawnSessionResult> => {
       calls.spawned.push(o.cwd);
@@ -332,5 +343,74 @@ describe("Orchestrator teardown", () => {
 
     await orch.teardownOrchestration(orchestration.id);
     expect(calls.removed).toContain(head.worktreeDir);
+  });
+
+  it("kills the agent's session before removing its worktree", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const { orchestration, agents } = await orch.createTeam({
+      ...teamInput,
+      roles: ["coder"],
+    });
+    const pid = agents[0].pid!;
+
+    await orch.teardownAgent(orchestration.id, agents[0].id);
+
+    expect(calls.killed).toContain(pid);
+    // The bug this guards: a live `claude` left running holds its worktree dir
+    // as cwd and orphans. Kill must precede remove.
+    const killIdx = calls.order.indexOf(`kill:${pid}`);
+    const removeIdx = calls.order.indexOf(`remove:${agents[0].worktreeDir}`);
+    expect(killIdx).toBeGreaterThanOrEqual(0);
+    expect(removeIdx).toBeGreaterThan(killIdx);
+  });
+
+  it("kills every agent and the head before removing their worktrees", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const { orchestration, head } = await orch.createWithHead({
+      name: teamInput.name,
+      goal: teamInput.goal,
+      projectRoot: teamInput.projectRoot,
+      projectName: teamInput.projectName,
+      baseRef: teamInput.baseRef,
+    });
+    const agent = await orch.spawnAgent(orchestration.id, "coder");
+
+    await orch.teardownOrchestration(orchestration.id);
+
+    expect(calls.killed).toContain(agent.pid!);
+    expect(calls.killed).toContain(head.pid!);
+    for (const [pid, dir] of [
+      [agent.pid!, agent.worktreeDir],
+      [head.pid!, head.worktreeDir],
+    ] as const) {
+      const killIdx = calls.order.indexOf(`kill:${pid}`);
+      const removeIdx = calls.order.indexOf(`remove:${dir}`);
+      expect(killIdx).toBeGreaterThanOrEqual(0);
+      expect(removeIdx).toBeGreaterThan(killIdx);
+    }
+  });
+
+  it("tears down even when a session pid is already gone (null/dead)", async () => {
+    // A session that exited on its own has no pid; teardown must still remove
+    // the worktree and archive rather than throwing.
+    const { deps, calls } = makeDeps(store, {
+      killSession: async () => {
+        throw new Error("ESRCH: no such process");
+      },
+    });
+    const orch = new Orchestrator(deps);
+    const { orchestration, agents } = await orch.createTeam({
+      ...teamInput,
+      roles: ["coder"],
+    });
+
+    await expect(
+      orch.teardownOrchestration(orchestration.id),
+    ).resolves.toBeUndefined();
+    expect(calls.removed).toContain(agents[0].worktreeDir);
+    const persisted = await store.getOrchestration(orchestration.id);
+    expect(persisted!.status).toBe("archived");
   });
 });

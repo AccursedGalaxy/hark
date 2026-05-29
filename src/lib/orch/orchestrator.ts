@@ -61,6 +61,12 @@ export interface OrchestratorDeps {
     env?: Record<string, string>;
     pathPrepend?: string;
   }) => Promise<SpawnSessionResult>;
+  // Kill a spawned session's process (by its pane pid) during teardown. The
+  // live `claude` TUI must be killed BEFORE its worktree is removed — otherwise
+  // it orphans (keeps running, detached from any orchestration) and holds the
+  // worktree dir as its cwd, which leaves the directory behind on disk. Maps
+  // onto process.kill in production; a recording fake in tests.
+  killSession: (pid: number) => Promise<void>;
 }
 
 // The claude invocation orchestration sessions use. `--permission-mode auto`
@@ -321,9 +327,10 @@ export class Orchestrator {
     });
   }
 
-  // Tear down one agent: remove its worktree (and optionally delete its
-  // branch), mark it cancelled. The branch is kept by default so committed
-  // work survives the throwaway checkout.
+  // Tear down one agent: kill its live session, remove its worktree (the branch
+  // is kept by default so committed work survives the throwaway checkout), mark
+  // it cancelled. Kill precedes worktree removal so the process can't orphan or
+  // hold the dir busy.
   async teardownAgent(
     orchId: string,
     agentId: string,
@@ -332,20 +339,24 @@ export class Orchestrator {
     if (!orch) return;
     const agent = orch.agents.find((a) => a.id === agentId);
     if (!agent) return;
+    await this.safeKill(agent.pid);
     await this.safeRemoveWorktree(orch.projectRoot, agent.worktreeDir);
     await this.deps.store.setAgentLifecycle(orchId, agentId, "cancelled");
   }
 
-  // Tear down a whole orchestration — every agent worktree AND the head's —
-  // then mark it archived. The head has its own worktree (it's not in agents[]),
-  // so it must be removed explicitly or it leaks.
+  // Tear down a whole orchestration — every agent AND the head — then mark it
+  // archived. For each, the live session is killed BEFORE its worktree is
+  // removed (a running `claude` orphans and holds its cwd otherwise). The head
+  // has its own worktree (it's not in agents[]), so it's handled explicitly.
   async teardownOrchestration(orchId: string): Promise<void> {
     const orch = await this.deps.store.getOrchestration(orchId);
     if (!orch) return;
     for (const agent of orch.agents) {
+      await this.safeKill(agent.pid);
       await this.safeRemoveWorktree(orch.projectRoot, agent.worktreeDir);
     }
     if (orch.head) {
+      await this.safeKill(orch.head.pid);
       await this.safeRemoveWorktree(orch.projectRoot, orch.head.worktreeDir);
     }
     await this.deps.store.setStatus(orchId, "archived");
@@ -360,6 +371,18 @@ export class Orchestrator {
       await this.deps.clearTrust(worktreeDir);
     } catch {
       /* best-effort — session still spawns; user clears the dialog if needed */
+    }
+  }
+
+  // Kill a session's process, swallowing errors. The pid may be null (never
+  // spawned) or already dead (the session exited on its own) — neither should
+  // abort teardown, which must still remove the worktree and archive the run.
+  private async safeKill(pid: number | null | undefined): Promise<void> {
+    if (pid == null) return;
+    try {
+      await this.deps.killSession(pid);
+    } catch {
+      /* best-effort — the process may already have exited */
     }
   }
 
