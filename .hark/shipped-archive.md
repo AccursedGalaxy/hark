@@ -5,6 +5,9 @@ stays bounded at 10. Newest first within this file too — append at the
 top when rotating. Git history is the real archive; this file is just
 the readable trail for cold starts that want more than 10.*
 
+- Mobile horizontal-overflow fix: markdown tables wrap in a scroll container, `.md pre` clamped, transcript and slash menu pin `overflow-x: hidden` to defeat the implicit `auto` from `overflow-y`.
+- Sidebar ASKING pill no longer sticks on stale `status="waiting"`; `deriveState` requires a real pending payload (b3dc80e).
+- Bootstrap-from-codebase directive added to the CLAUDE.md managed block (7220b74).
 - Project-state feature: per-repo `PLAN.md`, capture shortcut, project grouping, idempotent `CLAUDE.md` block (5c34c1f).
 - Settings popover moved into the sidebar footer (d5bf559).
 - Context rail with per-message token accounting + cost metrics (1d4954a).
