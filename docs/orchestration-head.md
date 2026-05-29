@@ -22,10 +22,19 @@ the orchestration **control** surface. Builds on the shipped foundation in
 > - Server endpoints + reconcile/Stop-hook routing for the head (`server.ts`).
 > - Dashboard: create form drops role chips; a Head card surfaces status/metrics.
 >
+> **Dogfooded live (2026-05-29)** on an isolated server instance with
+> `HARK_ORCH_AUTONOMY=1`: a head-led run on this repo completed end-to-end — head
+> spawned unattended (folder-trust cleared, no dialog), auto-briefed, ran `hark
+> agent spawn coder` via the CLI, the worker committed a file and hit `DONE`, the
+> worker→head notification fired, and the head emitted orchestration-`DONE` →
+> `completed` (head 9 turns/21.7k tok, coder 8 turns/23.1k tok). The run caught
+> two real bugs, since fixed: a head-worktree teardown leak, and large multi-line
+> briefings parking unsubmitted in the TUI (a paste/Enter race in `sendKeys.ts` —
+> the submit Enter now waits for a multi-line bracketed paste to settle).
+>
 > What remains is **Phase 3 polish** (`hark pr` helper, defaulting head-on) and
-> the **live head-led validation** (running the autonomy loop against real Claude
-> sessions). Same caveat as the worker autonomy loop: keystroke delivery (head
-> briefing, worker→head notifications) is gated behind `HARK_ORCH_AUTONOMY=1`.
+> the no-remote PR case (open question below). Keystroke delivery (head briefing,
+> worker→head notifications, nudges) stays gated behind `HARK_ORCH_AUTONOMY=1`.
 
 ## The idea in one line
 
