@@ -214,3 +214,70 @@ describe("evaluatePreToolUse — Bash file-mutation guard", () => {
     ).toBe("allow");
   });
 });
+
+describe("evaluatePreToolUse — worker-dispatch + quote awareness", () => {
+  const bash = (command: string, cwd = ROOT) =>
+    evaluatePreToolUse({ ...base, cwd, toolName: "Bash", toolInput: { command } });
+
+  it("does not split on operators inside quotes (quote-aware)", () => {
+    // The `; rm src/index.ts` is inside the quoted echo arg, so it is one
+    // statement, not a chained rm — must be allowed. (Old splitter shredded it.)
+    expect(bash(`echo "cleanup: ; rm src/index.ts now"`).decision).toBe("allow");
+    expect(bash(`echo 'pipe it | tee src/x.ts'`).decision).toBe("allow");
+  });
+
+  it("allows a hark dispatch whose --task brief is full of shell-looking prose", () => {
+    const brief =
+      "Refactor the PR flow.\n" +
+      "Steps: read src/lib/orch/pr.ts; pipe it | grep foo; emit a > marker.\n" +
+      "Flow: parse -> validate -> ship. Mind x>y edge cases & retries.";
+    expect(bash(`node ./bin/hark agent spawn coder --task "${brief}"`).decision).toBe(
+      "allow",
+    );
+  });
+
+  it("allows a hark dispatch via the hark binary directly", () => {
+    expect(
+      bash('hark agent spawn coder --task "ship src/x.ts; do | thing > here"').decision,
+    ).toBe("allow");
+  });
+
+  it("allows a hark dispatch run via an absolute bin/hark path", () => {
+    expect(
+      bash('node /opt/hark/bin/hark agent spawn coder --task "edit src/a.ts > b"').decision,
+    ).toBe("allow");
+  });
+
+  it("still denies a real rm chained after a hark dispatch", () => {
+    expect(
+      bash('node ./bin/hark agent spawn coder --task "do x"; rm src/index.ts').decision,
+    ).toBe("deny");
+  });
+
+  it("still denies a redirection chained after a hark dispatch", () => {
+    expect(
+      bash('hark agent spawn coder --task "do x" && echo hi > src/index.ts').decision,
+    ).toBe("deny");
+  });
+
+  it("still denies a tree-mutating git chained after a hark dispatch", () => {
+    expect(
+      bash('hark agent spawn coder --task "do x" ; git add -A').decision,
+    ).toBe("deny");
+  });
+
+  it("keeps existing deny cases intact alongside the dispatch allowlist", () => {
+    // Write to source still denied.
+    expect(
+      evaluatePreToolUse({
+        ...base,
+        toolName: "Write",
+        toolInput: { file_path: `${ROOT}/src/index.ts` },
+      }).decision,
+    ).toBe("deny");
+    // git commit at root, rm and redirection into the tree still denied.
+    expect(bash("git commit -m x").decision).toBe("deny");
+    expect(bash("rm src/index.ts").decision).toBe("deny");
+    expect(bash("echo x > src/index.ts").decision).toBe("deny");
+  });
+});
