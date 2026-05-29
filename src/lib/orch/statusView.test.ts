@@ -86,4 +86,41 @@ describe("buildStatusView", () => {
     const view = buildStatusView(orch({ agents: [agent({ id: "a1" })] }));
     expect(view.agents[0].diffstat).toBe("");
   });
+
+  it("hides terminal workers by default, keeps active ones", () => {
+    const o = orch({
+      agents: [
+        agent({ id: "a-run", lifecycle: "running" }),
+        agent({ id: "a-review", lifecycle: "review" }),
+        agent({ id: "a-spawn", lifecycle: "spawning" }),
+        agent({ id: "a-done", lifecycle: "done" }),
+        agent({ id: "a-blocked", lifecycle: "blocked" }),
+        agent({ id: "a-failed", lifecycle: "failed" }),
+        agent({ id: "a-stopped", lifecycle: "stopped" }),
+        agent({ id: "a-cancelled", lifecycle: "cancelled" }),
+      ],
+    });
+    const view = buildStatusView(o);
+    expect(view.agents.map((a) => a.id)).toEqual([
+      "a-run",
+      "a-review",
+      "a-spawn",
+    ]);
+  });
+
+  it("reveals every worker, terminal included, with { all: true }", () => {
+    const o = orch({
+      agents: [
+        agent({ id: "a-run", lifecycle: "running" }),
+        agent({ id: "a-done", lifecycle: "done" }),
+        agent({ id: "a-stopped", lifecycle: "stopped" }),
+      ],
+    });
+    const view = buildStatusView(o, {}, { all: true });
+    expect(view.agents.map((a) => a.id)).toEqual([
+      "a-run",
+      "a-done",
+      "a-stopped",
+    ]);
+  });
 });

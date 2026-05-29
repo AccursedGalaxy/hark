@@ -20,6 +20,7 @@ const LIFECYCLES: AgentLifecycle[] = [
   "review",
   "done",
   "failed",
+  "stopped",
   "cancelled",
 ];
 

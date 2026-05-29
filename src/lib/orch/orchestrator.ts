@@ -16,6 +16,8 @@ import path from "node:path";
 import { PLAN_FILENAME } from "../projectConstants.js";
 import {
   emptyAgentMetrics,
+  isTerminalLifecycle,
+  type AgentLifecycle,
   type OrchAgent,
   type OrchHead,
   type Orchestration,
@@ -418,6 +420,42 @@ export class Orchestrator {
       kind: "note",
       message: `${agent.role} process terminated (${agent.lifecycle})`,
     });
+  }
+
+  // Halt a worker from the CLI (`hark agent stop`): flip its lifecycle to the
+  // terminal `stopped` state, then reuse the exact terminal-kill path
+  // (killTerminalAgent → killSession) the reconcile loop uses to reap finished
+  // workers — SIGTERM the process, KEEP the worktree + branch (the PM still
+  // inspects the work). Idempotent and safe on a zombie:
+  //  - Already-terminal worker (done/blocked/failed/stopped/cancelled): we don't
+  //    re-flip the lifecycle; killTerminalAgent no-ops if it was already reaped
+  //    (killedAt set), so a repeat stop just reports the current state — no error.
+  //  - A worker whose pid is already dead but still shows `running` (the zombie
+  //    case where status lies): we flip it to `stopped` so status stops lying;
+  //    killTerminalAgent's safeKill tolerates the dead pid.
+  // Returns null when the orchestration/agent doesn't exist (the caller 404s).
+  async stopAgent(
+    orchId: string,
+    agentId: string,
+  ): Promise<{ lifecycle: AgentLifecycle; alreadyTerminal: boolean } | null> {
+    const orch = await this.deps.store.getOrchestration(orchId);
+    if (!orch) return null;
+    const agent = orch.agents.find((a) => a.id === agentId);
+    if (!agent) return null;
+
+    const alreadyTerminal = isTerminalLifecycle(agent.lifecycle);
+    if (!alreadyTerminal) {
+      await this.deps.store.setAgentLifecycle(orchId, agentId, "stopped");
+    }
+    // killTerminalAgent reads the (now terminal) lifecycle for its event log,
+    // SIGTERMs the pid, and is idempotent via killedAt.
+    await this.killTerminalAgent(orchId, agentId);
+
+    const after = await this.deps.store.getOrchestration(orchId);
+    const lifecycle =
+      after?.agents.find((a) => a.id === agentId)?.lifecycle ??
+      agent.lifecycle;
+    return { lifecycle, alreadyTerminal };
   }
 
   // Tear down one agent: kill its live session, remove its worktree (the branch

@@ -271,7 +271,26 @@ export type AgentLifecycle =
   | "review" // work handed off, awaiting review
   | "done" // printed DONE and self-reviewed
   | "failed" // errored or abandoned
-  | "cancelled"; // stopped by the user
+  | "stopped" // halted via `hark agent stop` — process killed, worktree kept
+  | "cancelled"; // torn down by the user — worktree removed
+
+// Lifecycles that are end states: the worker is finished, stuck, or halted and
+// won't make further progress on its own. The single source of truth for both
+// `hark agent stop` idempotency (stopping one of these just reports it) and the
+// `hark orch status` default-hide (terminal workers clutter the PM's surface).
+// Distinct from the controller's autonomy-inert set, which deliberately omits
+// `blocked` (a human can resume it) — here `blocked` IS terminal for display.
+export const TERMINAL_LIFECYCLES: readonly AgentLifecycle[] = [
+  "blocked",
+  "done",
+  "failed",
+  "stopped",
+  "cancelled",
+];
+
+export function isTerminalLifecycle(lifecycle: AgentLifecycle): boolean {
+  return TERMINAL_LIFECYCLES.includes(lifecycle);
+}
 
 // Per-agent metrics, accumulated from the transcript (tokens/cost) and the
 // lifecycle timeline (autonomy time, interventions). The "document everything"

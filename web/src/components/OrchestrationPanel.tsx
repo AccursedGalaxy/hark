@@ -23,6 +23,7 @@ const LIFECYCLE_STYLE: Record<AgentLifecycle, { dot: string; label: string }> = 
   review: { dot: "waiting", label: "REVIEW" },
   done: { dot: "live", label: "DONE" },
   failed: { dot: "error", label: "FAILED" },
+  stopped: { dot: "error", label: "STOPPED" },
   cancelled: { dot: "error", label: "CANCELLED" },
 };
 

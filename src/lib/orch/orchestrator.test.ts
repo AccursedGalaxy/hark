@@ -439,6 +439,107 @@ describe("Orchestrator.killTerminalAgent", () => {
   });
 });
 
+describe("Orchestrator.stopAgent", () => {
+  it("flips a running worker to stopped, SIGTERMs its pid, keeps the worktree", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const o = await deps.store.createOrchestration({
+      name: "t",
+      goal: "g",
+      projectRoot: "/r",
+      projectName: "p",
+    });
+    const agent = await deps.store.addAgent(o.id, {
+      role: "coder",
+      branch: "b",
+      worktreeDir: "/w",
+      pid: 777,
+      lifecycle: "running",
+    });
+
+    const result = await orch.stopAgent(o.id, agent!.id);
+
+    expect(result).toEqual({ lifecycle: "stopped", alreadyTerminal: false });
+    expect(calls.killed).toEqual([777]);
+    const after = await deps.store.getOrchestration(o.id);
+    expect(after!.agents[0].lifecycle).toBe("stopped");
+    expect(typeof after!.agents[0].killedAt).toBe("number");
+    // The worktree/branch survive — stop only halts the process.
+    expect(calls.removed).toEqual([]);
+  });
+
+  it("fixes a zombie: a running worker with a dead pid still flips to stopped", async () => {
+    // killSession throws to simulate the pid already being gone (the live
+    // researcher-0bb21b symptom: record shows `running` but the process is dead).
+    const { deps } = makeDeps(store, {
+      killSession: async () => {
+        throw new Error("ESRCH: no such process");
+      },
+    });
+    const orch = new Orchestrator(deps);
+    const o = await deps.store.createOrchestration({
+      name: "t",
+      goal: "g",
+      projectRoot: "/r",
+      projectName: "p",
+    });
+    const agent = await deps.store.addAgent(o.id, {
+      role: "researcher",
+      branch: "b",
+      worktreeDir: "/w",
+      pid: 2082267,
+      lifecycle: "running",
+    });
+
+    const result = await orch.stopAgent(o.id, agent!.id);
+
+    // The dead-pid SIGTERM is swallowed; the lifecycle is still made honest.
+    expect(result).toEqual({ lifecycle: "stopped", alreadyTerminal: false });
+    const after = await deps.store.getOrchestration(o.id);
+    expect(after!.agents[0].lifecycle).toBe("stopped");
+  });
+
+  it("is idempotent on an already-terminal worker — reports state, doesn't re-flip", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const o = await deps.store.createOrchestration({
+      name: "t",
+      goal: "g",
+      projectRoot: "/r",
+      projectName: "p",
+    });
+    const agent = await deps.store.addAgent(o.id, {
+      role: "coder",
+      branch: "b",
+      worktreeDir: "/w",
+      pid: 777,
+      lifecycle: "done",
+    });
+    // First stop reaps the done worker (killTerminalAgent fires once).
+    await orch.stopAgent(o.id, agent!.id);
+    // Second stop must not error and must report the unchanged terminal state.
+    const again = await orch.stopAgent(o.id, agent!.id);
+
+    expect(again).toEqual({ lifecycle: "done", alreadyTerminal: true });
+    // Only one SIGTERM total — killedAt makes the kill idempotent.
+    expect(calls.killed).toEqual([777]);
+    const after = await deps.store.getOrchestration(o.id);
+    expect(after!.agents[0].lifecycle).toBe("done");
+  });
+
+  it("returns null for an unknown agent so the endpoint can 404", async () => {
+    const { deps } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const o = await deps.store.createOrchestration({
+      name: "t",
+      goal: "g",
+      projectRoot: "/r",
+      projectName: "p",
+    });
+    expect(await orch.stopAgent(o.id, "agent-missing")).toBeNull();
+  });
+});
+
 describe("Orchestrator teardown", () => {
   it("removes an agent's worktree and marks it cancelled", async () => {
     const { deps, calls } = makeDeps(store);
