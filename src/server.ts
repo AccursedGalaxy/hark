@@ -1683,7 +1683,17 @@ async function reconcileOrchestrations(): Promise<void> {
   for (const o of active) {
     for (const agent of o.agents) {
       await orchController.refreshMetrics(o.id, agent.id);
-      if (ORCH_AUTONOMY) {
+      if (
+        agent.lifecycle === "done" ||
+        agent.lifecycle === "blocked" ||
+        agent.lifecycle === "failed"
+      ) {
+        // Reap a worker whose lifecycle has gone terminal: SIGTERM its process
+        // so it stops spinning (and burning tokens) now that its work is over.
+        // Independent of the autonomy dial — a finished worker should never keep
+        // running. killTerminalAgent keeps the worktree/branch and fires once.
+        await orchestrator.killTerminalAgent(o.id, agent.id);
+      } else if (ORCH_AUTONOMY) {
         await orchController.onAgentSignal(o.id, agent.id, { stopped: false });
       }
     }

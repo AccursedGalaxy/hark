@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, symlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -291,6 +292,30 @@ function runGit(args: string[]): Promise<string> {
   });
 }
 
+// Symlink the repo's installed dependencies into a fresh worktree so workers
+// can actually build/typecheck/test their change. A new git worktree shares the
+// repo's object store but NOT its `node_modules`, so without this every JS/TS
+// worker fails its own verification (the dogfound `SKIP_TYPECHECK: no
+// node_modules installed`). We symlink (instant, zero disk) rather than copy or
+// reinstall, covering the root package and the `web/` workspace. Best-effort and
+// idempotent: a subdir whose source is absent is skipped, an already-present
+// target is left untouched, and any fs error is swallowed so it can never abort
+// a spawn (the worker can still fall back to a manual install).
+export function linkNodeModules(repoRoot: string, worktreeDir: string): void {
+  for (const sub of ["", "web"]) {
+    try {
+      const source = path.join(repoRoot, sub, "node_modules");
+      if (!existsSync(source)) continue;
+      const target = path.join(worktreeDir, sub, "node_modules");
+      if (existsSync(target)) continue;
+      mkdirSync(path.dirname(target), { recursive: true });
+      symlinkSync(source, target, "dir");
+    } catch {
+      /* best-effort — a missing/locked dir must not break the spawn */
+    }
+  }
+}
+
 export async function addWorktree(opts: {
   repoRoot: string;
   worktreeDir: string;
@@ -305,6 +330,7 @@ export async function addWorktree(opts: {
       opts.baseRef ?? "HEAD",
     ),
   );
+  linkNodeModules(opts.repoRoot, opts.worktreeDir);
 }
 
 export async function removeWorktree(opts: {

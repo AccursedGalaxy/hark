@@ -5,6 +5,8 @@ stays bounded at 10. Newest first within this file too — append at the
 top when rotating. Git history is the real archive; this file is just
 the readable trail for cold starts that want more than 10.*
 
+- Project-state feature: per-repo `PLAN.md`, capture shortcut, project grouping, idempotent `CLAUDE.md` block (5c34c1f).
+- Settings popover moved into the sidebar footer (d5bf559).
 - Context rail with per-message token accounting + cost metrics (1d4954a).
 - Hardware-keyboard detection so the composer doesn't double-trigger send (a2dcd78).
 - Touch + iOS PWA behavior pass (b3ccc8a).

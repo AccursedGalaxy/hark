@@ -393,6 +393,33 @@ export class Orchestrator {
     });
   }
 
+  // SIGTERM a worker's session process once its lifecycle has gone terminal
+  // (done/blocked/failed). A worker left running after it finishes keeps its
+  // `claude` process alive with no task and spins on echo/git-poll + idle
+  // wakeups — the dominant token sink found while dogfooding (~1.3M tokens on
+  // one small change). Unlike teardownAgent this KEEPS the worktree + branch
+  // (the head/PM still reads the committed work); it only kills the process.
+  // Reuses the same `killSession` dep as teardown (tolerant of a null/dead
+  // pid). `killedAt` makes it idempotent so the 3s reconcile loop signals once,
+  // not every tick.
+  async killTerminalAgent(orchId: string, agentId: string): Promise<void> {
+    const orch = await this.deps.store.getOrchestration(orchId);
+    if (!orch) return;
+    const agent = orch.agents.find((a) => a.id === agentId);
+    if (!agent || agent.killedAt != null) return;
+    await this.safeKill(agent.pid);
+    await this.deps.store.updateAgent(orchId, agentId, (a) => {
+      a.killedAt = Date.now();
+    });
+    await this.deps.store.appendEvent({
+      ts: Date.now(),
+      orchestrationId: orchId,
+      agentId,
+      kind: "note",
+      message: `${agent.role} process terminated (${agent.lifecycle})`,
+    });
+  }
+
   // Tear down one agent: kill its live session, remove its worktree (the branch
   // is kept by default so committed work survives the throwaway checkout), mark
   // it cancelled. Kill precedes worktree removal so the process can't orphan or

@@ -364,6 +364,81 @@ describe("Orchestrator.briefingFor", () => {
   });
 });
 
+describe("Orchestrator.killTerminalAgent", () => {
+  it("SIGTERMs a terminal worker's pid and records killedAt, keeping the worktree", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const o = await deps.store.createOrchestration({
+      name: "t",
+      goal: "g",
+      projectRoot: "/r",
+      projectName: "p",
+    });
+    const agent = await deps.store.addAgent(o.id, {
+      role: "coder",
+      branch: "b",
+      worktreeDir: "/w",
+      pid: 777,
+      lifecycle: "done",
+    });
+
+    await orch.killTerminalAgent(o.id, agent!.id);
+
+    expect(calls.killed).toEqual([777]);
+    const after = await deps.store.getOrchestration(o.id);
+    expect(typeof after!.agents[0].killedAt).toBe("number");
+    // The worktree/branch survive — only the process is killed.
+    expect(calls.removed).toEqual([]);
+  });
+
+  it("is idempotent — does not re-kill an already-killed worker", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const o = await deps.store.createOrchestration({
+      name: "t",
+      goal: "g",
+      projectRoot: "/r",
+      projectName: "p",
+    });
+    const agent = await deps.store.addAgent(o.id, {
+      role: "coder",
+      branch: "b",
+      worktreeDir: "/w",
+      pid: 777,
+      lifecycle: "blocked",
+    });
+
+    await orch.killTerminalAgent(o.id, agent!.id);
+    await orch.killTerminalAgent(o.id, agent!.id);
+
+    expect(calls.killed).toEqual([777]);
+  });
+
+  it("tolerates a null pid (a failed agent that never spawned)", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const o = await deps.store.createOrchestration({
+      name: "t",
+      goal: "g",
+      projectRoot: "/r",
+      projectName: "p",
+    });
+    const agent = await deps.store.addAgent(o.id, {
+      role: "coder",
+      branch: "b",
+      worktreeDir: "/w",
+      pid: null,
+      lifecycle: "failed",
+    });
+
+    await orch.killTerminalAgent(o.id, agent!.id);
+
+    expect(calls.killed).toEqual([]);
+    const after = await deps.store.getOrchestration(o.id);
+    expect(typeof after!.agents[0].killedAt).toBe("number");
+  });
+});
+
 describe("Orchestrator teardown", () => {
   it("removes an agent's worktree and marks it cancelled", async () => {
     const { deps, calls } = makeDeps(store);

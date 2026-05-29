@@ -1,5 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  linkNodeModules,
   buildBranchDeleteArgs,
   buildDiffArgs,
   buildLogArgs,
@@ -16,6 +28,103 @@ import {
   worktreeHeadBranch,
   worktreePath,
 } from "./worktree.js";
+
+describe("linkNodeModules", () => {
+  let root: string;
+  let repoRoot: string;
+  let worktreeDir: string;
+
+  function setup(): void {
+    root = mkdtempSync(join(tmpdir(), "hark-nm-"));
+    repoRoot = join(root, "repo");
+    worktreeDir = join(root, "wt");
+    // A worktree git would have already checked out; node_modules is the only
+    // thing missing. web/ is tracked, so its dir exists in the checkout.
+    mkdirSync(worktreeDir, { recursive: true });
+    mkdirSync(join(worktreeDir, "web"), { recursive: true });
+  }
+
+  function cleanup(): void {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  it("symlinks the root node_modules into the worktree", () => {
+    setup();
+    try {
+      mkdirSync(join(repoRoot, "node_modules", "left-pad"), { recursive: true });
+      writeFileSync(join(repoRoot, "node_modules", "left-pad", "index.js"), "1\n");
+
+      linkNodeModules(repoRoot, worktreeDir);
+
+      const link = join(worktreeDir, "node_modules");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(realpathSync(join(repoRoot, "node_modules")));
+      expect(existsSync(join(link, "left-pad", "index.js"))).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("symlinks web/node_modules when the source exists", () => {
+    setup();
+    try {
+      mkdirSync(join(repoRoot, "node_modules"), { recursive: true });
+      mkdirSync(join(repoRoot, "web", "node_modules", "react"), { recursive: true });
+
+      linkNodeModules(repoRoot, worktreeDir);
+
+      const link = join(worktreeDir, "web", "node_modules");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(
+        realpathSync(join(repoRoot, "web", "node_modules")),
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("skips web/node_modules when its source is absent", () => {
+    setup();
+    try {
+      mkdirSync(join(repoRoot, "node_modules"), { recursive: true });
+
+      linkNodeModules(repoRoot, worktreeDir);
+
+      expect(existsSync(join(worktreeDir, "web", "node_modules"))).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("is a no-op when the repo has no node_modules at all", () => {
+    setup();
+    try {
+      mkdirSync(repoRoot, { recursive: true });
+      expect(() => linkNodeModules(repoRoot, worktreeDir)).not.toThrow();
+      expect(existsSync(join(worktreeDir, "node_modules"))).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("leaves an already-present target untouched (idempotent)", () => {
+    setup();
+    try {
+      mkdirSync(join(repoRoot, "node_modules"), { recursive: true });
+      // Pre-existing real dir at the target — must not be replaced by a link.
+      mkdirSync(join(worktreeDir, "node_modules"), { recursive: true });
+
+      linkNodeModules(repoRoot, worktreeDir);
+      linkNodeModules(repoRoot, worktreeDir);
+
+      expect(lstatSync(join(worktreeDir, "node_modules")).isSymbolicLink()).toBe(
+        false,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+});
 
 describe("slugify", () => {
   it("reduces text to a ref/path-safe token", () => {

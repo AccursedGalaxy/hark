@@ -323,6 +323,10 @@ export interface OrchAgent {
   // controller sends it once the session is past its trust prompt). Undefined
   // until then; its presence is how the controller avoids re-briefing.
   briefedAt?: number;
+  // When the worker's session process was SIGTERM'd after its lifecycle went
+  // terminal (done/blocked/failed). Guards the reconcile loop from re-signalling
+  // an already-killed worker every tick. The worktree + branch are kept.
+  killedAt?: number;
   // Set when lifecycle is "blocked" — the question the agent is waiting on.
   blockedReason?: string;
   // The specific task the head dispatched this worker (head-session model).
