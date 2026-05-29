@@ -412,6 +412,11 @@ export interface Orchestration {
   // dial lives here; absent → DEFAULT_AUTONOMY_LEVEL.
   managed?: boolean;
   autonomyLevel?: AutonomyLevel;
+  // High-water timestamp (ms) of the newsroom delta the managed head has
+  // already been shown (via the UserPromptSubmit injection). Advanced each turn
+  // so the head pulls only what's new. Initialized to the promotion time so a
+  // fresh head isn't flooded with pre-promotion history.
+  newsCursor?: number;
 }
 
 // Append-only event log entry. Decisions, checkpoints, blocks, handoffs,

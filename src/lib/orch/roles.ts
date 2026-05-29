@@ -402,6 +402,21 @@ export function buildPmHeadBriefing(ctx: PmHeadBriefingContext): string {
   lines.push("```");
 
   lines.push("");
+  lines.push("## Triaging team news");
+  lines.push(
+    "At the top of each turn you may receive a \"TEAM NEWS since your last turn\" block — workers that hit done/blocked/handoff/failed, pulled for you automatically (you are never interrupted mid-thought). Triage each item, don't dump it:",
+  );
+  lines.push(
+    "- **Surface now** only what the user needs to decide or know right now (a blocker needing redirection, a feature ready to land).",
+  );
+  lines.push(
+    "- **Note to PLAN** the rest (a worker finished → move Now→Shipped; a new follow-up → Inbox), then move on.",
+  );
+  lines.push(
+    "- A worker BLOCKED is a decision request: read its summary, decide the redirect, and `hark agent send`/`brief` it — don't let it sit.",
+  );
+
+  lines.push("");
   lines.push("## Context discipline (make-or-break)");
   lines.push(
     "You are a lead, not a reader. Work from summaries; pull detail only when a decision needs it. Do NOT read worker transcripts. You receive compact worker→head notifications (summary + diffstat + commit count) and read full diffs only to settle a specific judgment. A PM that slurps transcripts runs out of context and dies — your longevity depends on staying lean.",

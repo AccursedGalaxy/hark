@@ -183,6 +183,9 @@ export class OrchStore {
       head,
       managed: true,
       autonomyLevel: input.autonomyLevel ?? DEFAULT_AUTONOMY_LEVEL,
+      // Start the newsroom cursor at promotion time so the first head turn
+      // isn't flooded with any pre-promotion orchestration history.
+      newsCursor: now,
     };
     await this.writeRecord(o);
     await this.appendEvent({
@@ -214,6 +217,28 @@ export class OrchStore {
       }
     }
     return null;
+  }
+
+  // All active orchestrations for a project root — the span of the newsroom
+  // (spec §8.2: all the project's live orchestrations), newest-first.
+  async listActiveByProject(
+    projectRoot: string,
+  ): Promise<Orchestration[]> {
+    const all = await this.listOrchestrations();
+    return all.filter(
+      (o) => o.status === "active" && o.projectRoot === projectRoot,
+    );
+  }
+
+  // Advance the managed head's newsroom high-water cursor.
+  async setNewsCursor(id: string, cursor: number): Promise<void> {
+    await this.updateOrchestration(
+      id,
+      (o) => {
+        o.newsCursor = cursor;
+      },
+      false, // a cursor bump isn't a meaningful "update" — don't touch updatedAt
+    );
   }
 
   // Set the per-project autonomy dial on a managed head.
@@ -294,6 +319,7 @@ export class OrchStore {
         orchestrationId: id,
         kind: "orchestration_status",
         message: `Orchestration status → ${status}`,
+        data: { status },
       });
     }
     return updated;
@@ -368,6 +394,9 @@ export class OrchStore {
         agentId,
         kind: "agent_lifecycle",
         message: `${a.role} → ${lifecycle}${opts.reason ? `: ${opts.reason}` : ""}`,
+        // Structured so the newsroom projection can filter to head-relevant
+        // transitions (done/blocked/review/failed) without parsing the message.
+        data: { lifecycle, role: a.role, branch: a.branch, reason: opts.reason },
       });
     }
     return a;

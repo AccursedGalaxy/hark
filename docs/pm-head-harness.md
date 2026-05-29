@@ -19,7 +19,18 @@ thinking.*
 >   in Bash; wired into `/api/hook` via a stdout-preserving decision-hook command,
 >   gated to `managed` head sessions only). New protocol: `Orchestration.managed`
 >   + `autonomyLevel` (+ `AutonomyLevel`/`DEFAULT_AUTONOMY_LEVEL=L2`).
-> - **Phases B–D — not built.** See §7.
+> - **Phase B — DONE (unit-tested + dogfooded on `:3999`).** The newsroom
+>   projection (`newsroom.ts` — a project-level, filtered, cursored merge over
+>   the per-orch `events.jsonl`, spanning ALL the project's active
+>   orchestrations per §8.2), `GET /api/projects/:key/newsroom?since=` (dashboard
+>   feed, diffstat-enriched server-side), and the `UserPromptSubmit` delta hook
+>   (injects "TEAM NEWS since your last turn" as `additionalContext`, advances a
+>   per-head `newsCursor`, gated to managed head sessions). Worker transitions
+>   are fed to the newsroom via `agent_lifecycle` events (decoupled from any
+>   push); a managed head pulls — `notifyHead` no longer pushes into a managed
+>   head's live pane (invariant: nothing force-types). Charter gains a news-triage
+>   section (surface-now vs note-to-PLAN).
+> - **Phases C–D — not built.** See §7.
 >
 > **Enforcement boundary (honest scope).** The `PreToolUse` guard is airtight on
 > the `Write`/`Edit` surface (LLM agents mutate files almost exclusively through
@@ -235,12 +246,13 @@ Each phase is an independently useful vertical slice; ship and dogfood before th
   - (9) Per-project managed mode + registry + dashboard surfacing.
   - *Outcome:* end-to-end idea→PR with the human owning the land.
 
-## 8. Open decisions (settle before/at Phase C)
-1. **Default autonomy level** — proposed **L2 (supervised-auto)**; L1 for a more
-   conservative first cut.
-2. **Newsroom/idle scope** — span *all* the project's live orchestrations (a true
-   multi-thread PM; more context pressure) vs one "active feature" at a time (simpler,
-   focused). Affects §3.4 + §3.5 + §3.6.
+## 8. Open decisions — RESOLVED (2026-05-29, with the user)
+1. **Default autonomy level → L2 (supervised-auto).** Wired as
+   `DEFAULT_AUTONOMY_LEVEL`. The dial is per-project and tunable; L2 is the
+   default a freshly-promoted head gets.
+2. **Newsroom/idle scope → span ALL the project's live orchestrations.** A true
+   multi-thread PM: the projection merges head-relevant events across every
+   active orchestration for the project, time-ordered. Shapes §3.4 + §3.5 + §3.6.
 
 ## 9. Invariants (must hold across all phases)
 - The head never mutates or runs source; the human owns every landing.

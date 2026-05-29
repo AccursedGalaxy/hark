@@ -352,14 +352,22 @@ export class AutonomyController {
       diffstat,
       commitCount,
     });
-    await this.deps.sendToHead(orch, text);
+    // A managed PM-head consumes worker updates by PULL — the newsroom delta
+    // injected at the next turn boundary (§3.5 routine→pull). Pushing into its
+    // live pane would force-type into an active conversation, which the harness
+    // forbids; the idle loop (Phase C) is the only path that pushes a managed
+    // head, and only when it's idle + the dial permits. A task-scoped executor
+    // head keeps the original push behavior.
+    if (!orch.managed) {
+      await this.deps.sendToHead(orch, text);
+    }
     await this.deps.store.appendEvent({
       ts: this.now(),
       orchestrationId: orch.id,
       agentId: agent.id,
       kind: "head_notified",
       message: `head notified: ${agent.role} → ${scan.kind ?? "update"}`,
-      data: { marker: scan.kind },
+      data: { marker: scan.kind, pushed: !orch.managed },
     });
   }
 

@@ -45,6 +45,11 @@ import { summarizeOrchestration } from "./lib/orch/summary.js";
 import { buildStatusView } from "./lib/orch/statusView.js";
 import { AGENT_ROLES } from "./lib/orch/roles.js";
 import { evaluatePreToolUse } from "./lib/orch/pmGuard.js";
+import {
+  buildNewsroom,
+  renderNewsForInjection,
+  type NewsItem,
+} from "./lib/orch/newsroom.js";
 import type {
   AgentRole,
   OrchAgent,
@@ -854,6 +859,26 @@ app.get("/api/projects/:key/plan", async (req, res) => {
   }
 });
 
+// Project-level newsroom feed (spec §3.4): head-relevant team events merged
+// across the project's active orchestrations, time-ordered + cursored. Pass
+// ?since=<cursor> for deltas; the dashboard polls it, the head pulls it via the
+// UserPromptSubmit hook.
+app.get("/api/projects/:key/newsroom", async (req, res) => {
+  const project = findKnownProject(req.params.key);
+  if (!project) {
+    res.status(404).json({ error: "project not found" });
+    return;
+  }
+  const sinceRaw = Number(req.query.since);
+  const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : 0;
+  try {
+    const delta = await buildProjectNewsroom(project.root, since);
+    res.json(delta);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 app.post("/api/projects/:key/capture", async (req, res) => {
   const project = findKnownProject(req.params.key);
   if (!project) {
@@ -1314,18 +1339,60 @@ app.post(
 // the guard protects.
 async function findManagedHeadForSession(
   sessionId: string,
-): Promise<{ projectRoot: string; planPath: string } | null> {
+): Promise<{
+  orchId: string;
+  projectRoot: string;
+  planPath: string;
+  newsCursor: number;
+} | null> {
   if (!sessionId) return null;
   for (const o of await orchStore.listOrchestrations()) {
     if (o.status !== "active" || !o.managed) continue;
     if (o.head?.sessionId === sessionId) {
       return {
+        orchId: o.id,
         projectRoot: o.projectRoot,
         planPath: path.join(o.projectRoot, PLAN_FILENAME),
+        newsCursor: o.newsCursor ?? 0,
       };
     }
   }
   return null;
+}
+
+// Build the project-level newsroom delta (spec §3.4): merge head-relevant
+// events across the project's active orchestrations, time-ordered, cursored,
+// then enrich each item with a live diffstat (git IO, bounded by the delta
+// size — usually a handful of items). Backs both the dashboard feed and the
+// UserPromptSubmit injection.
+async function buildProjectNewsroom(
+  projectRoot: string,
+  since: number,
+): Promise<{ items: NewsItem[]; cursor: number }> {
+  const orchs = await orchStore.listActiveByProject(projectRoot);
+  const inputs = await Promise.all(
+    orchs.map(async (o) => ({ orch: o, events: await orchStore.readEvents(o.id) })),
+  );
+  const delta = buildNewsroom(inputs, since);
+  const byId = new Map(orchs.map((o) => [o.id, o] as const));
+  await Promise.all(
+    delta.items.map(async (it) => {
+      if (!it.branch) return;
+      const o = byId.get(it.orchestrationId);
+      if (!o) return;
+      try {
+        const s = await branchGitSummary({
+          repoRoot: o.projectRoot,
+          baseRef: o.baseRef,
+          branch: it.branch,
+        });
+        it.diffstat = s.diffstat;
+      } catch {
+        /* best-effort — leave diffstat unset */
+      }
+    }),
+  );
+  return delta;
 }
 
 // Compute the synchronous response for a decision hook (PreToolUse /
@@ -1363,7 +1430,24 @@ async function handleDecisionHook(
     return {};
   }
 
-  // UserPromptSubmit — newsroom delta injection (Phase B).
+  if (event === "UserPromptSubmit") {
+    // Pull the newsroom delta since the head was last shown, advance its
+    // cursor, and inject the news as additionalContext at the top of the turn.
+    // This is the routine→pull path (§3.5): non-interrupting, reliable.
+    const since = managed.newsCursor;
+    const delta = await buildProjectNewsroom(managed.projectRoot, since);
+    if (delta.cursor !== since) {
+      await orchStore.setNewsCursor(managed.orchId, delta.cursor);
+    }
+    if (delta.items.length === 0) return {};
+    return {
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: renderNewsForInjection(delta.items),
+      },
+    };
+  }
+
   return {};
 }
 
