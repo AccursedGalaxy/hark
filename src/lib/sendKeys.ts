@@ -98,6 +98,10 @@ export function isFatalStderr(stderr: string): boolean {
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_RETRIES = 2;
+// How long to let a multi-line bracketed paste settle in the TUI before the
+// submit Enter (see sendInput). Imperceptible interactively; only multi-line
+// payloads wait. Tuned against large agent briefings parking unsubmitted.
+const PASTE_SETTLE_MS = 150;
 // Backoff before retry attempt N (1-indexed). tmux transient failures
 // ("resource temporarily unavailable", a server mid-restart) clear in tens
 // of milliseconds, so the schedule stays short — a send-key must feel instant.
@@ -339,6 +343,15 @@ export async function sendInput(
       await rawSendText(socket, paneId, text);
     }
     if (input.submit !== false) {
+      // A multi-line bracketed paste lands in the TUI as a "[Pasted text]"
+      // block that the app ingests asynchronously; an Enter sent immediately
+      // after `paste-buffer` returns races that ingestion and gets swallowed,
+      // leaving the prompt parked unsubmitted (observed with large agent
+      // briefings — 40+ lines). Let the paste settle before the submit Enter.
+      // Single-line text submits instantly, so only multi-line pays the wait.
+      if (text.includes("\n")) {
+        await sleep(PASTE_SETTLE_MS);
+      }
       await rawSendKey(socket, paneId, "Enter");
     }
   });
