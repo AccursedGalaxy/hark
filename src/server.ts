@@ -372,6 +372,27 @@ function runGh(args: string[], cwd?: string): Promise<string> {
     });
   });
 }
+// The Haiku stuck-judge subprocess (breaker Trigger-2). A time-boxed `claude -p`
+// call — reuses the same CLI the orchestration already drives sessions with, so
+// no new API-key wiring. Returns stdout; rejects on error or timeout, which the
+// controller treats as a judge failure and falls back to blocking the worker
+// (fail safe). Invoked only when the no-progress trigger fired (cost-bounded).
+const STUCK_JUDGE_TIMEOUT_MS = 30_000;
+function runStuckJudge(prompt: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "claude",
+      ["-p", prompt, "--model", "claude-haiku-4-5"],
+      {
+        encoding: "utf8",
+        timeout: STUCK_JUDGE_TIMEOUT_MS,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+      (err, stdout) => (err ? reject(err) : resolve(stdout ?? "")),
+    );
+  });
+}
+
 async function ghReady(): Promise<boolean> {
   try {
     await runGh(["auth", "status"]);
@@ -518,6 +539,11 @@ const orchController = new AutonomyController({
         });
       }
     : undefined,
+  // The Haiku stuck-judge for the breaker's no-progress trigger. Wired
+  // regardless of the autonomy dial — a misfiring auto-kill (the bug this fixes)
+  // and a real spiral both happen whether or not hark is actively driving the
+  // team, so the breaker self-defends either way.
+  runStuckJudge,
 });
 
 type HookSubscriber = (ev: HookBroadcast) => void;
