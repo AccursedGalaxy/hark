@@ -96,6 +96,78 @@ export const SCHEMA_DDL: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status)`,
 ];
 
+// ---- Schema migrations ------------------------------------------------------
+//
+// The board is a SOURCE OF TRUTH, so a schema bump must EVOLVE the existing
+// file, never rebuild it (that's the durability promise that separates it from
+// the rebuildable metrics.db). Each migration carries the target version it
+// produces and an `up` that takes a db FROM the previous version TO `to`. They
+// run in ascending order, each inside its own transaction, and `user_version`
+// is stamped only after the body succeeds — so a half-applied migration rolls
+// back cleanly and the version never runs ahead of the data.
+//
+// To add a schema change: append a new entry with `to: <prev + 1>` whose `up`
+// ALTERs the existing tables, and bump SCHEMA_VERSION to match. NEVER edit an
+// already-shipped migration in place — a db in the field has already run it.
+export interface Migration {
+  readonly to: number;
+  readonly up: (db: DatabaseSync) => void;
+}
+
+export const MIGRATIONS: readonly Migration[] = [
+  // v1 — the initial schema. On a fresh db this creates every table/index; on a
+  // db already at v1 (stamped by an earlier build) it is skipped entirely.
+  {
+    to: 1,
+    up: (db) => {
+      for (const ddl of SCHEMA_DDL) db.exec(ddl);
+    },
+  },
+];
+
+function readUserVersion(db: DatabaseSync): number {
+  const row = db.prepare("PRAGMA user_version").get() as
+    | { user_version?: number }
+    | undefined;
+  return Number(row?.user_version ?? 0);
+}
+
+// PURE-of-class migration runner (exported so the migration path is testable
+// with a synthetic migration list, not just the shipped one). Reads the current
+// user_version, runs every migration whose target is newer, in ascending order,
+// each in its own transaction; stamps user_version only after a migration body
+// commits. A db whose version is AHEAD of the newest migration is a hard error:
+// the board is the source of truth, so an older build must refuse to open a
+// newer file rather than silently mangle it.
+export function runMigrations(
+  db: DatabaseSync,
+  migrations: readonly Migration[],
+): void {
+  const ordered = [...migrations].sort((a, b) => a.to - b.to);
+  const target = ordered.length ? ordered[ordered.length - 1].to : 0;
+  const current = readUserVersion(db);
+  if (current > target) {
+    throw new Error(
+      `board.db is at schema v${current} but this build only understands up to v${target}; ` +
+        `refusing to open (the board is a source of truth — never downgrade it)`,
+    );
+  }
+  for (const m of ordered) {
+    if (m.to <= current) continue;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      m.up(db);
+      // user_version writes to the db header transactionally, so it rolls back
+      // with the body if anything below throws — version never leads the data.
+      db.exec(`PRAGMA user_version = ${m.to}`);
+      db.exec("COMMIT");
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+}
+
 // ~/.hark/board.db — sibling of metrics.db under the same base dir, so a
 // HARK_ORCH_DIR override (e.g. an isolated dogfood instance) carries the board
 // into the same sandbox. A SEPARATE FILE from metrics.db on purpose: wiping the
@@ -264,6 +336,10 @@ export class BoardStore {
   // Injectable clock keeps timestamps deterministic in tests. Defaults to the
   // wall clock — fine in the Node runtime (bin/hark, server).
   private readonly now: () => number;
+  // Reentrancy guard for `transaction`: a nested call joins the outer tx rather
+  // than issuing a second BEGIN (sqlite forbids nested transactions). Lets
+  // `link` compose `setTask` while both stay atomic.
+  private inTransaction = false;
 
   constructor(dbPath: string = defaultBoardDbPath(), now: () => number = Date.now) {
     this.db = new DatabaseSync(dbPath);
@@ -274,8 +350,30 @@ export class BoardStore {
     // processes (or worker threads) appending at once.
     this.db.exec("PRAGMA busy_timeout = 5000");
     this.db.exec("PRAGMA foreign_keys = OFF");
-    for (const ddl of SCHEMA_DDL) this.db.exec(ddl);
-    this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    // Evolve the file forward to the current schema (never rebuild it). Must run
+    // AFTER journal_mode is set (WAL can't be switched inside a transaction).
+    runMigrations(this.db, MIGRATIONS);
+  }
+
+  // Run `fn` inside a write transaction so a read-modify-write can't lose an
+  // update to a concurrent writer. BEGIN IMMEDIATE takes the write lock up
+  // front, so a second writer's BEGIN IMMEDIATE blocks (up to busy_timeout)
+  // until this one commits — it then reads the post-commit state instead of a
+  // stale snapshot. Reentrant: a nested call runs inside the existing tx.
+  private transaction<T>(fn: () => T): T {
+    if (this.inTransaction) return fn();
+    this.db.exec("BEGIN IMMEDIATE");
+    this.inTransaction = true;
+    try {
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    } finally {
+      this.inTransaction = false;
+    }
   }
 
   schemaVersion(): number {
@@ -330,6 +428,16 @@ export class BoardStore {
   // byte-identical to applying it once. A set whose result you didn't see is
   // therefore safe to re-run under flaky IO.
   setTask(id: string, fields: TaskFields): { task: TaskRow; changed: boolean } {
+    // The read (getTask) and the write below are one atomic read-modify-write:
+    // wrapped in a transaction so a concurrent writer can't slip an update
+    // between our read and our write and have it silently overwritten.
+    return this.transaction(() => this.setTaskInTx(id, fields));
+  }
+
+  private setTaskInTx(
+    id: string,
+    fields: TaskFields,
+  ): { task: TaskRow; changed: boolean } {
     const existing = this.getTask(id);
     const ts = this.now();
 
@@ -402,6 +510,19 @@ export class BoardStore {
     return { task: this.getTask(id)!, changed: true };
   }
 
+  // Add a depends_on edge, idempotently. Read-modify-write (read the current
+  // edges, merge, write back) — so it runs in a transaction for the same reason
+  // setTask does. The nested setTask joins this transaction (reentrant), so the
+  // read of the edges and their rewrite are atomic against a concurrent linker.
+  link(id: string, dependsOn: string): { task: TaskRow; changed: boolean } {
+    return this.transaction(() => {
+      const current = this.getTask(id);
+      const edges = splitEdges(current?.dependsOn ?? null);
+      if (!edges.includes(dependsOn)) edges.push(dependsOn);
+      return this.setTaskInTx(id, { dependsOn: edges.join(",") });
+    });
+  }
+
   // APPEND a history event. Never updates — the integer PK auto-increments, so
   // two writers (processes / worker threads) appending at once never collide
   // and never overwrite. The lossless-under-concurrency property.
@@ -450,6 +571,16 @@ export class BoardStore {
 
 function statusOf(fields: TaskFields): string {
   return fields.status ?? DEFAULT_STATUS;
+}
+
+// PURE. Parse a comma-joined depends_on column into a clean list of edge ids
+// (trimmed, no empties). Shared by `link` and the CLI renderer.
+export function splitEdges(deps: string | null): string[] {
+  if (!deps) return [];
+  return deps
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 // Strip undefined → a plain object for the event payload (null is kept: it

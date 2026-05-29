@@ -161,12 +161,9 @@ export function applyBoardOp(store: BoardStore, op: BoardOp): BoardResult {
       return { kind: "task", task, changed };
     }
     case "link": {
-      const current = store.getTask(op.id);
-      const edges = splitEdges(current?.dependsOn ?? null);
-      if (!edges.includes(op.dependsOn)) edges.push(op.dependsOn);
-      const { task, changed } = store.setTask(op.id, {
-        dependsOn: edges.join(","),
-      });
+      // Atomic read-merge-write lives in the store (transaction-wrapped) so a
+      // concurrent linker can't lose an edge.
+      const { task, changed } = store.link(op.id, op.dependsOn);
       return { kind: "task", task, changed };
     }
     case "assign": {
@@ -178,14 +175,6 @@ export function applyBoardOp(store: BoardStore, op: BoardOp): BoardResult {
       return { kind: "task", task, changed };
     }
   }
-}
-
-function splitEdges(deps: string | null): string[] {
-  if (!deps) return [];
-  return deps
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
 }
 
 // ---- Rendering --------------------------------------------------------------
