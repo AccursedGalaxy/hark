@@ -369,6 +369,26 @@ export type OrchestrationStatus =
   | "archived"
   | "failed";
 
+// The per-project autonomy dial (PM-head harness, spec §3.6). Governs the idle
+// loop only — how far the head advances the pipeline on its own while you're
+// quiet. The human always sets the dial, owns every landing, and is paged for
+// blockers regardless of level.
+//   L0 Propose         — only suggests plans/diffs; you dispatch & apply all.
+//   L1 Assisted        — dispatches on your approval; advances on your nod.
+//   L2 Supervised-auto — when idle, autonomously advances (done→next, spawn
+//                        tester, open PR); escalates blockers, never lands.
+//   L3 Background      — runs whole features end-to-end while you're away.
+export type AutonomyLevel = "L0" | "L1" | "L2" | "L3";
+export const AUTONOMY_LEVELS: AutonomyLevel[] = ["L0", "L1", "L2", "L3"];
+// Proposed default (spec §8 decision): supervised-auto.
+export const DEFAULT_AUTONOMY_LEVEL: AutonomyLevel = "L2";
+export const AUTONOMY_LABELS: Record<AutonomyLevel, string> = {
+  L0: "Propose",
+  L1: "Assisted",
+  L2: "Supervised-auto",
+  L3: "Background",
+};
+
 export interface Orchestration {
   id: string;
   name: string;
@@ -385,6 +405,13 @@ export interface Orchestration {
   // The coordinating head session (head-session model). Undefined for legacy
   // headless records — consumers guard on its presence.
   head?: OrchHead;
+  // PM-head harness (spec): true when this is a persistent, project-scoped
+  // PM-head promoted from an existing session (the head's worktreeDir is the
+  // project root itself, observed read-only), rather than a task-scoped
+  // executor head spawned in an isolated worktree. The per-project autonomy
+  // dial lives here; absent → DEFAULT_AUTONOMY_LEVEL.
+  managed?: boolean;
+  autonomyLevel?: AutonomyLevel;
 }
 
 // Append-only event log entry. Decisions, checkpoints, blocks, handoffs,

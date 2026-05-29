@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import {
+  DEFAULT_AUTONOMY_LEVEL,
   emptyAgentMetrics,
   type AgentLifecycle,
   type AgentRole,
+  type AutonomyLevel,
   type OrchAgent,
   type OrchEvent,
   type Orchestration,
@@ -136,6 +138,102 @@ export class OrchStore {
       data: { goal: o.goal, baseRef: o.baseRef },
     });
     return o;
+  }
+
+  // Create a persistent, project-scoped PM-head by promoting an existing
+  // session (PM-Head Orchestration Harness). Unlike createOrchestration +
+  // spawnHead, nothing is spawned: the session and the working tree already
+  // exist. The head's worktreeDir IS the project root (the PM observes the
+  // user's live tree read-only), and its sessionId is known up front (the
+  // promoting session). `managed: true` is what scopes pure-PM enforcement +
+  // the autonomy dial to this record.
+  async createManagedHead(input: {
+    name: string;
+    goal: string;
+    projectRoot: string;
+    projectName: string;
+    baseRef: string;
+    sessionId: string;
+    branch: string;
+    autonomyLevel?: AutonomyLevel;
+  }): Promise<Orchestration> {
+    const now = Date.now();
+    const head: OrchHead = {
+      sessionId: input.sessionId,
+      pid: null,
+      worktreeDir: input.projectRoot,
+      branch: input.branch,
+      // The PM charter is delivered as the `hark head init` stdout (read as a
+      // tool result), never typed in — so the head is "briefed" from the start.
+      // This also keeps the executor briefing-delivery flow from firing on it.
+      briefedAt: now,
+      metrics: emptyAgentMetrics(),
+    };
+    const o: Orchestration = {
+      id: genId("orch"),
+      name: input.name,
+      goal: input.goal,
+      projectRoot: input.projectRoot,
+      projectName: input.projectName,
+      baseRef: input.baseRef,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      agents: [],
+      head,
+      managed: true,
+      autonomyLevel: input.autonomyLevel ?? DEFAULT_AUTONOMY_LEVEL,
+    };
+    await this.writeRecord(o);
+    await this.appendEvent({
+      ts: now,
+      orchestrationId: o.id,
+      kind: "orchestration_created",
+      message: `PM-head promoted for ${o.projectName}`,
+      data: { goal: o.goal, baseRef: o.baseRef, managed: true },
+    });
+    await this.appendEvent({
+      ts: now,
+      orchestrationId: o.id,
+      kind: "head_spawned",
+      message: `PM-head attached (session ${input.sessionId}) on ${input.branch}`,
+      data: { worktreeDir: head.worktreeDir, branch: head.branch, promoted: true },
+    });
+    return o;
+  }
+
+  // The active, managed PM-head for a project root, if one exists. Newest-first
+  // (listOrchestrations sorts that way) so a re-promotion attaches to the most
+  // recent. Used for idempotent promotion + the CLI's env-fallback resolution.
+  async findActiveManagedHead(
+    projectRoot: string,
+  ): Promise<Orchestration | null> {
+    for (const o of await this.listOrchestrations()) {
+      if (o.status === "active" && o.managed && o.projectRoot === projectRoot) {
+        return o;
+      }
+    }
+    return null;
+  }
+
+  // Set the per-project autonomy dial on a managed head.
+  async setAutonomyLevel(
+    id: string,
+    level: AutonomyLevel,
+  ): Promise<Orchestration | null> {
+    const updated = await this.updateOrchestration(id, (o) => {
+      o.autonomyLevel = level;
+    });
+    if (updated) {
+      await this.appendEvent({
+        ts: Date.now(),
+        orchestrationId: id,
+        kind: "note",
+        message: `autonomy level → ${level}`,
+        data: { autonomyLevel: level },
+      });
+    }
+    return updated;
   }
 
   async getOrchestration(id: string): Promise<Orchestration | null> {

@@ -101,6 +101,70 @@ afterEach(async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+describe("Orchestrator.promoteSession (PM-head)", () => {
+  it("promotes a session into a managed PM-head without spawning anything", async () => {
+    const { deps, calls } = makeDeps(store, {
+      currentBranch: async () => "feature/x",
+    });
+    const orch = new Orchestrator(deps);
+
+    const { orchestration, reattached } = await orch.promoteSession({
+      sessionId: "sess-abc",
+      projectRoot: "/home/u/app",
+      projectName: "app",
+    });
+
+    expect(reattached).toBe(false);
+    expect(orchestration.managed).toBe(true);
+    expect(orchestration.autonomyLevel).toBe("L2");
+    // No worktree created, no session spawned — the tree + session exist.
+    expect(calls.added).toHaveLength(0);
+    expect(calls.spawned).toHaveLength(0);
+    // The head IS this session, observing the project root read-only.
+    expect(orchestration.head?.sessionId).toBe("sess-abc");
+    expect(orchestration.head?.worktreeDir).toBe("/home/u/app");
+    expect(orchestration.head?.branch).toBe("feature/x");
+    expect(orchestration.baseRef).toBe("feature/x");
+  });
+
+  it("is idempotent — re-promoting re-attaches the (possibly new) session id", async () => {
+    const { deps } = makeDeps(store, { currentBranch: async () => "main" });
+    const orch = new Orchestrator(deps);
+
+    const first = await orch.promoteSession({
+      sessionId: "sess-1",
+      projectRoot: "/home/u/app",
+      projectName: "app",
+    });
+    const second = await orch.promoteSession({
+      sessionId: "sess-2",
+      projectRoot: "/home/u/app",
+      projectName: "app",
+    });
+
+    expect(second.reattached).toBe(true);
+    expect(second.orchestration.id).toBe(first.orchestration.id);
+    expect(second.orchestration.head?.sessionId).toBe("sess-2");
+    // Still exactly one orchestration for the project.
+    const all = await store.listOrchestrations();
+    expect(all.filter((o) => o.managed)).toHaveLength(1);
+  });
+
+  it("builds a PM charter that is read back as the command stdout", async () => {
+    const { deps } = makeDeps(store, { currentBranch: async () => "main" });
+    const orch = new Orchestrator(deps);
+    const { orchestration } = await orch.promoteSession({
+      sessionId: "sess-1",
+      projectRoot: "/home/u/app",
+      projectName: "app",
+    });
+    const charter = orch.pmCharterFor(orchestration);
+    expect(charter.toLowerCase()).toContain("product manager");
+    expect(charter).toContain("/home/u/app/PLAN.md");
+    expect(charter).toContain("L2");
+  });
+});
+
 describe("Orchestrator.createTeam", () => {
   it("creates an orchestration and one isolated agent per role", async () => {
     const { deps, calls } = makeDeps(store);

@@ -12,14 +12,23 @@ import type { OrchStatusView } from "../../shared/protocol.js";
 // runner (bin/hark) only performs fetch + console IO.
 
 export interface CliEnv {
-  // The orchestration the CLI targets (HARK_ORCH_ID). Absent → most commands
-  // error, since there's nothing to act on.
+  // The orchestration the CLI targets (HARK_ORCH_ID). Absent → resolved via the
+  // env-fallback (GET /api/head/resolve) from cwd for a promoted PM-head; if
+  // that also fails, most commands error since there's nothing to act on.
   orchId?: string;
   // Base URL of the hark API (HARK_API).
   api: string;
   // The caller's role (HARK_ROLE). "head" unlocks `agent spawn`; workers can't
-  // spawn (Sharp Edge 5 — no recursive fork-bombing).
+  // spawn (Sharp Edge 5 — no recursive fork-bombing). Filled by the env-fallback
+  // for a promoted head when HARK_ROLE is unset.
   role?: string;
+  // The promoting session id (CLAUDE_CODE_SESSION_ID), set by Claude Code in
+  // the Bash environment. Used by `hark head init` to attach THIS session as
+  // the project's PM-head, and by the env-fallback to identify the head.
+  sessionId?: string;
+  // The session's cwd — the project dir. Used by `hark head init` + the
+  // env-fallback resolve.
+  cwd?: string;
 }
 
 export interface RequestSpec {
@@ -36,7 +45,8 @@ export type RenderKind =
   | "brief"
   | "diff"
   | "log"
-  | "watch";
+  | "watch"
+  | "promote";
 
 export type CliPlan =
   | { kind: "request"; request: RequestSpec; render: RenderKind }
@@ -47,6 +57,7 @@ export type CliPlan =
 
 const USAGE = `hark — orchestration head CLI
 
+  hark head init                            promote THIS session to the project's PM-head
   hark orch status                          show every agent + the head (compact)
   hark orch watch                           block until the next event, print it, exit
   hark agent spawn <role> --task "…" [--depends-on <id>]   spawn a worker (head only)
@@ -56,7 +67,8 @@ const USAGE = `hark — orchestration head CLI
   hark agent log   <id>                     recent commits on the worker branch
 
 Roles: ${AGENT_ROLES.join(", ")}
-Targets the orchestration in $HARK_ORCH_ID against $HARK_API.`;
+Targets the orchestration in $HARK_ORCH_ID against $HARK_API; if unset, the
+project's promoted PM-head is resolved from the cwd.`;
 
 // Split argv into positionals + flags. Value flags (--task, --depends-on) take
 // the next token; boolean flags (--stat, --full) don't.
@@ -95,6 +107,27 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
   }
 
   const [group, sub, ...rest] = positionals;
+
+  if (group === "head") {
+    if (sub === "init") {
+      if (!env.sessionId) {
+        return err(
+          "head init must run inside a Claude Code session (CLAUDE_CODE_SESSION_ID unset)",
+        );
+      }
+      if (!env.cwd) return err("head init needs a working directory");
+      return {
+        kind: "request",
+        request: {
+          method: "POST",
+          path: `/api/head/promote`,
+          body: { sessionId: env.sessionId, cwd: env.cwd },
+        },
+        render: "promote",
+      };
+    }
+    return err(`unknown head command: ${sub ?? "(none)"}`);
+  }
 
   if (group === "orch") {
     if (sub === "status") {
@@ -193,6 +226,31 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
   return err(`unknown command: ${group}`);
 }
 
+// ---- Env-fallback resolution ------------------------------------------------
+
+// When HARK_ORCH_ID is unset (a promoted PM-head — never spawned by hark, so it
+// has none of the orchestration env vars), the runner first resolves the
+// project's active managed head from the cwd. Returns the GET request to make,
+// or null when there's nothing to resolve (orchId already known, or no cwd).
+export function buildResolveRequest(env: CliEnv): RequestSpec | null {
+  if (env.orchId) return null;
+  if (!env.cwd) return null;
+  const params = new URLSearchParams({ cwd: env.cwd });
+  if (env.sessionId) params.set("sessionId", env.sessionId);
+  return { method: "GET", path: `/api/head/resolve?${params.toString()}` };
+}
+
+// Merge a successful resolve response into the env (orchId + role), so the
+// subsequent planCommand targets the head and unlocks `agent spawn`.
+export function mergeResolved(env: CliEnv, data: unknown): CliEnv {
+  const d = (data ?? {}) as { orchId?: unknown; role?: unknown };
+  return {
+    ...env,
+    orchId: typeof d.orchId === "string" ? d.orchId : env.orchId,
+    role: typeof d.role === "string" ? d.role : env.role,
+  };
+}
+
 // ---- Response rendering -----------------------------------------------------
 
 function pad(s: string, n: number): string {
@@ -246,6 +304,16 @@ export function renderResponse(render: RenderKind, data: unknown): string {
       const log = typeof d.log === "string" ? d.log : "";
       return log.trim().length > 0 ? log : "(no commits)";
     }
+    case "promote": {
+      // The PM charter is the command's stdout: the promoting session reads it
+      // as the Bash tool result and adopts the role.
+      const charter = typeof d.charter === "string" ? d.charter : "";
+      const reattached = d.reattached === true;
+      const header = reattached
+        ? "Re-attached this session as the project PM-head.\n\n"
+        : "Promoted this session to the project PM-head.\n\n";
+      return charter ? header + charter : JSON.stringify(d);
+    }
     case "send":
     case "brief":
       return d.ok ? "ok" : JSON.stringify(d);
@@ -263,13 +331,16 @@ export function renderResponse(render: RenderKind, data: unknown): string {
   }
 }
 
-// Resolve the CLI env from process.env (used by bin/hark).
+// Resolve the CLI env from process.env + cwd (used by bin/hark).
 export function envFromProcess(
   procEnv: Record<string, string | undefined>,
+  cwd?: string,
 ): CliEnv {
   return {
     orchId: procEnv.HARK_ORCH_ID,
     api: procEnv.HARK_API || "http://localhost:3000",
     role: procEnv.HARK_ROLE,
+    sessionId: procEnv.CLAUDE_CODE_SESSION_ID,
+    cwd,
   };
 }

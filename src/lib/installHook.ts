@@ -29,8 +29,24 @@ const MANAGED_EVENTS = [
   "CwdChanged",
 ] as const;
 
+// Decision hooks (PM-Head Orchestration Harness). Unlike the fire-and-forget
+// notification hooks above, these run SYNCHRONOUSLY and their stdout is read
+// back by Claude Code as a decision: PreToolUse can deny a tool call (pure-PM
+// enforcement, §3.8); UserPromptSubmit can inject context (newsroom delta).
+// So their curl must NOT discard stdout — it forwards the server's JSON
+// response. They fire for every session (the server returns `{}` = no-op for
+// non-head sessions), so they must fail open: `|| true` on a server outage
+// yields empty stdout = allow, never blocking the user's normal sessions.
+const DECISION_EVENTS = ["PreToolUse", "UserPromptSubmit"] as const;
+
 export function buildHookCommand(url: string): string {
   return `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}' >/dev/null 2>&1 || true`;
+}
+
+// Same POST, but stdout is preserved so Claude Code reads the decision JSON.
+// stderr is discarded and `|| true` keeps a server outage from blocking tools.
+export function buildDecisionHookCommand(url: string): string {
+  return `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}' 2>/dev/null || true`;
 }
 
 export function isManagedCommand(command: string, url: string): boolean {
@@ -46,11 +62,16 @@ function ensureHooksMap(s: Settings): HooksMap {
   return s.hooks;
 }
 
+const ALL_MANAGED_EVENTS = [...MANAGED_EVENTS, ...DECISION_EVENTS] as const;
+
 export function installHooks(input: Settings, url: string): Settings {
   const next = cloneSettings(input);
   const hooks = ensureHooksMap(next);
-  const command = buildHookCommand(url);
-  for (const event of MANAGED_EVENTS) {
+  const fireAndForget = buildHookCommand(url);
+  const decision = buildDecisionHookCommand(url);
+  const decisionSet = new Set<string>(DECISION_EVENTS);
+  for (const event of ALL_MANAGED_EVENTS) {
+    const command = decisionSet.has(event) ? decision : fireAndForget;
     const groups: HookGroup[] = Array.isArray(hooks[event]) ? hooks[event] : [];
     const hasManaged = groups.some((g) =>
       Array.isArray(g.hooks) &&
@@ -68,7 +89,7 @@ export function installHooks(input: Settings, url: string): Settings {
 export function uninstallHooks(input: Settings, url: string): Settings {
   const next = cloneSettings(input);
   if (!next.hooks) return next;
-  for (const event of MANAGED_EVENTS) {
+  for (const event of ALL_MANAGED_EVENTS) {
     const groups: HookGroup[] | undefined = next.hooks[event];
     if (!Array.isArray(groups)) continue;
     const filtered = groups

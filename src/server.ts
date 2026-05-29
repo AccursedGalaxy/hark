@@ -44,6 +44,7 @@ import { clearTrust } from "./lib/orch/trust.js";
 import { summarizeOrchestration } from "./lib/orch/summary.js";
 import { buildStatusView } from "./lib/orch/statusView.js";
 import { AGENT_ROLES } from "./lib/orch/roles.js";
+import { evaluatePreToolUse } from "./lib/orch/pmGuard.js";
 import type {
   AgentRole,
   OrchAgent,
@@ -472,6 +473,18 @@ app.get("/api/sessions", async (_req, res) => {
 });
 
 app.post("/api/hook", (req, res) => {
+  // Decision hooks (PM-Head Orchestration Harness) run synchronously and their
+  // JSON response IS read back by Claude Code. They fire for EVERY session, so
+  // the fast path for a non-head session is an empty `{}` (no opinion — let
+  // Claude Code's normal flow proceed). Handled before promptState.record so
+  // tool calls / prompt submits don't pollute the attention layer.
+  const decisionEvent = (req.body?.hook_event_name ?? "") as string;
+  if (decisionEvent === "PreToolUse" || decisionEvent === "UserPromptSubmit") {
+    void handleDecisionHook(decisionEvent, req.body)
+      .then((out) => res.json(out))
+      .catch(() => res.json({})); // fail open — never block the session
+    return;
+  }
   try {
     const ev = promptState.record(req.body);
     broadcastHook(ev);
@@ -964,6 +977,69 @@ app.post("/api/orchestrations", async (req, res) => {
   }
 });
 
+// ---- PM-head promotion (PM-Head Orchestration Harness) ------------------
+//
+// Promote the calling session to its project's persistent PM-head. The `hark
+// head init` CLI POSTs { sessionId, cwd } here; the cwd is the session's own
+// dir (resolved to its git repo), so this never points the harness at an
+// arbitrary path. The response carries the PM charter, which the CLI prints as
+// its stdout — the promoting session reads it as the Bash tool result and
+// adopts the role, with no keystroke injection.
+app.post("/api/head/promote", async (req, res) => {
+  const body = (req.body ?? {}) as { sessionId?: unknown; cwd?: unknown };
+  if (typeof body.sessionId !== "string" || body.sessionId.trim().length === 0) {
+    res.status(400).json({ error: "sessionId is required" });
+    return;
+  }
+  if (typeof body.cwd !== "string" || body.cwd.trim().length === 0) {
+    res.status(400).json({ error: "cwd is required" });
+    return;
+  }
+  const project = await resolveProjectCached(body.cwd);
+  if (!project) {
+    res.status(404).json({ error: "cwd is not inside a git repository" });
+    return;
+  }
+  try {
+    const { orchestration, reattached } = await orchestrator.promoteSession({
+      sessionId: body.sessionId,
+      projectRoot: project.root,
+      projectName: project.name,
+    });
+    res.json({
+      ok: true,
+      orchId: orchestration.id,
+      reattached,
+      charter: orchestrator.pmCharterFor(orchestration),
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Env-fallback resolution for the `hark` CLI: a promoted head has no
+// HARK_ORCH_ID, so the CLI resolves the project's active managed head from its
+// cwd. Returns { orchId, role: "head" } so the CLI can target the run and
+// unlock `agent spawn`.
+app.get("/api/head/resolve", async (req, res) => {
+  const cwd = req.query.cwd;
+  if (typeof cwd !== "string" || cwd.trim().length === 0) {
+    res.status(400).json({ error: "cwd is required" });
+    return;
+  }
+  const project = await resolveProjectCached(cwd);
+  if (!project) {
+    res.status(404).json({ error: "cwd is not inside a git repository" });
+    return;
+  }
+  const orch = await orchStore.findActiveManagedHead(project.root);
+  if (!orch) {
+    res.status(404).json({ error: "no active PM-head for this project" });
+    return;
+  }
+  res.json({ orchId: orch.id, role: "head" });
+});
+
 app.post("/api/orchestrations/:id/teardown", async (req, res) => {
   try {
     const orchestration = await orchStore.getOrchestration(req.params.id);
@@ -1230,6 +1306,66 @@ app.post(
     }
   },
 );
+
+// Resolve the managed PM-head (if any) for a session id. Pure-PM enforcement
+// (the PreToolUse guard) applies ONLY to promoted, persistent PM-heads
+// (`managed`) — a task-scoped executor head legitimately runs git/gh in its own
+// worktree. The head's working tree is the project root, so that's the boundary
+// the guard protects.
+async function findManagedHeadForSession(
+  sessionId: string,
+): Promise<{ projectRoot: string; planPath: string } | null> {
+  if (!sessionId) return null;
+  for (const o of await orchStore.listOrchestrations()) {
+    if (o.status !== "active" || !o.managed) continue;
+    if (o.head?.sessionId === sessionId) {
+      return {
+        projectRoot: o.projectRoot,
+        planPath: path.join(o.projectRoot, PLAN_FILENAME),
+      };
+    }
+  }
+  return null;
+}
+
+// Compute the synchronous response for a decision hook (PreToolUse /
+// UserPromptSubmit). Returns `{}` (no opinion) for any non-managed-head
+// session. For a managed PM-head, PreToolUse runs the pure-PM guard and denies
+// tree mutations; UserPromptSubmit injects the newsroom delta (Phase B — `{}`
+// until then).
+async function handleDecisionHook(
+  event: string,
+  body: Record<string, unknown> | undefined,
+): Promise<Record<string, unknown>> {
+  const sessionId = (body?.session_id ?? "") as string;
+  const managed = await findManagedHeadForSession(sessionId);
+  if (!managed) return {};
+
+  if (event === "PreToolUse") {
+    const decision = evaluatePreToolUse({
+      toolName: (body?.tool_name ?? "") as string,
+      toolInput: body?.tool_input,
+      projectRoot: managed.projectRoot,
+      cwd: typeof body?.cwd === "string" ? (body.cwd as string) : undefined,
+      planPath: managed.planPath,
+    });
+    if (decision.decision === "deny") {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: decision.reason,
+        },
+      };
+    }
+    // Allow → no opinion, so the head still goes through normal permission flow
+    // for its (read/coordinate) tools rather than being blanket auto-approved.
+    return {};
+  }
+
+  // UserPromptSubmit — newsroom delta injection (Phase B).
+  return {};
+}
 
 // Map a live session id back to its orchestration role (active only). Either a
 // worker agent (agentId set) or the head (isHead true) — the Stop-hook path

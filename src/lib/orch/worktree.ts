@@ -336,6 +336,19 @@ export async function deleteBranch(opts: {
   );
 }
 
+// The branch currently checked out in a repo (the PM-head's base — workers
+// branch off it). Returns "HEAD" on a detached head or any failure, so a
+// promotion never breaks on an unusual git state.
+export async function currentBranch(repoRoot: string): Promise<string> {
+  try {
+    const out = await runGit(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
+    const b = out.trim();
+    return b.length > 0 ? b : "HEAD";
+  } catch {
+    return "HEAD";
+  }
+}
+
 // Worker branch vs base, as text. `full` returns the patch; otherwise --stat.
 // Used by the `hark agent diff` endpoint.
 export async function diffBranch(opts: {

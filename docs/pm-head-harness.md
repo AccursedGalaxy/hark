@@ -1,10 +1,35 @@
 # PM-Head Orchestration Harness — build spec
 
-*Status: **spec / not built.** This is the target architecture for turning hark's
-shipped head-session engine into a first-class, semi-autonomous project harness: a
-persistent product-manager session that ideates with you, owns `PLAN.md`, and
-dispatches a worker team to ship/test fast — without ever surprising your working
-tree or interrupting your thinking.*
+*Status: **Phase A built** (branch `pm-head-harness`, 2026-05-29). This is the
+target architecture for turning hark's shipped head-session engine into a
+first-class, semi-autonomous project harness: a persistent product-manager
+session that ideates with you, owns `PLAN.md`, and dispatches a worker team to
+ship/test fast — without ever surprising your working tree or interrupting your
+thinking.*
+
+> **Build progress.**
+> - **Phase A — DONE (unit-tested + dogfooded on `:3999`).** Promotion (`hark
+>   head init` → `POST /api/head/promote`, charter returned as the command's
+>   stdout so nothing is force-typed; `/head` slash command in `.claude/commands/`),
+>   the CLI env-fallback (`GET /api/head/resolve?cwd=` resolves the project's
+>   managed head when `HARK_ORCH_ID` is unset, unlocking `agent spawn`), the PM
+>   charter (`buildPmHeadBriefing` in `roles.ts`), and the pure-PM `PreToolUse`
+>   enforcement hook (`pmGuard.ts` — denies `Write`/`Edit`/`NotebookEdit`/
+>   `MultiEdit` outside PLAN.md + `.hark/`, and tree-mutating `git`/`rm`/redirects
+>   in Bash; wired into `/api/hook` via a stdout-preserving decision-hook command,
+>   gated to `managed` head sessions only). New protocol: `Orchestration.managed`
+>   + `autonomyLevel` (+ `AutonomyLevel`/`DEFAULT_AUTONOMY_LEVEL=L2`).
+> - **Phases B–D — not built.** See §7.
+>
+> **Enforcement boundary (honest scope).** The `PreToolUse` guard is airtight on
+> the `Write`/`Edit` surface (LLM agents mutate files almost exclusively through
+> those tools — path resolution is exact). The Bash parse (tree-mutating `git`,
+> `rm`, `sed -i`, `>` redirects) is a best-effort backstop layered on the charter
+> + the read-only-by-construction posture, not a sandbox; obfuscated shell
+> mutation is charter-bounded, not hook-blocked. This matches §3.8's explicit
+> hook scope ("Edit/Write/mutating-git"). Setup note: requires `npm run build`
+> and re-running `install-hooks` so the `PreToolUse` decision hook is wired, and
+> `hark` on PATH for promotion from an arbitrary session.
 
 *Reasoning trail (why each decision): `docs/orchestration-head.md` §"Direction: the
 persistent PM-head". The shipped engine this builds on (head spawn, workers,

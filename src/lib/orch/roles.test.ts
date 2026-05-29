@@ -7,6 +7,7 @@ import {
   ROLES,
   buildAgentBriefing,
   buildHeadBriefing,
+  buildPmHeadBriefing,
   type AgentRole,
 } from "./roles.js";
 
@@ -128,5 +129,73 @@ describe("buildHeadBriefing", () => {
     const b = buildHeadBriefing(ctx);
     expect(b.toLowerCase()).toContain("summaries");
     expect(b.toLowerCase()).toContain("lead");
+  });
+});
+
+describe("buildPmHeadBriefing", () => {
+  const ctx = {
+    projectName: "hark",
+    projectRoot: "/home/u/Projects/hark",
+    branch: "main",
+    planPath: "/home/u/Projects/hark/PLAN.md",
+  };
+
+  it("establishes the persistent PM persona, not a task-scoped executor", () => {
+    const b = buildPmHeadBriefing(ctx);
+    const low = b.toLowerCase();
+    expect(low).toContain("product manager");
+    // PLAN.md is the durable brain it owns.
+    expect(b).toContain("PLAN.md");
+    expect(b).toContain(ctx.projectRoot);
+    expect(b).toContain(ctx.projectName);
+  });
+
+  it("states the pure-PM read-only-tree invariant and that a hook enforces it", () => {
+    const b = buildPmHeadBriefing(ctx);
+    const low = b.toLowerCase();
+    expect(low).toContain("read-only");
+    // Never writes or runs source; only PLAN.md + coordination files.
+    expect(low).toMatch(/never (write|writes|edit|edits|mutate|mutates).*source|source.*never/);
+    expect(low).toContain("hook");
+  });
+
+  it("teaches the three dispatch choices per item (you-apply / propose / dispatch)", () => {
+    const b = buildPmHeadBriefing(ctx).toLowerCase();
+    expect(b).toContain("apply");
+    expect(b).toContain("propose");
+    expect(b).toContain("dispatch");
+  });
+
+  it("encodes the PLAN.md editing discipline (targeted edits, Now cap, drain Inbox)", () => {
+    const b = buildPmHeadBriefing(ctx);
+    const low = b.toLowerCase();
+    expect(low).toContain("targeted edit");
+    expect(low).toContain("inbox");
+    expect(b).toContain("North Star");
+  });
+
+  it("states the human owns the final landing", () => {
+    const b = buildPmHeadBriefing(ctx).toLowerCase();
+    expect(b).toMatch(/human (owns|lands)|you (own|land)|never lands?/);
+  });
+
+  it("teaches the hark CLI action surface for dispatching workers", () => {
+    const b = buildPmHeadBriefing(ctx);
+    expect(b).toContain("hark orch status");
+    expect(b).toContain("hark agent spawn");
+  });
+
+  it("does NOT tell the PM to close the orchestration with a DONE marker", () => {
+    // A persistent PM is never 'done' — unlike the task-scoped executor head,
+    // it must not emit an orchestration-closing DONE marker.
+    const b = buildPmHeadBriefing(ctx);
+    expect(b).not.toContain(DONE_MARKER);
+  });
+
+  it("surfaces the autonomy level when provided", () => {
+    const withDial = buildPmHeadBriefing({ ...ctx, autonomyLevel: "L2" });
+    expect(withDial).toContain("L2");
+    const without = buildPmHeadBriefing(ctx);
+    expect(without).not.toContain("Autonomy dial");
   });
 });

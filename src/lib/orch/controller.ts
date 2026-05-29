@@ -391,6 +391,13 @@ export class AutonomyController {
       });
     }
 
+    // A managed PM-head (promoted session) is NOT a task-scoped executor: its
+    // charter was delivered as the `hark head init` stdout, it's driven by the
+    // user + the idle loop, and it never emits an orchestration-closing DONE.
+    // So skip the executor briefing-delivery + DONE-completion flow entirely —
+    // we only keep its metrics fresh (above).
+    if (orch.managed) return;
+
     // Deliver the head briefing once, when ready and not yet briefed.
     if (head.briefedAt == null && this.deps.sendToHead && this.deps.headReady) {
       const ready = await this.deps.headReady(orch);

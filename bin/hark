@@ -7,11 +7,38 @@
 // works from any cwd). Run `npm run build` before spawning orchestration
 // sessions. The orchestrator prepends this dir to the session's PATH and sets
 // HARK_ORCH_ID / HARK_ROLE / HARK_API, so `hark …` just works inside the head.
-import { planCommand, renderResponse, envFromProcess } from "../dist/lib/orch/cli.js";
+import {
+  planCommand,
+  renderResponse,
+  envFromProcess,
+  buildResolveRequest,
+  mergeResolved,
+} from "../dist/lib/orch/cli.js";
+
+async function getJson(api, path) {
+  const res = await fetch(api + path, { headers: { "content-type": "application/json" } });
+  if (!res.ok) return null;
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return null;
+  }
+}
 
 async function main() {
   const argv = process.argv.slice(2);
-  const env = envFromProcess(process.env);
+  let env = envFromProcess(process.env, process.cwd());
+
+  // Env-fallback: a promoted PM-head has no HARK_ORCH_ID/ROLE (it was never
+  // spawned by hark), so resolve the project's active managed head from cwd.
+  // Best-effort — if it fails, planCommand surfaces the missing-target error.
+  const resolveReq = buildResolveRequest(env);
+  if (resolveReq) {
+    const data = await getJson(env.api, resolveReq.path).catch(() => null);
+    if (data) env = mergeResolved(env, data);
+  }
+
   const plan = planCommand(argv, env);
 
   if (plan.kind === "message") {

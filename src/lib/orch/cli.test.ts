@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildResolveRequest,
+  envFromProcess,
+  mergeResolved,
   planCommand,
   renderResponse,
   type CliEnv,
@@ -39,6 +42,106 @@ describe("planCommand — orch status", () => {
       request: { method: "GET", path: "/api/orchestrations/orch-1/events?wait=1" },
       render: "watch",
     });
+  });
+});
+
+describe("planCommand — head init (promotion)", () => {
+  it("POSTs the promote with the session id + cwd", () => {
+    const plan = planCommand(["head", "init"], {
+      api: "http://localhost:3000",
+      sessionId: "sess-abc",
+      cwd: "/home/u/app",
+    });
+    expect(plan).toEqual({
+      kind: "request",
+      request: {
+        method: "POST",
+        path: "/api/head/promote",
+        body: { sessionId: "sess-abc", cwd: "/home/u/app" },
+      },
+      render: "promote",
+    });
+  });
+
+  it("errors when not inside a Claude Code session", () => {
+    const plan = planCommand(["head", "init"], { api: "x", cwd: "/home/u/app" });
+    expect(plan.kind).toBe("error");
+  });
+
+  it("renders the charter from the promote response as stdout", () => {
+    const out = renderResponse("promote", {
+      ok: true,
+      orchId: "orch-1",
+      reattached: false,
+      charter: "You are the **product manager**…",
+    });
+    expect(out).toContain("Promoted this session");
+    expect(out).toContain("product manager");
+  });
+
+  it("notes a re-attach when promoting an already-managed project", () => {
+    const out = renderResponse("promote", {
+      reattached: true,
+      charter: "charter body",
+    });
+    expect(out).toContain("Re-attached");
+  });
+});
+
+describe("env-fallback resolution", () => {
+  it("builds a resolve GET from cwd when orchId is unset", () => {
+    const req = buildResolveRequest({
+      api: "x",
+      cwd: "/home/u/app",
+      sessionId: "sess-1",
+    });
+    expect(req?.method).toBe("GET");
+    expect(req?.path).toContain("/api/head/resolve?");
+    expect(req?.path).toContain("cwd=%2Fhome%2Fu%2Fapp");
+    expect(req?.path).toContain("sessionId=sess-1");
+  });
+
+  it("does not resolve when orchId is already known", () => {
+    expect(buildResolveRequest({ api: "x", orchId: "orch-1", cwd: "/x" })).toBeNull();
+  });
+
+  it("does not resolve without a cwd", () => {
+    expect(buildResolveRequest({ api: "x" })).toBeNull();
+  });
+
+  it("merges the resolved orchId + role into the env", () => {
+    const merged = mergeResolved(
+      { api: "x", cwd: "/home/u/app" },
+      { orchId: "orch-9", role: "head" },
+    );
+    expect(merged.orchId).toBe("orch-9");
+    expect(merged.role).toBe("head");
+  });
+
+  it("reads CLAUDE_CODE_SESSION_ID + cwd from the process env", () => {
+    const env = envFromProcess(
+      { CLAUDE_CODE_SESSION_ID: "sess-x", HARK_API: "http://h:9" },
+      "/work/dir",
+    );
+    expect(env.sessionId).toBe("sess-x");
+    expect(env.cwd).toBe("/work/dir");
+    expect(env.api).toBe("http://h:9");
+  });
+
+  it("unlocks agent spawn once the env-fallback supplies role=head", () => {
+    // Simulate a promoted head: no orchId/role in env, then resolved.
+    const resolved = mergeResolved(
+      { api: "x", cwd: "/home/u/app", sessionId: "s" },
+      { orchId: "orch-1", role: "head" },
+    );
+    const plan = planCommand(
+      ["agent", "spawn", "coder", "--task", "do it"],
+      resolved,
+    );
+    expect(plan.kind).toBe("request");
+    if (plan.kind === "request") {
+      expect(plan.request.path).toBe("/api/orchestrations/orch-1/agents");
+    }
   });
 });
 

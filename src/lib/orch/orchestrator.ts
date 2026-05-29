@@ -1,15 +1,19 @@
 import {
   buildAgentBriefing,
   buildHeadBriefing,
+  buildPmHeadBriefing,
   type AgentRole,
 } from "./roles.js";
 import { newAgentId, OrchStore } from "./store.js";
 import {
+  currentBranch as currentBranchIO,
   worktreeBaseDir,
   worktreeBranchName,
   worktreeHeadBranch,
   worktreePath,
 } from "./worktree.js";
+import path from "node:path";
+import { PLAN_FILENAME } from "../projectConstants.js";
 import {
   emptyAgentMetrics,
   type OrchAgent,
@@ -67,6 +71,10 @@ export interface OrchestratorDeps {
   // worktree dir as its cwd, which leaves the directory behind on disk. Maps
   // onto process.kill in production; a recording fake in tests.
   killSession: (pid: number) => Promise<void>;
+  // The branch currently checked out in a repo — the PM-head's base when
+  // promoting a session. Maps onto worktree.currentBranch in production; a
+  // fake in tests. Optional: defaults to the real git reader.
+  currentBranch?: (repoRoot: string) => Promise<string>;
 }
 
 // The claude invocation orchestration sessions use. `--permission-mode auto`
@@ -313,6 +321,64 @@ export class Orchestrator {
       worktreeDir: agent.worktreeDir,
       task: agent.task,
       upstream,
+    });
+  }
+
+  // ---- PM-head promotion (PM-Head Orchestration Harness) ------------------
+
+  // Promote an existing session to its project's persistent PM-head. Nothing is
+  // spawned — the session + working tree already exist; we record a managed
+  // orchestration whose head is this session, observing the project root
+  // read-only. Idempotent: a second promotion for a project that already has an
+  // active managed head re-attaches (updates the head's sessionId — the session
+  // may be new after a restart) instead of creating a duplicate.
+  async promoteSession(input: {
+    sessionId: string;
+    projectRoot: string;
+    projectName: string;
+  }): Promise<{
+    orchestration: Orchestration;
+    reattached: boolean;
+  }> {
+    const branch = await (this.deps.currentBranch ?? currentBranchIO)(
+      input.projectRoot,
+    );
+
+    const existing = await this.deps.store.findActiveManagedHead(
+      input.projectRoot,
+    );
+    if (existing) {
+      await this.deps.store.updateHead(existing.id, (h) => {
+        h.sessionId = input.sessionId;
+      });
+      const refreshed = await this.deps.store.getOrchestration(existing.id);
+      return { orchestration: refreshed ?? existing, reattached: true };
+    }
+
+    const orchestration = await this.deps.store.createManagedHead({
+      name: `PM: ${input.projectName}`,
+      goal: `Persistent PM-head for ${input.projectName}`,
+      projectRoot: input.projectRoot,
+      projectName: input.projectName,
+      baseRef: branch,
+      sessionId: input.sessionId,
+      branch,
+    });
+    return { orchestration, reattached: false };
+  }
+
+  // The PM charter delivered on promotion. Returned as the `hark head init`
+  // command's stdout so the promoting session reads it as a tool result and
+  // adopts the role — no keystroke injection into a live conversation (honors
+  // the "nothing force-types" invariant).
+  pmCharterFor(orch: Orchestration): string {
+    if (!orch.head) throw new Error(`orchestration has no head: ${orch.id}`);
+    return buildPmHeadBriefing({
+      projectName: orch.projectName,
+      projectRoot: orch.projectRoot,
+      branch: orch.head.branch,
+      planPath: path.join(orch.projectRoot, PLAN_FILENAME),
+      autonomyLevel: orch.autonomyLevel,
     });
   }
 
