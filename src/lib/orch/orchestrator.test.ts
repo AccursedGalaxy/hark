@@ -317,4 +317,20 @@ describe("Orchestrator teardown", () => {
     const persisted = await store.getOrchestration(orchestration.id);
     expect(persisted!.status).toBe("archived");
   });
+
+  it("also removes the head worktree on teardown (it's not in agents[])", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const { orchestration, head } = await orch.createWithHead({
+      name: teamInput.name,
+      goal: teamInput.goal,
+      projectRoot: teamInput.projectRoot,
+      projectName: teamInput.projectName,
+      baseRef: teamInput.baseRef,
+    });
+    await orch.spawnAgent(orchestration.id, "coder");
+
+    await orch.teardownOrchestration(orchestration.id);
+    expect(calls.removed).toContain(head.worktreeDir);
+  });
 });

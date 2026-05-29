@@ -1,8 +1,31 @@
 # Orchestration: the head-session model
 
-*Status: spec / not built. Supersedes the planned control-panel UI (diff viewer,
-"Create PR" button, conflict-resolution forms) as the orchestration **control**
-surface. Builds on the shipped foundation in [`orchestration.md`](orchestration.md).*
+*Status: **Phase 1 + 2 built** (branch `orchestration`). Supersedes the planned
+control-panel UI (diff viewer, "Create PR" button, conflict-resolution forms) as
+the orchestration **control** surface. Builds on the shipped foundation in
+[`orchestration.md`](orchestration.md).*
+
+> **Built (2026-05-29).** Phase 1 core loop + Phase 2 `watch` are implemented and
+> tested (TDD, full suite green):
+> - `Orchestration.head` (`OrchHead`) + `head_spawned`/`head_notified` events +
+>   `OrchAgent.task`/`dependsOn` (`src/shared/protocol.ts`).
+> - Folder-trust pre-clear via atomic merge of `~/.claude.json`
+>   (`src/lib/orch/trust.ts`).
+> - `buildHeadBriefing` (`roles.ts`); `spawnHead` + `createWithHead` + worker
+>   `task`/`dependsOn` (`orchestrator.ts`); `--permission-mode auto` + env/PATH
+>   injection on spawn (`spawnSession.ts`).
+> - Worker→head notification + `onHeadSignal` (head briefing delivery, head
+>   metering, head-`DONE`→orchestration-complete) in `controller.ts`.
+> - The `hark` CLI (`src/lib/orch/cli.ts` + `bin/hark`):
+>   `orch status|watch`, `agent spawn|send|brief|diff|log`; spawn gated to
+>   `HARK_ROLE=head`.
+> - Server endpoints + reconcile/Stop-hook routing for the head (`server.ts`).
+> - Dashboard: create form drops role chips; a Head card surfaces status/metrics.
+>
+> What remains is **Phase 3 polish** (`hark pr` helper, defaulting head-on) and
+> the **live head-led validation** (running the autonomy loop against real Claude
+> sessions). Same caveat as the worker autonomy loop: keystroke delivery (head
+> briefing, worker→head notifications) is gated behind `HARK_ORCH_AUTONOMY=1`.
 
 ## The idea in one line
 
@@ -223,12 +246,29 @@ dogfood only surfaced the first; an unattended head loop hits both.
 
 ## Phasing
 
-- **Phase 1 (core loop):** head role + `spawnHead` + head briefing + `hark` CLI
-  (`status` / `send` / `diff` / `spawn` / `brief`) + worker→head marker
-  notification. User↔head chat drives everything; head uses raw `git`/`gh` for PRs.
-- **Phase 2:** `hark orch watch` long-poll; head emits orchestration-level `DONE`
-  → user push notification; dashboard head surfacing.
-- **Phase 3:** `hark pr` helper, defaulting head-on, polish.
+- **Phase 1 (core loop) — DONE.** head role + `spawnHead` + head briefing +
+  `hark` CLI (`status` / `send` / `diff` / `spawn` / `brief` / `log`) +
+  worker→head marker notification. User↔head chat drives everything; head uses
+  raw `git`/`gh` for PRs.
+- **Phase 2 — mostly DONE.** `hark orch watch` long-poll ✅; head emits
+  orchestration-level `DONE` → orchestration marked `completed` ✅ (user *push*
+  notification still pending — Web Push isn't built yet); dashboard head
+  surfacing ✅.
+- **Phase 3 — pending.** `hark pr` helper, defaulting head-on, polish.
+
+## Spawn env (how `hark` reaches the head)
+
+The orchestrator spawns the head/workers through the existing tmux path with:
+- `--permission-mode auto` as the claude invocation (Gate 2 default);
+- env `HARK_ORCH_ID` / `HARK_ROLE` / `HARK_API` injected into the session so the
+  CLI auto-targets the run (and `HARK_ROLE` gates `agent spawn` to the head);
+- the repo's `bin/` prepended to the session `PATH` so `hark …` resolves. The
+  `bin/hark` runner imports the compiled `dist/lib/orch/cli.js`, so **`npm run
+  build` must run before spawning** orchestration sessions.
+
+Env injection is two-shell-layer aware (`sh -c` → login shell): values are
+single-quoted for the login shell, and `$PATH` stays unquoted so it expands
+after rc files load. See `buildLoginShellCommand` in `spawnSession.ts`.
 
 ## Settled (2026-05-29)
 

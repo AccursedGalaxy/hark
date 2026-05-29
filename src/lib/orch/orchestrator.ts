@@ -336,12 +336,17 @@ export class Orchestrator {
     await this.deps.store.setAgentLifecycle(orchId, agentId, "cancelled");
   }
 
-  // Tear down a whole orchestration's agents and mark it archived.
+  // Tear down a whole orchestration — every agent worktree AND the head's —
+  // then mark it archived. The head has its own worktree (it's not in agents[]),
+  // so it must be removed explicitly or it leaks.
   async teardownOrchestration(orchId: string): Promise<void> {
     const orch = await this.deps.store.getOrchestration(orchId);
     if (!orch) return;
     for (const agent of orch.agents) {
       await this.safeRemoveWorktree(orch.projectRoot, agent.worktreeDir);
+    }
+    if (orch.head) {
+      await this.safeRemoveWorktree(orch.projectRoot, orch.head.worktreeDir);
     }
     await this.deps.store.setStatus(orchId, "archived");
   }

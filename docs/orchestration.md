@@ -7,13 +7,15 @@ still an ordinary Claude Code session driven by `tmux send-keys`. The
 interaction model is unchanged — orchestration adds isolation, roles, autonomy,
 and bookkeeping around it.
 
-> Status: **backend complete + dashboard shipped** (branch `orchestration`).
-> The libraries, orchestrator service, autonomy controller, server endpoints +
-> reconcile loop, and the web dashboard (list / spawn form / agent cards /
-> metrics / event timeline) all exist and are tested. Worktree flow verified
-> end-to-end against a real git repo; the UI verified in-browser. What remains:
-> validating the active autonomy loop against live Claude sessions before
-> defaulting it on. See PLAN.md.
+> Status: **backend complete + dashboard shipped + head-session model built**
+> (branch `orchestration`). The libraries, orchestrator service, autonomy
+> controller, server endpoints + reconcile loop, and the web dashboard all exist
+> and are tested. On top of that, the **head-session model** is built (Phase 1+2)
+> — each orchestration spawns a coordinating *head* Claude session that decomposes
+> the goal, spawns workers on demand, and is driven via the `hark` CLI. See
+> [`orchestration-head.md`](orchestration-head.md). What remains: validating the
+> active autonomy loop against live Claude sessions before defaulting it on. See
+> PLAN.md.
 
 ## The model
 
@@ -159,9 +161,13 @@ src/lib/sendKeys.ts             # hardened tmux send path (sendInput, withPaneLo
 src/lib/orch/worktree.ts        # git worktree isolation
 src/lib/orch/roles.ts           # role charters + briefing + autonomy markers
 src/lib/orch/store.ts           # file-backed registry + append-only event log
-src/lib/orch/orchestrator.ts    # service: worktree + spawn + roles, DI, rollback
-src/lib/orch/controller.ts      # autonomy: marker scan, self-review loop, metrics
-src/lib/orch/correlation.ts     # match live sessions to agents by pid
+src/lib/orch/orchestrator.ts    # service: worktree + spawn + roles + head, DI, rollback
+src/lib/orch/controller.ts      # autonomy: marker scan, self-review loop, metrics, head signals
+src/lib/orch/correlation.ts     # match live sessions to agents + head by pid
+src/lib/orch/trust.ts           # atomic merge-preserving ~/.claude.json folder-trust pre-clear
+src/lib/orch/cli.ts             # pure hark-CLI planner + response formatters
+src/lib/orch/statusView.ts      # build the lean OrchStatusView for `hark orch status`
+bin/hark                        # the hark CLI runner (thin fetch+IO over cli.ts)
 src/server.ts                   # endpoints + reconcile loop + Stop-hook wiring
 web/src/hooks/useOrchestrations.ts        # polling hook (list + detail)
 web/src/components/OrchestrationPanel.tsx # dashboard: list, spawn form, agents, metrics, events
@@ -175,4 +181,19 @@ web/src/components/OrchestrationPanel.tsx # dashboard: list, spawn form, agents,
 | `GET` | `/api/orchestrations` | List orchestrations, newest first. |
 | `GET` | `/api/orchestrations/:id` | One orchestration record + its `events.jsonl`. |
 | `POST` | `/api/orchestrations/:id/teardown` | Remove all agent worktrees, archive the orchestration (branches kept). |
-| `POST` | `/api/orchestrations/:id/agents/:agentId/brief` | Deliver an agent its role briefing via the tmux send path and mark it running. User-initiated; works regardless of the autonomy flag. |
+| `POST` | `/api/orchestrations/:id/agents/:agentId/brief` | With no body: deliver an agent its role briefing and mark it running. With `{ task }`: re-brief the worker with its next task. |
+
+### Head-session model endpoints (back [`orchestration-head.md`](orchestration-head.md))
+
+The create endpoint above now spawns a **head** session (no `roles` — the head
+decomposes the goal and spawns workers itself). The `hark` CLI hits these:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/orchestrations/:id/status` | Lean status view (one line/agent + head, with diffstat). `hark orch status`. |
+| `GET` | `/api/orchestrations/:id/events?wait=1` | Long-poll: block until the next event, return it. `hark orch watch`. (`?since=<count>` without `wait` for an immediate slice.) |
+| `POST` | `/api/orchestrations/:id/head` | (Re-)spawn the head session. Idempotent when a live head exists. |
+| `POST` | `/api/orchestrations/:id/agents` | **Head-only** (gated by `x-hark-role: head`): spawn a worker `{ role, task, dependsOn? }`. `hark agent spawn`. |
+| `POST` | `/api/orchestrations/:id/agents/:agentId/send` | Steer a worker with a free-text message. `hark agent send`. |
+| `GET` | `/api/orchestrations/:id/agents/:agentId/diff?mode=stat\|full` | Worker branch vs base. `hark agent diff`. |
+| `GET` | `/api/orchestrations/:id/agents/:agentId/log` | Recent commits on the worker branch. `hark agent log`. |
