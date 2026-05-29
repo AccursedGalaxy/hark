@@ -131,7 +131,7 @@ export type AutonomyAction =
   | { type: "nudge" }
   | { type: "none" };
 
-const TERMINAL: AgentLifecycle[] = ["done", "failed", "cancelled"];
+const TERMINAL: AgentLifecycle[] = ["done", "failed", "stopped", "cancelled"];
 
 // Pure policy. Given everything we know about an agent at a turn boundary,
 // decide the single next action. Order matters: terminal states are inert,
