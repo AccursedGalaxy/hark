@@ -364,8 +364,20 @@ export interface OrchAgent {
   // terminal (done/blocked/failed). Guards the reconcile loop from re-signalling
   // an already-killed worker every tick. The worktree + branch are kept.
   killedAt?: number;
+  // When the head was woken (idle-advance / escalation) for this worker's
+  // transition to a terminal lifecycle. Mirrors `killedAt`: a fire-once guard so
+  // the wake-up fires exactly once per worker no matter whether the terminal
+  // transition was detected via its marker or via the reconcile loop.
+  headWokeAt?: number;
   // Set when lifecycle is "blocked" — the question the agent is waiting on.
   blockedReason?: string;
+  // The worker's FULL terminal marker text (the prose before [[HARK:DONE]] /
+  // BLOCKED / HANDOFF, or the circuit-breaker's blocked reason), persisted when
+  // it reaches a terminal lifecycle. Unlike the lean head notification — which
+  // is truncated for the head's context budget and is ephemeral — this lives on
+  // the record so it survives the worker being reaped and is retrievable later
+  // via `hark agent summary <id>`. Undefined until a terminal marker lands.
+  summary?: string;
   // Runaway circuit-breaker bookkeeping (see decideCircuitBreaker). Persisted
   // across reconcile ticks so the breaker tells a fresh repeat from one it has
   // already counted, and resets its window the moment the worker advances its

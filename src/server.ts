@@ -57,6 +57,7 @@ import {
 } from "./lib/orch/newsroom.js";
 import {
   AUTONOMY_LEVELS,
+  isTerminalLifecycle,
   type AgentRole,
   type AutonomyLevel,
   type OrchAgent,
@@ -1484,6 +1485,20 @@ app.get("/api/orchestrations/:id/agents/:agentId/log", async (req, res) => {
   }
 });
 
+// `hark agent summary <agentId>` — the worker's persisted terminal marker text
+// (the full DONE/BLOCKED/HANDOFF prose, or the circuit-breaker reason). Lives on
+// the record, so it survives the worker being reaped — the PM can retrieve it
+// long after the live session is gone. Empty when no terminal marker has landed.
+app.get("/api/orchestrations/:id/agents/:agentId/summary", async (req, res) => {
+  const orch = await orchStore.getOrchestration(req.params.id);
+  const agent = orch?.agents.find((a) => a.id === req.params.agentId);
+  if (!orch || !agent) {
+    res.status(404).json({ error: "agent not found" });
+    return;
+  }
+  res.json({ summary: agent.summary ?? "", lifecycle: agent.lifecycle });
+});
+
 // `hark pr <agentId>` — push the worker's branch + open a PR against base,
 // with NO checkout against the project root (the human still owns the landing).
 // Degrades gracefully: no origin → ready-branch + diff; no gh → push only.
@@ -1809,6 +1824,16 @@ async function reconcileOrchestrations(): Promise<void> {
         } else if (ORCH_AUTONOMY) {
           await orchController.onAgentSignal(o.id, agent.id, { stopped: false });
         }
+      }
+      // Reliable worker-done wake-up: wake the PM-head exactly once on ANY
+      // worker reaching a terminal lifecycle. onAgentSignal already wakes on a
+      // marker-detected transition; this is the safety net for a worker that
+      // went terminal via the reconcile loop (a `hark agent stop`, a breaker
+      // trip, a failure) and never via its own marker — the exact case that
+      // left the head asleep. The `headWokeAt` guard makes the two paths fire
+      // exactly once between them.
+      if (ORCH_AUTONOMY && isTerminalLifecycle(agent.lifecycle)) {
+        await orchController.wakeHeadForTerminal(o.id, agent.id);
       }
     }
     if (o.head) {

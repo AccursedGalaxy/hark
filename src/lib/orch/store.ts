@@ -405,12 +405,19 @@ export class OrchStore {
     orchId: string,
     agentId: string,
     lifecycle: AgentLifecycle,
-    opts: { reason?: string } = {},
+    opts: { reason?: string; summary?: string } = {},
   ): Promise<OrchAgent | null> {
     const a = await this.updateAgent(orchId, agentId, (agent) => {
       agent.lifecycle = lifecycle;
       if (lifecycle === "blocked") agent.blockedReason = opts.reason;
       else delete agent.blockedReason;
+      // Persist the full terminal marker text so it outlives the reaped worker
+      // (retrievable via `hark agent summary`). Only overwrite when given — a
+      // plain lifecycle flip with no marker (e.g. `hark agent stop`) keeps any
+      // summary already recorded.
+      if (opts.summary != null && opts.summary.trim().length > 0) {
+        agent.summary = opts.summary;
+      }
     });
     if (a) {
       await this.appendEvent({

@@ -46,6 +46,7 @@ export type RenderKind =
   | "brief"
   | "diff"
   | "log"
+  | "summary"
   | "watch"
   | "set-base"
   | "promote"
@@ -73,6 +74,7 @@ const USAGE = `hark — orchestration head CLI
   hark agent stop  <id>                      halt a worker (SIGTERM + mark stopped, keeps the worktree)
   hark agent diff  <id> [--stat|--full]     worker branch vs base (--stat default)
   hark agent log   <id>                     recent commits on the worker branch
+  hark agent summary <id>                   the worker's persisted DONE/BLOCKED/HANDOFF text (survives reaping)
   hark pr          <id> [--title "…"] [--base <ref>]   push the worker branch + open a PR (human lands)
 
 Roles: ${AGENT_ROLES.join(", ")}
@@ -333,6 +335,15 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
           render: "log",
         };
       }
+      case "summary": {
+        const id = rest[0];
+        if (!id) return err("summary needs an agentId");
+        return {
+          kind: "request",
+          request: { method: "GET", path: `${base}/${id}/summary` },
+          render: "summary",
+        };
+      }
       default:
         return err(`unknown agent command: ${sub ?? "(none)"}`);
     }
@@ -431,6 +442,16 @@ export function renderResponse(render: RenderKind, data: unknown): string {
     case "log": {
       const log = typeof d.log === "string" ? d.log : "";
       return log.trim().length > 0 ? log : "(no commits)";
+    }
+    case "summary": {
+      const summary = typeof d.summary === "string" ? d.summary : "";
+      if (summary.trim().length > 0) return summary;
+      const lifecycle = typeof d.lifecycle === "string" ? d.lifecycle : "";
+      // No marker text recorded — say so plainly, and hint why if the worker
+      // hasn't reached a terminal state yet (its summary lands at that point).
+      return lifecycle && lifecycle !== "blocked" && lifecycle !== "done"
+        ? `(no summary recorded yet — worker is ${lifecycle})`
+        : "(no summary recorded)";
     }
     case "promote": {
       // The PM charter is the command's stdout: the promoting session reads it

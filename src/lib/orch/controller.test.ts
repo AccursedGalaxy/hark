@@ -174,6 +174,7 @@ describe("decideAutonomyAction", () => {
     briefingDelivered: true,
     stopped: false,
     scan: { kind: null, summary: "" },
+    fullSummary: "",
     nudges: 0,
     maxNudges: 3,
   };
