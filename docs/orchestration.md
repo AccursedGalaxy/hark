@@ -7,9 +7,10 @@ still an ordinary Claude Code session driven by `tmux send-keys`. The
 interaction model is unchanged — orchestration adds isolation, roles, autonomy,
 and bookkeeping around it.
 
-> Status: **foundation landed** (branch `orchestration`). The libraries below
-> exist and are tested. Server endpoints, the autonomy controller, and the
-> frontend are the next increments — see PLAN.md.
+> Status: **foundation + spawn flow landed** (branch `orchestration`). The
+> libraries, the orchestrator service, and the server endpoints below exist,
+> are tested, and have been verified end-to-end against a real git repo. The
+> autonomy controller and the frontend are the next increments — see PLAN.md.
 
 ## The model
 
@@ -141,4 +142,15 @@ src/lib/sendKeys.ts             # hardened tmux send path (sendInput, withPaneLo
 src/lib/orch/worktree.ts        # git worktree isolation
 src/lib/orch/roles.ts           # role charters + briefing + autonomy markers
 src/lib/orch/store.ts           # file-backed registry + append-only event log
+src/lib/orch/orchestrator.ts    # service: worktree + spawn + roles, DI, rollback
+src/server.ts                   # endpoints: POST/GET /api/orchestrations[/:id], teardown
 ```
+
+## HTTP API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/orchestrations` | Create + staff a team. Body: `{ name, goal, projectKey, baseRef?, roles? }`. `projectKey` must be a project the server already resolved from a live session (no arbitrary paths). `roles` defaults to the full team. |
+| `GET` | `/api/orchestrations` | List orchestrations, newest first. |
+| `GET` | `/api/orchestrations/:id` | One orchestration record + its `events.jsonl`. |
+| `POST` | `/api/orchestrations/:id/teardown` | Remove all agent worktrees, archive the orchestration (branches kept). |

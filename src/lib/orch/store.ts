@@ -38,6 +38,12 @@ function genId(prefix: string): string {
   return `${prefix}-${t}-${r}`;
 }
 
+// Mint an agent id without inserting it — lets a caller compute the agent's
+// worktree path + branch (both keyed on the id) before adding the record.
+export function newAgentId(): string {
+  return genId("agent");
+}
+
 export interface CreateOrchestrationInput {
   name: string;
   goal: string;
@@ -47,6 +53,9 @@ export interface CreateOrchestrationInput {
 }
 
 export interface CreateAgentInput {
+  // Optional pre-minted id (see newAgentId) so the caller can derive the
+  // worktree path/branch from it before the record exists. Generated if absent.
+  id?: string;
   role: AgentRole;
   branch: string;
   worktreeDir: string;
@@ -197,7 +206,7 @@ export class OrchStore {
   ): Promise<OrchAgent | null> {
     const now = Date.now();
     const agent: OrchAgent = {
-      id: genId("agent"),
+      id: input.id ?? genId("agent"),
       orchestrationId: orchId,
       role: input.role,
       branch: input.branch,

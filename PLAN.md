@@ -16,8 +16,8 @@ hark is a notification and remote-control hub for Claude Code sessions running o
 *Active threads being shipped right now. Hard cap: 3 items. One bullet
 per thread; one line of context allowed beneath it.*
 
-- **Orchestration layer** (branch `orchestration`) — multi-agent glue on the existing foundation. Foundation landed: hardened tmux send path, `git worktree` isolation lib, 5 role charters + briefing builder, file-backed store + event log. See `docs/orchestration.md`.
-  Next: server endpoints to spawn/list orchestrations → autonomy controller (Stop-hook marker scanning) → frontend dashboard. All tested (430 green); not yet merged to main.
+- **Orchestration layer** (branch `orchestration`) — multi-agent glue on the existing foundation. Landed: hardened tmux send path, `git worktree` isolation, 5 role charters + briefing builder, file-backed store + event log, orchestrator service (worktree+spawn+roles, DI, rollback), and server endpoints (`POST/GET /api/orchestrations[/:id]`, teardown). Verified end-to-end against a real git repo (worktrees created + torn down). See `docs/orchestration.md`.
+  Next: autonomy controller (Stop-hook marker scanning + briefing delivery past the trust prompt) → frontend dashboard. All tested (437 green); not yet merged to main.
 
 ## Next
 
@@ -28,8 +28,7 @@ or out of the doc.*
 - **Capture modal: image attachment** — drag-and-drop and Ctrl+V paste in the capture textarea, mirroring the session composer's upload flow.
 - **Passive "modified by another session" indicator** — `PlanPanel` shows a small dot when `planMtime` advanced since this view's last fetch. Designed-but-deferred during the project-state build.
 - **Web Push** — service worker + VAPID for closed-app mobile notifications. Last open item from the original Phase 2+ list.
-- **Orchestration: server endpoints** — `POST /api/orchestrations` (create + spawn agents into worktrees via the existing `spawnClaudeSession`), `GET /api/orchestrations[/:id]`, agent lifecycle + event-log reads. Wire `OrchStore` into `server.ts`.
-- **Orchestration: autonomy controller** — on `Stop`/`SubagentStop` hook for an orchestration-owned session, scan the transcript tail for `[[HARK:DONE/BLOCKED/HANDOFF]]` markers (`src/lib/orch/roles.ts`) and advance/nudge/block the agent; bounded self-review loop; record interventions + metrics into `events.jsonl`.
+- **Orchestration: autonomy controller** — (a) briefing delivery: once a spawned agent's session registers and clears its trust prompt, send `orchestrator.briefingFor(...)` via the hardened `sendInput` path, then set lifecycle `running`. (b) on `Stop`/`SubagentStop` for an orchestration-owned session, scan the transcript tail for `[[HARK:DONE/BLOCKED/HANDOFF]]` markers (`src/lib/orch/roles.ts`) and advance/nudge/block the agent; bounded self-review loop; record interventions + metrics into `events.jsonl`. Correlate agent.pid/sessionId to a live session via the existing pid→pane resolution.
 - **Orchestration: frontend** — orchestration dashboard (agents, lifecycle, live metrics/cost/autonomy time), spawn flow, and per-orchestration event-log timeline. New `useOrchestrations` hook mirroring `useSessions`.
 
 ## Shipped

@@ -25,6 +25,11 @@ import { sendInput, sendKey } from "./lib/sendKeys.js";
 import { discoverCommands } from "./lib/slashCommands.js";
 import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
+import { OrchStore } from "./lib/orch/store.js";
+import { Orchestrator } from "./lib/orch/orchestrator.js";
+import { addWorktree, removeWorktree } from "./lib/orch/worktree.js";
+import { AGENT_ROLES } from "./lib/orch/roles.js";
+import type { AgentRole } from "./shared/protocol.js";
 import { applyManagedBlock } from "./lib/claudemdBlock.js";
 import { appendCapture } from "./lib/projectCapture.js";
 import {
@@ -250,6 +255,18 @@ async function findTranscriptPath(sessionId: string): Promise<string | null> {
 app.use(express.json({ limit: "1mb" }));
 
 const promptState = new PromptState();
+
+// Orchestration runtime. State persists under ~/.hark (OrchStore); the
+// orchestrator wires it to real git-worktree isolation and the existing tmux
+// spawn path so each agent is a normal Claude Code session in its own branch.
+const orchStore = new OrchStore();
+const orchestrator = new Orchestrator({
+  store: orchStore,
+  addWorktree,
+  removeWorktree,
+  spawnSession: ({ cwd, command }) => spawnClaudeSession({ cwd, command }),
+});
+
 type HookSubscriber = (ev: HookBroadcast) => void;
 const hookSubscribers = new Set<HookSubscriber>();
 
@@ -733,6 +750,98 @@ app.post("/api/projects/:key/install", async (req, res) => {
       },
       claudemd: { path: claudemdPath, ...claudemd },
     });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ---- Orchestration endpoints --------------------------------------------
+//
+// Create and inspect multi-agent orchestrations. Like the project endpoints,
+// we only act on projects the server has already resolved from a live
+// session's cwd — clients never get to point an orchestration (and its
+// `git worktree add`) at an arbitrary path on disk.
+
+app.get("/api/orchestrations", async (_req, res) => {
+  try {
+    res.json({ orchestrations: await orchStore.listOrchestrations() });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/orchestrations/:id", async (req, res) => {
+  try {
+    const orchestration = await orchStore.getOrchestration(req.params.id);
+    if (!orchestration) {
+      res.status(404).json({ error: "orchestration not found" });
+      return;
+    }
+    const events = await orchStore.readEvents(req.params.id);
+    res.json({ orchestration, events });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post("/api/orchestrations", async (req, res) => {
+  const body = (req.body ?? {}) as {
+    name?: unknown;
+    goal?: unknown;
+    projectKey?: unknown;
+    baseRef?: unknown;
+    roles?: unknown;
+  };
+  if (typeof body.name !== "string" || body.name.trim().length === 0) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+  if (typeof body.goal !== "string" || body.goal.trim().length === 0) {
+    res.status(400).json({ error: "goal is required" });
+    return;
+  }
+  if (typeof body.projectKey !== "string") {
+    res.status(400).json({ error: "projectKey is required" });
+    return;
+  }
+  const project = findKnownProject(body.projectKey);
+  if (!project) {
+    res.status(404).json({ error: "project not found" });
+    return;
+  }
+  // Validate requested roles against the known set; default to the full team.
+  const known = new Set<AgentRole>(AGENT_ROLES);
+  const roles: AgentRole[] = Array.isArray(body.roles)
+    ? body.roles.filter((r): r is AgentRole => known.has(r as AgentRole))
+    : [...AGENT_ROLES];
+  if (roles.length === 0) {
+    res.status(400).json({ error: "no valid roles requested" });
+    return;
+  }
+  try {
+    const result = await orchestrator.createTeam({
+      name: body.name,
+      goal: body.goal,
+      projectRoot: project.root,
+      projectName: project.name,
+      baseRef: typeof body.baseRef === "string" ? body.baseRef : undefined,
+      roles,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post("/api/orchestrations/:id/teardown", async (req, res) => {
+  try {
+    const orchestration = await orchStore.getOrchestration(req.params.id);
+    if (!orchestration) {
+      res.status(404).json({ error: "orchestration not found" });
+      return;
+    }
+    await orchestrator.teardownOrchestration(req.params.id);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
