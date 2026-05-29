@@ -998,6 +998,52 @@ app.get("/api/orchestrations/:id/status", async (req, res) => {
   }
 });
 
+// Event long-poll backing `hark orch watch`. With ?wait=1 the request blocks
+// until a new event is appended (or ~25s timeout), then returns the new
+// events. Without it, returns all events after ?since (a count) immediately.
+// Lets the head wait for the next worker marker without busy-polling.
+const WATCH_TIMEOUT_MS = 25_000;
+const WATCH_POLL_MS = 500;
+app.get("/api/orchestrations/:id/events", async (req, res) => {
+  const orch = await orchStore.getOrchestration(req.params.id);
+  if (!orch) {
+    res.status(404).json({ error: "orchestration not found" });
+    return;
+  }
+  const wait = req.query.wait === "1" || req.query.wait === "true";
+  const baseline = await orchStore.readEvents(req.params.id);
+  if (!wait) {
+    const since = Number(req.query.since);
+    const from = Number.isFinite(since) && since > 0 ? since : 0;
+    res.json({ events: baseline.slice(from) });
+    return;
+  }
+
+  // Long-poll: return as soon as the event count grows past the baseline.
+  const startCount = baseline.length;
+  const deadline = Date.now() + WATCH_TIMEOUT_MS;
+  let settled = false;
+  const finish = (events: unknown[]) => {
+    if (settled) return;
+    settled = true;
+    clearInterval(timer);
+    res.json({ events });
+  };
+  const timer = setInterval(() => {
+    void (async () => {
+      if (settled) return;
+      const now = await orchStore.readEvents(req.params.id);
+      if (now.length > startCount) finish(now.slice(startCount));
+      else if (Date.now() >= deadline) finish([]);
+    })().catch(() => finish([]));
+  }, WATCH_POLL_MS);
+  // If the client hangs up, stop polling.
+  req.on("close", () => {
+    settled = true;
+    clearInterval(timer);
+  });
+});
+
 // (Re-)spawn the head for an orchestration. The create path already spawns the
 // head; this is for explicit re-spawn (e.g. after a crash) and idempotency.
 app.post("/api/orchestrations/:id/head", async (req, res) => {

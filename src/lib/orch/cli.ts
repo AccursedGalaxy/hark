@@ -29,7 +29,14 @@ export interface RequestSpec {
   body?: unknown;
 }
 
-export type RenderKind = "status" | "spawn" | "send" | "brief" | "diff" | "log";
+export type RenderKind =
+  | "status"
+  | "spawn"
+  | "send"
+  | "brief"
+  | "diff"
+  | "log"
+  | "watch";
 
 export type CliPlan =
   | { kind: "request"; request: RequestSpec; render: RenderKind }
@@ -41,6 +48,7 @@ export type CliPlan =
 const USAGE = `hark — orchestration head CLI
 
   hark orch status                          show every agent + the head (compact)
+  hark orch watch                           block until the next event, print it, exit
   hark agent spawn <role> --task "…" [--depends-on <id>]   spawn a worker (head only)
   hark agent send  <id> "<message>"         steer a worker
   hark agent brief <id> "<task>"            assign a worker its next task
@@ -95,6 +103,20 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
         kind: "request",
         request: { method: "GET", path: `/api/orchestrations/${env.orchId}/status` },
         render: "status",
+      };
+    }
+    if (sub === "watch") {
+      if (!env.orchId) return err("HARK_ORCH_ID is not set");
+      // Long-poll: blocks server-side until the next event is appended, then
+      // returns it and exits. Lets the head wait for a worker marker without
+      // busy-polling.
+      return {
+        kind: "request",
+        request: {
+          method: "GET",
+          path: `/api/orchestrations/${env.orchId}/events?wait=1`,
+        },
+        render: "watch",
       };
     }
     return err(`unknown orch command: ${sub ?? "(none)"}`);
@@ -227,6 +249,15 @@ export function renderResponse(render: RenderKind, data: unknown): string {
     case "send":
     case "brief":
       return d.ok ? "ok" : JSON.stringify(d);
+    case "watch": {
+      const events = Array.isArray(d.events)
+        ? (d.events as { kind?: string; message?: string }[])
+        : [];
+      if (events.length === 0) return "(no new events — timed out)";
+      return events
+        .map((e) => `[${e.kind ?? "event"}] ${e.message ?? ""}`)
+        .join("\n");
+    }
     default:
       return JSON.stringify(d);
   }

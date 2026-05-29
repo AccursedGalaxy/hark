@@ -31,6 +31,15 @@ describe("planCommand — orch status", () => {
     const plan = planCommand(["orch", "status"], { api: "x" });
     expect(plan.kind).toBe("error");
   });
+
+  it("long-polls events for orch watch", () => {
+    const plan = planCommand(["orch", "watch"], headEnv);
+    expect(plan).toEqual({
+      kind: "request",
+      request: { method: "GET", path: "/api/orchestrations/orch-1/events?wait=1" },
+      render: "watch",
+    });
+  });
 });
 
 describe("planCommand — agent spawn (head-gated)", () => {
@@ -197,5 +206,14 @@ describe("renderResponse — spawn / send / diff", () => {
   it("acknowledges send/brief", () => {
     expect(renderResponse("send", { ok: true }).toLowerCase()).toContain("ok");
     expect(renderResponse("brief", { ok: true }).toLowerCase()).toContain("ok");
+  });
+
+  it("renders watched events and the timeout case", () => {
+    const out = renderResponse("watch", {
+      events: [{ kind: "head_notified", message: "coder → done" }],
+    });
+    expect(out).toContain("head_notified");
+    expect(out).toContain("coder → done");
+    expect(renderResponse("watch", { events: [] })).toContain("no new events");
   });
 });
