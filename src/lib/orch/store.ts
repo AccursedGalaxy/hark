@@ -62,6 +62,9 @@ export interface CreateAgentInput {
   role: AgentRole;
   branch: string;
   worktreeDir: string;
+  // The resolved base ref this agent forked from / measures against. Persisted
+  // so diff/log/PR target the agent's own base, not the whole-orch baseRef.
+  baseRef?: string;
   pid?: number | null;
   sessionId?: string | null;
   lifecycle?: AgentLifecycle;
@@ -361,6 +364,7 @@ export class OrchStore {
       role: input.role,
       branch: input.branch,
       worktreeDir: input.worktreeDir,
+      baseRef: input.baseRef,
       sessionId: input.sessionId ?? null,
       pid: input.pid ?? null,
       lifecycle: input.lifecycle ?? "pending",

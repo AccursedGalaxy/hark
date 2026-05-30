@@ -27,7 +27,7 @@ import { discoverCommands } from "./lib/slashCommands.js";
 import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
 import { OrchStore } from "./lib/orch/store.js";
-import { Orchestrator } from "./lib/orch/orchestrator.js";
+import { Orchestrator, agentBaseRef } from "./lib/orch/orchestrator.js";
 import { AutonomyController, type TranscriptMetrics } from "./lib/orch/controller.js";
 import {
   MetricsDb,
@@ -1435,8 +1435,9 @@ app.post("/api/orchestrations/:id/agents", async (req, res) => {
     return;
   }
   // An explicit --base forks the worker's worktree from <ref> instead of the
-  // orchestration's default base. Fork-time only: diff/PR still measure against
-  // orch.baseRef, so it isn't persisted on the agent.
+  // orchestration's default base. The resolved base is now PERSISTED on the
+  // agent record (see spawnAgent), so the worker's diff/log/PR measure against
+  // the same ref its worktree was cut from — see agentBaseRef.
   const baseOverride =
     typeof body.base === "string" && body.base.trim().length > 0
       ? body.base.trim()
@@ -1447,10 +1448,10 @@ app.post("/api/orchestrations/:id/agents", async (req, res) => {
       dependsOn: typeof body.dependsOn === "string" ? body.dependsOn : undefined,
       baseRef: baseOverride,
     });
-    // baseRef lives on the orchestration, not the agent; echo the base the
-    // worktree was actually forked from so the spawn CLI can print everything
-    // the head needs to run `hark pr <id>` without a follow-up status/git lookup.
-    res.json({ ok: true, agent, baseRef: baseOverride ?? orch.baseRef });
+    // Echo the agent's resolved base (its persisted per-agent base, falling
+    // back to the orch default) so the spawn CLI can print everything the head
+    // needs to run `hark pr <id>` without a follow-up status/git lookup.
+    res.json({ ok: true, agent, baseRef: agentBaseRef(agent, orch) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1512,7 +1513,7 @@ app.get("/api/orchestrations/:id/agents/:agentId/diff", async (req, res) => {
   try {
     const diff = await diffBranch({
       repoRoot: orch.projectRoot,
-      baseRef: orch.baseRef,
+      baseRef: agentBaseRef(agent, orch),
       branch: agent.branch,
       full: req.query.mode === "full",
     });
@@ -1533,7 +1534,7 @@ app.get("/api/orchestrations/:id/agents/:agentId/log", async (req, res) => {
   try {
     const log = await logBranch({
       repoRoot: orch.projectRoot,
-      baseRef: orch.baseRef,
+      baseRef: agentBaseRef(agent, orch),
       branch: agent.branch,
     });
     res.json({ log });
@@ -1568,14 +1569,16 @@ app.post("/api/orchestrations/:id/agents/:agentId/pr", async (req, res) => {
   }
   const title = (req.body as { title?: unknown })?.title;
   const base = (req.body as { base?: unknown })?.base;
-  // An explicit --base overrides the orchestration's default baseRef. The
-  // resolved base is used everywhere — the PR target, the push/PR-create call,
-  // AND the diffstat/commit-range — so the body is computed against the same
-  // ref the PR targets.
+  // An explicit --base overrides; otherwise default to the agent's persisted
+  // base (the ref it forked from), falling back to the orchestration default
+  // for legacy agents. So a stacked worker's PR targets its upstream branch,
+  // not main. The resolved base is used everywhere — the PR target, the
+  // push/PR-create call, AND the diffstat/commit-range — so the body is
+  // computed against the same ref the PR targets.
   const baseRef =
     typeof base === "string" && base.trim().length > 0
       ? base.trim()
-      : orch.baseRef;
+      : agentBaseRef(agent, orch);
   // Assemble a default PR body from data we already have for this worker so the
   // PR opens with a useful description instead of "No description provided."
   // Best-effort: every git read is guarded so a failure just omits that
