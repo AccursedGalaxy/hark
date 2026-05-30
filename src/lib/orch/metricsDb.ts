@@ -508,6 +508,121 @@ export function toolCallRow(
   ];
 }
 
+// ---- Transport detector (transcript-only classifier) ------------------------
+//
+// The discriminator the brief calls for: turn a captured tool call into one of
+// four transport classes, using ONLY signals already in the transcript. It is a
+// PURE projection over captureTurns output (testable without a DB) and is
+// RE-ENTRANT — re-run it each tick over the full transcript so an in-flight
+// call's verdict flips as its result arrives or a later turn appears (Gap B).
+
+export type ToolCallClass =
+  | "ok" // result present + clean, OR no result yet but still in flight (tail)
+  | "hark_drop" // result absent though the session moved on — our transport lost it
+  | "platform_transient" // result absent BUT the platform self-reported the hiccup
+  | "worker_misread_candidate"; // error result the worker may have read as success
+
+// Assistant stop_reasons that mean the PLATFORM paused/curtailed the turn (so a
+// missing result is the platform's doing, not a hark-side transport drop).
+const PLATFORM_STOP_REASONS = new Set(["max_tokens", "pause_turn"]);
+
+export interface ClassifiedToolCall {
+  callId: string;
+  turnIndex: number;
+  channel: string;
+  batchPosition: number;
+  batchSize: number;
+  resultSeen: boolean;
+  isError: boolean;
+  resultTs: number | null;
+  outcomeClass: ToolCallClass;
+  // Only meaningful for hark_drop: true when this drop sits in a contiguous
+  // trailing run of >=2 missing results in its batch — the cancel-cascade
+  // signature (one failure cancels the rest of the batch), distinct from a
+  // single random drop (Gap E).
+  cascade: boolean;
+}
+
+// The set of batch positions belonging to a trailing run of >=2 calls that all
+// lack a result — the cancel-cascade signature. Calls are in arbitrary order;
+// we walk the batch from its last position backward while results are missing.
+function cascadePositions(calls: CapturedToolCall[]): Set<number> {
+  const set = new Set<number>();
+  if (calls.length < 2) return set;
+  const byPos = [...calls].sort((a, b) => a.batchPosition - b.batchPosition);
+  const run: number[] = [];
+  for (let i = byPos.length - 1; i >= 0; i--) {
+    if (byPos[i].resultSeen) break;
+    run.push(byPos[i].batchPosition);
+  }
+  if (run.length >= 2) for (const p of run) set.add(p);
+  return set;
+}
+
+export function classifyToolCalls(events: TranscriptEvent[]): ClassifiedToolCall[] {
+  const turns = captureTurns(events);
+  const lastTurnIndex = turns.length - 1;
+  const out: ClassifiedToolCall[] = [];
+  for (const t of turns) {
+    // The session moved past this turn — a missing result is now a real loss,
+    // not an in-flight call (the Gap-B tail guard hinges on this).
+    const laterTurnExists = t.turnIndex < lastTurnIndex;
+    // The platform owned up to a hiccup on the issuing turn.
+    const platformFlagged =
+      t.isApiError ||
+      t.retryAttempt !== null ||
+      (t.stopReason !== undefined && PLATFORM_STOP_REASONS.has(t.stopReason));
+    const cascade = cascadePositions(t.toolCalls);
+    for (const c of t.toolCalls) {
+      let outcomeClass: ToolCallClass;
+      let isCascade = false;
+      if (c.resultSeen) {
+        // result present + isError, worker proceeds → flag for review. v1 is a
+        // deterministic candidate only; the Haiku judge is a documented
+        // follow-up (PM decision 2), not wired here.
+        outcomeClass = c.isError ? "worker_misread_candidate" : "ok";
+      } else if (platformFlagged) {
+        outcomeClass = "platform_transient";
+      } else if (laterTurnExists) {
+        outcomeClass = "hark_drop";
+        isCascade = cascade.has(c.batchPosition);
+      } else {
+        // Tail guard: no result AND no later turn → still in flight. NOT a
+        // drop; stays "ok" (no anomaly yet) and is re-classified next tick.
+        outcomeClass = "ok";
+      }
+      out.push({
+        callId: c.callId,
+        turnIndex: t.turnIndex,
+        channel: c.channel,
+        batchPosition: c.batchPosition,
+        batchSize: t.toolCalls.length,
+        resultSeen: c.resultSeen,
+        isError: c.isError,
+        resultTs: c.resultTs,
+        outcomeClass,
+        cascade: isCascade,
+      });
+    }
+  }
+  return out;
+}
+
+// One per-call outcome row, as read back by the query API.
+export interface ToolCallOutcomeRow {
+  callId: string;
+  agentId: string;
+  orchId: string;
+  turnIndex: number;
+  channel: string;
+  batchSize: number;
+  batchPosition: number;
+  resultSeen: boolean;
+  isError: boolean;
+  outcomeClass: string | null;
+  cascade: boolean;
+}
+
 // ---- Runtime wrapper --------------------------------------------------------
 
 export class MetricsDb {
@@ -682,6 +797,79 @@ export class MetricsDb {
     }
     this.setTurnsIngested(agentId, turns.length);
     return fresh.length;
+  }
+
+  // Persist the detector's verdict by UPDATING the mutable outcome columns on
+  // existing tool_call rows (keyed by call_id). This is the re-entrant half of
+  // Gap B: classifyToolCalls is re-run over the full transcript each tick, so a
+  // call's result_seen/outcome_class flip as its result lands or the session
+  // moves past it (an append-only verdict table couldn't do that — PM decision
+  // 1). A no-op WHERE-miss is fine: rows are seeded by ingestTurns first.
+  // Returns the number of rows actually updated.
+  applyToolCallOutcomes(classified: ClassifiedToolCall[]): number {
+    if (classified.length === 0) return 0;
+    const stmt = this.db.prepare(
+      `UPDATE tool_calls
+         SET result_seen = ?, is_error = ?, result_ts = ?,
+             outcome_class = ?, cascade = ?
+       WHERE call_id = ?`,
+    );
+    let updated = 0;
+    for (const c of classified) {
+      const r = stmt.run(
+        bit(c.resultSeen),
+        bit(c.isError),
+        nv(c.resultTs),
+        c.outcomeClass,
+        bit(c.cascade),
+        c.callId,
+      );
+      updated += Number(r.changes ?? 0);
+    }
+    return updated;
+  }
+
+  // Read per-call transport outcomes back out. The first SELECT-side API on this
+  // DB (it is write-only otherwise) — the layer-1 surface is this query only, no
+  // UI/orch-status exposure (PM decision 4). Optional filters narrow by agent,
+  // orchestration, or outcome class.
+  getToolCallOutcomes(
+    filter: { agentId?: string; orchId?: string; outcomeClass?: string } = {},
+  ): ToolCallOutcomeRow[] {
+    const where: string[] = [];
+    const binds: Bind[] = [];
+    if (filter.agentId) {
+      where.push("agent_id = ?");
+      binds.push(filter.agentId);
+    }
+    if (filter.orchId) {
+      where.push("orch_id = ?");
+      binds.push(filter.orchId);
+    }
+    if (filter.outcomeClass) {
+      where.push("outcome_class = ?");
+      binds.push(filter.outcomeClass);
+    }
+    const sql =
+      `SELECT call_id, agent_id, orch_id, turn_index, channel, batch_size,
+              batch_position, result_seen, is_error, outcome_class, cascade
+         FROM tool_calls` +
+      (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
+      ` ORDER BY agent_id, turn_index, batch_position`;
+    const rows = this.db.prepare(sql).all(...binds) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      callId: String(r.call_id),
+      agentId: String(r.agent_id),
+      orchId: String(r.orch_id),
+      turnIndex: Number(r.turn_index),
+      channel: String(r.channel),
+      batchSize: Number(r.batch_size),
+      batchPosition: Number(r.batch_position),
+      resultSeen: r.result_seen === 1,
+      isError: r.is_error === 1,
+      outcomeClass: r.outcome_class == null ? null : String(r.outcome_class),
+      cascade: r.cascade === 1,
+    }));
   }
 
   close(): void {

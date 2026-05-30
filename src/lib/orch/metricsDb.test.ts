@@ -15,6 +15,7 @@ import {
   MetricsDb,
   SCHEMA_VERSION,
   captureTurns,
+  classifyToolCalls,
   headAgentId,
   tokenSampleRow,
 } from "./metricsDb.js";
@@ -585,6 +586,157 @@ describe("MetricsDb.ingestTurns", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0].session_id).toBeNull();
     expect(rows[1].session_id).toBe("sess-2");
+    db.close();
+  });
+});
+
+// ---- Transport detector: classifyToolCalls --------------------------------
+
+// Map each classified call by id for compact assertions.
+function classOf(events: TranscriptEvent[]) {
+  const out: Record<string, { outcomeClass: string; cascade: boolean }> = {};
+  for (const c of classifyToolCalls(events)) {
+    out[c.callId] = { outcomeClass: c.outcomeClass, cascade: c.cascade };
+  }
+  return out;
+}
+
+describe("classifyToolCalls (transport discriminator)", () => {
+  it("clean result → ok", () => {
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [{ id: "ok1", name: "Bash" }]),
+      toolResult("ok1"),
+      asstTurn("a2", "2026-05-29T10:00:02.000Z", []),
+    ];
+    expect(classOf(events).ok1.outcomeClass).toBe("ok");
+  });
+
+  it("result absent + session moved on → hark_drop", () => {
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [{ id: "drop1", name: "Bash" }]),
+      // no result for drop1, but a LATER turn exists → the session moved past it
+      asstTurn("a2", "2026-05-29T10:00:02.000Z", []),
+    ];
+    expect(classOf(events).drop1.outcomeClass).toBe("hark_drop");
+  });
+
+  it("result absent BUT the issuing turn self-reported an API error → platform_transient", () => {
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [{ id: "p1", name: "Bash" }], {
+        isApiError: true,
+      }),
+      asstTurn("a2", "2026-05-29T10:00:02.000Z", []),
+    ];
+    // Platform self-report wins over a hark-drop attribution.
+    expect(classOf(events).p1.outcomeClass).toBe("platform_transient");
+  });
+
+  it("result absent + a platform stop_reason → platform_transient", () => {
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [{ id: "p2", name: "Bash" }], {
+        stopReason: "max_tokens",
+      }),
+      asstTurn("a2", "2026-05-29T10:00:02.000Z", []),
+    ];
+    expect(classOf(events).p2.outcomeClass).toBe("platform_transient");
+  });
+
+  it("error result the worker proceeds past → worker_misread_candidate", () => {
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [{ id: "e1", name: "Bash" }]),
+      toolResult("e1", { isError: true }),
+      asstTurn("a2", "2026-05-29T10:00:02.000Z", []),
+    ];
+    expect(classOf(events).e1.outcomeClass).toBe("worker_misread_candidate");
+  });
+
+  it("TAIL GUARD: an in-flight call (no result, no later turn) is NOT a drop", () => {
+    const events: TranscriptEvent[] = [
+      // a1 is the LAST turn; its result hasn't arrived yet — still in flight.
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [{ id: "tail1", name: "Bash" }]),
+    ];
+    const cls = classOf(events).tail1.outcomeClass;
+    expect(cls).not.toBe("hark_drop");
+    expect(cls).toBe("ok"); // pending; re-classified once a result/later turn lands
+  });
+
+  it("CASCADE: a trailing run of >=2 missing results in a batch is flagged", () => {
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [
+        { id: "c0", name: "Bash" }, // clean
+        { id: "c1", name: "Bash" }, // dropped — cancel cascade starts
+        { id: "c2", name: "Edit" }, // dropped — cancelled by the cascade
+      ]),
+      toolResult("c0"),
+      asstTurn("a2", "2026-05-29T10:00:02.000Z", []),
+    ];
+    const m = classOf(events);
+    expect(m.c0).toEqual({ outcomeClass: "ok", cascade: false });
+    expect(m.c1).toEqual({ outcomeClass: "hark_drop", cascade: true });
+    expect(m.c2).toEqual({ outcomeClass: "hark_drop", cascade: true });
+  });
+
+  it("a single random drop in a batch is NOT flagged as a cascade", () => {
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [
+        { id: "s0", name: "Bash" }, // dropped (mid-batch, isolated)
+        { id: "s1", name: "Bash" }, // clean — breaks the trailing run
+      ]),
+      toolResult("s1"),
+      asstTurn("a2", "2026-05-29T10:00:02.000Z", []),
+    ];
+    const m = classOf(events);
+    expect(m.s0).toEqual({ outcomeClass: "hark_drop", cascade: false });
+    expect(m.s1.outcomeClass).toBe("ok");
+  });
+});
+
+describe("MetricsDb outcome persistence + query API (re-entrant)", () => {
+  it("flips an in-flight call's verdict across ticks, then exposes it via the query API", () => {
+    const db = new MetricsDb(":memory:");
+    const a1 = asstTurn("a1", "2026-05-29T10:00:01.000Z", [{ id: "x1", name: "Bash" }]);
+    const a2 = asstTurn("a2", "2026-05-29T10:00:02.000Z", []);
+
+    // Tick 1: only a1 exists, no result → in flight → ok, result_seen=0.
+    let events: TranscriptEvent[] = [a1];
+    db.ingestTurns("agent-1", "orch-1", "sess-1", captureTurns(events));
+    db.applyToolCallOutcomes(classifyToolCalls(events));
+    let row = db.getToolCallOutcomes({ agentId: "agent-1" })[0];
+    expect(row).toMatchObject({ callId: "x1", resultSeen: false, outcomeClass: "ok" });
+
+    // Tick 2: the session moved on (a2) but the result never came → hark_drop.
+    events = [a1, a2];
+    db.ingestTurns("agent-1", "orch-1", "sess-1", captureTurns(events));
+    db.applyToolCallOutcomes(classifyToolCalls(events));
+    row = db.getToolCallOutcomes({ agentId: "agent-1" })[0];
+    expect(row).toMatchObject({ resultSeen: false, outcomeClass: "hark_drop" });
+
+    // Tick 3: the result finally lands → result_seen flips 0->1, verdict → ok.
+    // (The cursor has long passed a1's turn — only the mutable UPDATE path can
+    // do this, which is the whole point of an outcome column over an append log.)
+    events = [a1, toolResult("x1"), a2];
+    db.applyToolCallOutcomes(classifyToolCalls(events));
+    row = db.getToolCallOutcomes({ agentId: "agent-1" })[0];
+    expect(row).toMatchObject({ resultSeen: true, outcomeClass: "ok" });
+    db.close();
+  });
+
+  it("filters by outcome class and surfaces the cascade sub-class", () => {
+    const db = new MetricsDb(":memory:");
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [
+        { id: "c0", name: "Bash" },
+        { id: "c1", name: "Bash" },
+        { id: "c2", name: "Edit" },
+      ]),
+      toolResult("c0"),
+      asstTurn("a2", "2026-05-29T10:00:02.000Z", []),
+    ];
+    db.ingestTurns("agent-1", "orch-1", "sess-1", captureTurns(events));
+    db.applyToolCallOutcomes(classifyToolCalls(events));
+    const drops = db.getToolCallOutcomes({ agentId: "agent-1", outcomeClass: "hark_drop" });
+    expect(drops.map((d) => d.callId)).toEqual(["c1", "c2"]);
+    expect(drops.every((d) => d.cascade)).toBe(true);
     db.close();
   });
 });
