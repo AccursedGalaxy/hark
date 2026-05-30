@@ -321,6 +321,98 @@ describe("diff against an advanced base shows only the worker's own changes", ()
   });
 });
 
+// Regression guard for the stale-local-base bug: workers fork off `origin/<base>`
+// (the #18 base-drift fix), but the diff readers measured against the LOCAL base.
+// When local `main` lags `origin/main`, the three-dot merge-base falls behind the
+// worker's true fork point, so the diff surfaces commits the worker never made.
+// The fix fetches and measures against `origin/<base>`. This sets up exactly that
+// skew — local base behind origin, worker forked off the fresh origin tip — and
+// asserts the diff shows ONLY the worker's own change.
+describe("diff against a stale local base shows only the worker's own changes", () => {
+  let root: string;
+  let origin: string;
+  let repo: string;
+
+  function git(args: string[]): void {
+    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  }
+
+  function setup(): void {
+    root = mkdtempSync(join(tmpdir(), "hark-stale-"));
+    origin = join(root, "origin.git");
+    repo = join(root, "repo");
+    execFileSync("git", ["init", "-q", "--bare", origin]);
+    execFileSync("git", ["init", "-q", repo]);
+    git(["symbolic-ref", "HEAD", "refs/heads/base"]);
+    git(["config", "user.email", "t@t"]);
+    git(["config", "user.name", "t"]);
+    git(["config", "commit.gpgsign", "false"]);
+    git(["remote", "add", "origin", origin]);
+
+    // Fork point — c0, pushed so origin/base and local base agree here.
+    writeFileSync(join(repo, "shared.txt"), "0\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "c0"]);
+    git(["push", "-q", "origin", "base"]);
+
+    // Origin advances with its OWN commits, then local base is rewound to c0 so
+    // it LAGS origin/base by two commits. These drift commits are NOT the
+    // worker's — they must never appear in its diff.
+    writeFileSync(join(repo, "drift1.txt"), "a\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "origin ahead 1"]);
+    writeFileSync(join(repo, "drift2.txt"), "b\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "origin ahead 2"]);
+    git(["push", "-q", "origin", "base"]);
+    git(["reset", "-q", "--hard", "HEAD~2"]); // local base back to c0 (stale)
+
+    // Worker forks off the FRESH origin tip (as addWorktree does) and makes its
+    // own single change.
+    git(["branch", "worker", "origin/base"]);
+    git(["checkout", "-q", "worker"]);
+    writeFileSync(join(repo, "worker.txt"), "w\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "worker commit"]);
+  }
+
+  function cleanup(): void {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  it("diffBranch --stat shows worker.txt but not the origin drift commits", async () => {
+    setup();
+    try {
+      const stat = await diffBranch({
+        repoRoot: repo,
+        baseRef: "base",
+        branch: "worker",
+        full: false,
+      });
+      expect(stat).toContain("worker.txt");
+      expect(stat).not.toContain("drift1.txt");
+      expect(stat).not.toContain("drift2.txt");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("branchGitSummary counts only the worker's commit, not the drift", async () => {
+    setup();
+    try {
+      const summary = await branchGitSummary({
+        repoRoot: repo,
+        baseRef: "base",
+        branch: "worker",
+      });
+      expect(summary.commitCount).toBe(1);
+      expect(summary.diffstat).toBe("1 file +1/-0");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("formatShortstat", () => {
   it("reduces git --shortstat output to a compact token", () => {
     expect(
