@@ -26,7 +26,7 @@ export type BoardOp =
   | { verb: "set"; id: string; fields: TaskFields }
   | { verb: "link"; id: string; dependsOn: string }
   | { verb: "assign"; id: string; assignee: string }
-  | { verb: "close"; id: string };
+  | { verb: "close"; id: string; by?: string };
 
 export type BoardPlan =
   | { kind: "op"; op: BoardOp }
@@ -41,10 +41,15 @@ export const BOARD_USAGE = `hark board — the PM's keyed task store (a SQLite s
   hark board set <id> field=value [field=value …]   keyed UPSERT — idempotent; re-applying is safe
   hark board link <id> <taskId>                 add a depends_on edge (idempotent — re-linking is a no-op)
   hark board assign <id> <assignee>             set assignee (role | agentId | workstream)
-  hark board close <id>                          mark done (stamps closed_at)
+  hark board close <id> [by=<who>]               mark done (stamps closed_at + closed_by)
 
 Settable fields: title, body, status, assignee, workstream, priority, depends_on, orch_id, agent_id
-Statuses: ${BOARD_STATUSES.join(", ")}`;
+Statuses: ${BOARD_STATUSES.join(", ")}
+
+The board is the per-project task store — it replaces PLAN.md's old Inbox/Shipped
+prose. New captures land as \`inbox\` tasks (triage → backlog/ready, or close as
+noise). Done tasks ARE the shipped log: \`hark board list status=done\` with each
+row's closed_at + closed_by (the session/PM that landed it).`;
 
 function err(message: string): BoardPlan {
   return { kind: "error", message };
@@ -118,8 +123,18 @@ export function planBoard(
     }
     case "close": {
       const id = rest[0];
-      if (!id) return err("close needs a task id: hark board close <id>");
-      return { kind: "op", op: { verb: "close", id } };
+      if (!id) return err("close needs a task id: hark board close <id> [by=<who>]");
+      // Optional `by=<who>` records the closer in closed_by; anything else is a
+      // misuse (close takes no other fields — promote/edit via `set`).
+      let by: string | undefined;
+      for (const tok of rest.slice(1)) {
+        if (tok.startsWith("by=")) {
+          by = tok.slice(3) || undefined;
+        } else {
+          return err(`close takes only an optional by=<who>, got "${tok}"`);
+        }
+      }
+      return { kind: "op", op: { verb: "close", id, by } };
     }
     default:
       return err(`unknown board command: ${sub}`);
@@ -171,7 +186,14 @@ export function applyBoardOp(store: BoardStore, op: BoardOp): BoardResult {
       return { kind: "task", task, changed };
     }
     case "close": {
-      const { task, changed } = store.setTask(op.id, { status: "done" });
+      // Attribution falls back to the ambient session/PM id so a bare `close`
+      // from inside an orchestrated session still records who landed it.
+      const by =
+        op.by ?? process.env.HARK_SESSION_ID ?? process.env.HARK_PM_ID ?? undefined;
+      const { task, changed } = store.setTask(op.id, {
+        status: "done",
+        closedBy: by ?? null,
+      });
       return { kind: "task", task, changed };
     }
   }
@@ -188,9 +210,26 @@ function flat(s: string, max = 60): string {
   return f.length <= max ? f : f.slice(0, max) + "…";
 }
 
-// One compact line per task for `list`. id · status · assignee · title.
+// PURE. ms-epoch → a compact local `YYYY-MM-DD HH:MM`, or "" for null. Used in
+// the shipped view (done rows) and `show`.
+export function formatBoardTimestamp(ms: number | null): string {
+  if (ms == null) return "";
+  const d = new Date(ms);
+  const p = (n: number) => (n < 10 ? `0${n}` : String(n));
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// One compact line per task for `list`. id · status · assignee · title. Done
+// rows append the shipped-log record (when + who closed it) so a plain
+// `list status=done` reads as the shipped log.
 function taskLine(t: TaskRow): string {
-  return `${pad(t.id, 22)} ${pad(t.status ?? "", 12)} ${pad(t.assignee ?? "-", 14)} ${flat(t.title ?? "")}`;
+  const base = `${pad(t.id, 22)} ${pad(t.status ?? "", 12)} ${pad(t.assignee ?? "-", 14)} ${flat(t.title ?? "")}`;
+  if (t.status === "done" && (t.closedAt != null || t.closedBy)) {
+    const when = formatBoardTimestamp(t.closedAt);
+    const who = t.closedBy ? ` by ${t.closedBy}` : "";
+    return `${base}  ✓ ${when}${who}`.trimEnd();
+  }
+  return base;
 }
 
 export function renderBoardResult(r: BoardResult): string {
@@ -217,6 +256,7 @@ export function renderBoardResult(r: BoardResult): string {
       if (t.dependsOn) lines.push(`  depends_on: ${t.dependsOn}`);
       if (t.orchId) lines.push(`  orch_id:    ${t.orchId}`);
       if (t.agentId) lines.push(`  agent_id:   ${t.agentId}`);
+      if (t.closedAt != null) lines.push(`  closed:     ${formatBoardTimestamp(t.closedAt)}${t.closedBy ? ` by ${t.closedBy}` : ""}`);
       if (t.body) lines.push(`  body:       ${t.body}`);
       if (r.events.length > 0) {
         lines.push("  events:");

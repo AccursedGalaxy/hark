@@ -1,26 +1,24 @@
 <!-- hark:start -->
 Read PLAN.md before anything else. It's the project's narrative memory —
-North Star, strategy, cold-start context, "what just happened" — and a
-fresh session resumes from it. Updates aren't tidying, they're the handoff.
-If it's still the skeleton (sections show `(not yet written)` / `(none)`),
-bootstrap it from the codebase before doing anything else.
+North Star, direction, and a compact "Now" of the threads in motion — and a
+fresh session resumes from it. If it's still the skeleton (North Star shows
+`(not yet written)`), bootstrap it from the codebase before doing anything else.
 
-Task management runs on the **board**, not in PLAN prose. Keyed,
-reconcilable state — task status, dependencies, ownership, lifecycle —
+Task management runs on the **board**, not in PLAN prose. Every keyed,
+reconcilable thing — inbox captures, task status, dependencies, ownership,
+lifecycle, and the shipped log (done tasks carry closed_at + closed_by) —
 lives on the board (a per-project SQLite store); drive it with `hark board`
-(`add` / `list` / `show` / `set` / `link` / `assign` / `close`). PLAN
-*references* the board; it never duplicates task state. The boundary:
+(`add` / `list` / `show` / `set` / `link` / `assign` / `close`). New notes land
+as `inbox` tasks — triage them (promote → backlog/ready, or close as noise).
+PLAN *references* the board; it never duplicates task state. The boundary:
 natively keyed + reconcilable → board, narrative prose → PLAN.
 
-The italicized contract under each PLAN section is binding. Cadence:
+Keep PLAN tight — it has just two sections:
+- **Now** is capped at 3 active threads, each pointing at a board workstream;
+  update it as state changes, not at session end. Granular task status stays
+  on the board.
+- **North Star**: don't reword casually. Edit only when direction actually shifts.
 
-- Now / Next / Shipped reflect reality at any moment — update as state
-  changes, not at session end. Now bullets point at board workstreams;
-  granular task state stays on the board, not in the bullet.
-- Inbox is the required-pass section: drain or tag every bare line
-  before this session ends.
-- North Star: don't reword casually. Edit only when direction actually shifts.
-
-Edit PLAN.md via targeted edits, not whole-file rewrites — captures from
-other sessions can land between your read and write.
+Edit PLAN.md via targeted edits, not whole-file rewrites — concurrent sessions
+may write between your read and your write.
 <!-- hark:end -->

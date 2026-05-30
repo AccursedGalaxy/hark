@@ -93,13 +93,13 @@ export const ROLES: Record<AgentRole, RoleDef> = {
     summary: "Records what changed for humans and the next session.",
     charter: [
       "Update user-facing and developer-facing docs the change affects (README, design docs, inline comments where load-bearing).",
-      "Keep PLAN.md honest if this project uses one: move shipped work, drain the inbox lines this change resolves.",
+      "Keep the project's narrative honest: PLAN.md is North Star + a compact Now (narrative only). Task state — closing shipped work, triaging captures — is the PM's job on the board (`hark board`), not yours in prose.",
       "Write for the next cold-start session: explain the why, not just the what.",
       "Do not invent behaviour — document only what the Coder and Tester actually produced.",
     ],
     definitionOfDone: [
       "Docs affected by the change are updated and accurate.",
-      "PLAN.md (if present) reflects reality: Now/Next/Shipped current, inbox triaged.",
+      "PLAN.md (if present) stays narrative: North Star + Now current, no task/inbox/shipped prose (that lives on the board).",
       "No documentation claims behaviour that the code doesn't have.",
     ],
   },
@@ -317,9 +317,10 @@ export interface PmHeadBriefingContext {
 // Three properties are load-bearing and stated explicitly:
 //   - pure PM: read-only on the tree (a PreToolUse hook enforces it), so the
 //     tree is safe by construction, not by trust;
-//   - PLAN.md is the brain: every durable decision lives there, edited via
-//     targeted edits (concurrent-session safe), so a fresh session resumes by
-//     re-reading it;
+//   - PLAN.md is the NARRATIVE brain (North Star + a compact Now), edited via
+//     targeted edits (concurrent-session safe); all keyed state — inbox, task
+//     status, deps, shipped log — lives on the board, so a fresh session resumes
+//     by re-reading PLAN and `hark board list`;
 //   - the human owns every landing: the PM prepares branches/PRs, never merges
 //     into your working tree.
 export function buildPmHeadBriefing(ctx: PmHeadBriefingContext): string {
@@ -335,31 +336,34 @@ export function buildPmHeadBriefing(ctx: PmHeadBriefingContext): string {
   lines.push("");
   lines.push("## PLAN.md is your narrative brain");
   lines.push(
-    `Your durable narrative memory is **${ctx.planPath}** — North Star, strategy, cold-start context, "what just happened." A fresh session resumes the role by re-reading it. It is NOT the task tracker — keyed task state lives on the board (next section). Keep PLAN the narrative source of truth:`,
+    `Your durable narrative memory is **${ctx.planPath}** — North Star + a compact **Now**, nothing else. A fresh session resumes the role by re-reading it. It is NOT the task tracker, the inbox, or the shipped log — all keyed state lives on the board (next section). Keep PLAN narrative and tight:`,
   );
   lines.push(
-    "- Edit it with **targeted edits**, never whole-file rewrites — captures from other sessions can land between your read and your write.",
+    "- Edit it with **targeted edits**, never whole-file rewrites — concurrent sessions can write between your read and your write.",
   );
   lines.push(
-    "- **Now** is capped at 3 active threads; **Inbox** is the required-pass section — drain or tag every bare line.",
+    "- **Now** is capped at 3 active threads, each pointing at a board workstream — update it as state changes, not at session end. Granular task status stays on the board.",
   );
   lines.push(
     "- Hold the **North Star**: don't reword it casually; edit only when the direction actually shifts.",
-  );
-  lines.push(
-    "- Move work Now→Shipped as it lands. The plan reflects reality at any moment, not just at session end.",
   );
 
   lines.push("");
   lines.push("## The board is your operational source of truth");
   lines.push(
-    "Keyed, reconcilable state — task status, dependencies, workstream, lifecycle, which worker owns what — lives on the **board** (a per-project SQLite store), NOT in PLAN prose. Drive it with `hark board add/list/show/set/link/assign/close`. PLAN *references* the board; it never duplicates task state.",
+    "EVERY keyed, reconcilable thing — inbox captures, task status, dependencies, workstream, lifecycle, which worker owns what, and the shipped log — lives on the **board** (a per-project SQLite store), NOT in PLAN prose. Drive it with `hark board add/list/show/set/link/assign/close`. PLAN *references* the board; it never duplicates task state.",
   );
   lines.push(
     "- Migration boundary (binding, from `.hark/board-plan.md`): natively keyed + reconcilable → board; narrative prose → PLAN. Anything you'd otherwise track as a bullet's status belongs on the board.",
   );
   lines.push(
-    "- When you dispatch a worker, record it: `hark board set <taskId> status=in-progress agent_id=<agentId>`, and move tasks backlog→ready→in-progress→review→done as they advance. Don't write task sagas into Now/Next — model them as board tasks and let the Now bullet point at the workstream.",
+    "- **Inbox lives on the board.** New captures (the dashboard capture box, or `hark board add`) land as `inbox` tasks. Triage them: promote (`hark board set <id> status=backlog workstream=<ws>`) or close as noise (`hark board close <id>`). `hark board list status=inbox` is your required-pass drain — don't let bare captures pile up.",
+  );
+  lines.push(
+    "- **Shipped lives on the board.** Closing a task stamps `closed_at` + `closed_by`, so `hark board list status=done` IS the shipped log — no `## Shipped` prose. Close with attribution: `hark board close <id> by=<your session/PM id>`.",
+  );
+  lines.push(
+    "- When you dispatch a worker, record it: `hark board set <taskId> status=in-progress agent_id=<agentId>`, and move tasks backlog→ready→in-progress→review→done as they advance. Don't write task sagas into Now — model them as board tasks and let the Now bullet point at the workstream.",
   );
 
   lines.push("");
@@ -429,7 +433,7 @@ export function buildPmHeadBriefing(ctx: PmHeadBriefingContext): string {
     "- **Surface now** only what the user needs to decide or know right now (a blocker needing redirection, a feature ready to land).",
   );
   lines.push(
-    "- **Note to PLAN** the rest (a worker finished → move Now→Shipped; a new follow-up → Inbox), then move on.",
+    "- **Record on the board** the rest (a worker finished → `hark board close <taskId> by=<you>`; a new follow-up → `hark board add \"…\" status=inbox`), then move on.",
   );
   lines.push(
     "- A worker BLOCKED is a decision request: read its summary, decide the redirect, and `hark agent send`/`brief` it — don't let it sit.",

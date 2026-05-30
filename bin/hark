@@ -17,7 +17,11 @@ import {
   taskFileArg,
   injectTask,
 } from "../dist/lib/orch/cli.js";
-import { BoardStore } from "../dist/lib/orch/boardStore.js";
+import {
+  BoardStore,
+  ensureProjectBoardDb,
+  findProjectRoot,
+} from "../dist/lib/orch/boardStore.js";
 import { applyBoardOp, renderBoardResult } from "../dist/lib/orch/boardCli.js";
 
 // Read all of stdin to end (used for `--task-file -`). Returns the full text.
@@ -85,8 +89,10 @@ async function main() {
   }
 
   // The board acts directly on its SQLite source of truth — no server round-trip.
+  // It is per-project: resolve the project root from cwd and open that project's
+  // own board.db (migrating a legacy global board into place on first open).
   if (plan.kind === "board") {
-    const store = new BoardStore();
+    const store = new BoardStore(ensureProjectBoardDb(findProjectRoot(process.cwd())));
     try {
       const result = applyBoardOp(store, plan.op);
       process.stdout.write(renderBoardResult(result) + "\n");

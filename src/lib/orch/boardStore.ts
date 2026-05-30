@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -31,11 +32,16 @@ import { defaultOrchDir } from "./store.js";
 // Bumped when the schema changes shape. Stored in PRAGMA user_version. UNLIKE
 // metrics.db, a mismatch here is NOT a licence to wipe — the board is the source
 // of truth, so a future change must MIGRATE, not rebuild.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 // Task lifecycle at the *task* grain (mirrors the worker lifecycle, but a task
-// is not an agent). backlog → ready → in-progress → review → done, plus blocked.
+// is not an agent). inbox → backlog → ready → in-progress → review → done, plus
+// blocked. `inbox` is the pre-triage capture state: anything the dashboard
+// capture box or a quick `hark board add` drops in lands here until the PM
+// triages it (promote → backlog/ready, or close as noise). It REPLACES the old
+// PLAN.md `## Inbox` section — captures are keyed board rows now, not prose.
 export const BOARD_STATUSES = [
+  "inbox",
   "backlog",
   "ready",
   "in-progress",
@@ -123,6 +129,16 @@ export const MIGRATIONS: readonly Migration[] = [
       for (const ddl of SCHEMA_DDL) db.exec(ddl);
     },
   },
+  // v2 — shipped-log attribution. `closed_by` records WHO closed a task (the PM
+  // session / agent id) alongside the existing `closed_at` (WHEN), so the set of
+  // done tasks is a self-describing shipped log — no PLAN.md `## Shipped` prose
+  // needed. ALTER (never rebuild): a board in the field has real tasks.
+  {
+    to: 2,
+    up: (db) => {
+      db.exec("ALTER TABLE tasks ADD COLUMN closed_by TEXT");
+    },
+  },
 ];
 
 function readUserVersion(db: DatabaseSync): number {
@@ -172,9 +188,82 @@ export function runMigrations(
 // HARK_ORCH_DIR override (e.g. an isolated dogfood instance) carries the board
 // into the same sandbox. A SEPARATE FILE from metrics.db on purpose: wiping the
 // rebuildable metrics read-model must never clear the board source of truth.
+// LEGACY global board path (~/.hark/board.db). The board was originally a single
+// global file; it is now per-project (board-plan.md Part 5: the cell is
+// cross-workstream concurrency under ONE PM context, so the board must scope to
+// the project the PM holds context across, not to the host). This path survives
+// only as (a) the back-compat constructor default and (b) the one-time migration
+// SOURCE — `ensureProjectBoardDb` lifts it into the project's own `.hark/`.
 export function defaultBoardDbPath(): string {
   const orchDir = defaultOrchDir();
   return path.join(path.dirname(orchDir) || os.homedir(), "board.db");
+}
+
+// The per-project board lives beside the project's other `.hark/` coordination
+// files — one board per project root, the granularity the design doc requires.
+export function boardDbPathForProject(projectRoot: string): string {
+  return path.join(projectRoot, ".hark", "board.db");
+}
+
+// Resolve (and prepare) the board.db path for a project root: ensure `.hark/`
+// exists, and on the FIRST open migrate a legacy global ~/.hark/board.db into
+// place so the PM keeps its existing tasks across the per-project cutover. Idempotent
+// — once the project's board exists, the legacy file is never consulted again.
+export function ensureProjectBoardDb(projectRoot: string): string {
+  const target = boardDbPathForProject(projectRoot);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  if (!fs.existsSync(target)) {
+    const legacy = defaultBoardDbPath();
+    if (path.resolve(legacy) !== path.resolve(target) && fs.existsSync(legacy)) {
+      migrateLegacyBoard(legacy, target);
+    }
+  }
+  return target;
+}
+
+// Best-effort one-time lift of the legacy global board into a project board.
+// Uses SQLite's `VACUUM INTO` rather than a raw filesystem copy: it takes a read
+// snapshot and writes a fresh, consistent db at the target, so a writer on the
+// legacy file (e.g. a still-running old server) can't tear the copy the way
+// copyFileSync could (a half-written page set / a missed WAL frame). A failure
+// here must never block opening a fresh board at the target — so it swallows
+// errors and leaves the target absent (open then creates an empty board).
+function migrateLegacyBoard(legacy: string, target: string): void {
+  try {
+    const src = new DatabaseSync(legacy);
+    try {
+      src.exec("PRAGMA busy_timeout = 5000");
+      // VACUUM INTO needs a string literal; single-quote-escape the path. The
+      // target is guaranteed absent by the caller (VACUUM INTO refuses to
+      // overwrite), so a torn/partial target can never be left behind.
+      src.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+    } finally {
+      src.close();
+    }
+  } catch {
+    // Leave target absent — a fresh project board is created on open.
+  }
+}
+
+// Walk up from `startDir` to the nearest enclosing project root (a directory
+// holding a `.git`), falling back to `startDir` itself. Used by the `hark board`
+// CLI to scope to the project the PM is sitting in, mirroring how the board's
+// per-project granularity is defined.
+//
+// NOTE on worktrees: a linked git worktree has its own toplevel (its `.git` is a
+// file), so this resolves it to that worktree's own `.hark/board.db`, NOT the
+// main tree's. That is acceptable because the board is the PM-HEAD's tool, and
+// the PM-head runs at the main project root — workers in worktrees don't drive
+// the board. If that ever changes, resolve worktrees to their shared root via
+// `git rev-parse --git-common-dir`.
+export function findProjectRoot(startDir: string): string {
+  let dir = path.resolve(startDir);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return path.resolve(startDir);
+    dir = parent;
+  }
 }
 
 // Short, time-sortable, collision-resistant task id (mirrors store.ts genId).
@@ -200,6 +289,7 @@ export interface TaskRow {
   createdAt: number | null;
   updatedAt: number | null;
   closedAt: number | null;
+  closedBy: string | null;
 }
 
 export interface TaskEventRow {
@@ -223,6 +313,10 @@ export interface TaskFields {
   dependsOn?: string | null;
   orchId?: string | null;
   agentId?: string | null;
+  // Managed, not a generic settable field: `closed_by` is stamped only on a
+  // transition INTO done (and cleared when leaving done), so it always tracks
+  // the live close. The `close` verb passes it; the generic `set` CLI does not.
+  closedBy?: string | null;
 }
 
 // Column name (snake_case, as the CLI accepts it) → TaskFields key (camelCase).
@@ -249,6 +343,7 @@ const KEY_TO_COLUMN: Record<keyof TaskFields, string> = {
   dependsOn: "depends_on",
   orchId: "orch_id",
   agentId: "agent_id",
+  closedBy: "closed_by",
 };
 
 // PURE. Validate + collect a list of `field=value` tokens into a TaskFields.
@@ -319,6 +414,7 @@ export function toTaskRow(r: Record<string, unknown>): TaskRow {
     createdAt: r.created_at == null ? null : Number(r.created_at),
     updatedAt: r.updated_at == null ? null : Number(r.updated_at),
     closedAt: r.closed_at == null ? null : Number(r.closed_at),
+    closedBy: (r.closed_by as string) ?? null,
   };
 }
 
@@ -452,13 +548,15 @@ export class BoardStore {
         ts,
         ts,
       ];
-      // Closing on creation also stamps closed_at.
+      // Closing on creation also stamps closed_at + closed_by (who closed it).
       if (statusOf(fields) === "done") {
-        columns.push("closed_at");
-        values.push(ts);
+        columns.push("closed_at", "closed_by");
+        values.push(ts, fields.closedBy ?? null);
       }
       for (const key of Object.keys(fields) as (keyof TaskFields)[]) {
-        if (key === "status") continue; // already placed
+        // status is placed above; closedBy is managed by the done-transition
+        // (handled above / below), never a free column.
+        if (key === "status" || key === "closedBy") continue;
         const col = KEY_TO_COLUMN[key];
         columns.push(col);
         values.push(fields[key] ?? null);
@@ -473,16 +571,30 @@ export class BoardStore {
       return { task: this.getTask(id)!, changed: true };
     }
 
-    // Existing row: compute the genuine diff.
+    // Existing row: compute the genuine diff. closedBy is excluded — it is not a
+    // free column; the done-transition below stamps/clears it.
     const diff: Partial<Record<keyof TaskFields, string | null>> = {};
     for (const key of Object.keys(fields) as (keyof TaskFields)[]) {
+      if (key === "closedBy") continue;
       const next = fields[key] ?? null;
       // Every TaskFields key is also a TaskRow key (same camelCase names).
       const current = (existing[key as keyof TaskRow] as string | null) ?? null;
       if (next !== current) diff[key] = next;
     }
 
-    if (Object.keys(diff).length === 0) {
+    // Attribution can be CORRECTED on a task that is (and stays) done: an
+    // explicit, non-null closedBy that differs from the stored one. A bare close
+    // (closedBy null/omitted) never overwrites or clears it — omission means
+    // "leave as-is", which keeps a re-close idempotent. Only relevant when the
+    // status is NOT changing (a done-transition below already sets closed_by).
+    const nextStatus = diff.status !== undefined ? diff.status : existing.status;
+    const correctClosedBy =
+      diff.status === undefined &&
+      nextStatus === "done" &&
+      fields.closedBy != null &&
+      fields.closedBy !== existing.closedBy;
+
+    if (Object.keys(diff).length === 0 && !correctClosedBy) {
       // True no-op — the idempotency guarantee. Touch nothing.
       return { task: existing, changed: false };
     }
@@ -495,21 +607,27 @@ export class BoardStore {
     }
     setCols.push("updated_at = ?");
     setVals.push(ts);
-    // Transition INTO done stamps closed_at (only if not already closed);
-    // moving back out clears it, so the field tracks the live status.
+    // Transition INTO done stamps closed_at + closed_by; moving back out clears
+    // both, so the pair always tracks the live close (the shipped-log record).
+    const eventDiff: Partial<Record<keyof TaskFields, string | null>> = { ...diff };
     if (diff.status !== undefined) {
       if (diff.status === "done") {
-        setCols.push("closed_at = ?");
-        setVals.push(ts);
+        setCols.push("closed_at = ?", "closed_by = ?");
+        setVals.push(ts, fields.closedBy ?? null);
       } else {
-        setCols.push("closed_at = ?");
-        setVals.push(null);
+        setCols.push("closed_at = ?", "closed_by = ?");
+        setVals.push(null, null);
       }
+    } else if (correctClosedBy) {
+      // Re-attribute an already-done task without re-opening it.
+      setCols.push("closed_by = ?");
+      setVals.push(fields.closedBy ?? null);
+      eventDiff.closedBy = fields.closedBy ?? null;
     }
     this.db
       .prepare(`UPDATE tasks SET ${setCols.join(", ")} WHERE id = ?`)
       .run(...setVals, id);
-    this.appendEvent(id, "set", "task updated", diff);
+    this.appendEvent(id, "set", "task updated", eventDiff);
     return { task: this.getTask(id)!, changed: true };
   }
 

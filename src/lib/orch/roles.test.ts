@@ -192,12 +192,12 @@ describe("buildPmHeadBriefing", () => {
     expect(b).not.toContain(DONE_MARKER);
   });
 
-  it("teaches news triage (surface-now vs note-to-PLAN, don't dump)", () => {
+  it("teaches news triage (surface-now vs record-on-board, don't dump)", () => {
     const b = buildPmHeadBriefing(ctx);
     const low = b.toLowerCase();
     expect(low).toContain("team news");
     expect(low).toContain("surface");
-    expect(low).toContain("note to plan");
+    expect(low).toContain("record on the board");
   });
 
   it("surfaces the autonomy level when provided", () => {

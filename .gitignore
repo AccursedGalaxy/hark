@@ -8,6 +8,12 @@ dist
 public/index.html
 public/assets/
 
+# Per-project board — a local SQLite source of truth, per host, never committed
+# (the .hark/*.md coordination docs ARE tracked; only the db is ignored).
+.hark/board.db
+.hark/board.db-wal
+.hark/board.db-shm
+
 # Editor / scratch
 .playwright-mcp/
 *.png

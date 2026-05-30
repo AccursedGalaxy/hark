@@ -65,7 +65,7 @@ import {
   type Orchestration,
 } from "./shared/protocol.js";
 import { applyManagedBlock } from "./lib/claudemdBlock.js";
-import { appendCapture } from "./lib/projectCapture.js";
+import { captureToBoard } from "./lib/projectCapture.js";
 import {
   CLAUDE_MD_FILENAME,
   PLAN_FILENAME,
@@ -1080,9 +1080,11 @@ app.post("/api/projects/:key/capture", async (req, res) => {
     return;
   }
   try {
-    await appendCapture(project.root, project.name, body.text);
+    // Captures now land as `inbox` tasks on the project board (the keyed
+    // replacement for PLAN.md's old Inbox append).
+    const { taskId } = await captureToBoard(project.root, body.text);
     const info = await projectInfoForKey(project.key);
-    res.json({ ok: true, project: info });
+    res.json({ ok: true, taskId, project: info });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

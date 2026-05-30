@@ -45,19 +45,21 @@ describe("projectPlan", () => {
     expect(content.startsWith("# demo — PLAN")).toBe(true);
   });
 
-  it("bootstrap writes all five required section headers in order", async () => {
+  it("bootstrap writes the two narrative section headers in order", async () => {
     await bootstrapPlanIfMissing(dir, "demo");
     const { content } = await readPlan(dir);
     const northStar = content.indexOf("## North Star");
     const now = content.indexOf("## Now");
-    const next = content.indexOf("## Next");
-    const shipped = content.indexOf("## Shipped");
-    const inbox = content.indexOf("## Inbox");
     expect(northStar).toBeGreaterThanOrEqual(0);
     expect(now).toBeGreaterThan(northStar);
-    expect(next).toBeGreaterThan(now);
-    expect(shipped).toBeGreaterThan(next);
-    expect(inbox).toBeGreaterThan(shipped);
+  });
+
+  it("bootstrap no longer writes task-tracking sections (they live on the board)", async () => {
+    await bootstrapPlanIfMissing(dir, "demo");
+    const { content } = await readPlan(dir);
+    expect(content).not.toContain("## Next");
+    expect(content).not.toContain("## Shipped");
+    expect(content).not.toContain("## Inbox");
   });
 
   it("bootstrap is non-destructive when PLAN.md already has user content", async () => {

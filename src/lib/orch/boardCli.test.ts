@@ -149,6 +149,27 @@ describe("applyBoardOp against a real store", () => {
     db.close();
   });
 
+  it("close by=<who> records the closer in closed_by", () => {
+    const db = new BoardStore(":memory:", () => 7);
+    db.setTask("t1", { title: "x" });
+    const r = applyBoardOp(db, { verb: "close", id: "t1", by: "pm-head-42" });
+    if (r.kind === "task") {
+      expect(r.task.closedBy).toBe("pm-head-42");
+    }
+    db.close();
+  });
+
+  it("plans close by=<who> into the op", () => {
+    expect(plan(["close", "t1", "by=pm-7"])).toEqual({
+      kind: "op",
+      op: { verb: "close", id: "t1", by: "pm-7" },
+    });
+  });
+
+  it("rejects unexpected close args", () => {
+    expect(plan(["close", "t1", "status=done"]).kind).toBe("error");
+  });
+
   it("show returns the task + its event history", () => {
     const db = new BoardStore(":memory:", () => 1);
     db.setTask("t1", { title: "x", status: "ready" });
@@ -191,6 +212,7 @@ describe("renderBoardResult", () => {
         createdAt: 1,
         updatedAt: 1,
         closedAt: null,
+        closedBy: null,
       },
     });
     expect(out).toMatch(/^added task-1 \[backlog\] Build$/);
@@ -214,6 +236,7 @@ describe("renderBoardResult", () => {
         createdAt: 1,
         updatedAt: 1,
         closedAt: null,
+        closedBy: null,
       },
     });
     expect(out).toMatch(/\(unchanged\)$/);

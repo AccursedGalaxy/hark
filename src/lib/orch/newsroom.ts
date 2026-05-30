@@ -128,7 +128,7 @@ const KIND_VERB: Record<NewsKind, string> = {
 export function renderNewsForInjection(items: NewsItem[]): string {
   if (items.length === 0) return "";
   const lines: string[] = [];
-  lines.push("TEAM NEWS since your last turn (triage per your charter — surface what matters, note the rest to PLAN, don't dump it):");
+  lines.push("TEAM NEWS since your last turn (triage per your charter — surface what matters, record the rest on the board, don't dump it):");
   for (const it of items) {
     const who = it.role ? `${it.role}` : "team";
     const where = it.branch ? ` on \`${it.branch}\`` : "";

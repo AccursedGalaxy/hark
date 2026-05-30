@@ -88,28 +88,31 @@ describe("BoardStore schema", () => {
 
 describe("schema migrations", () => {
   // SF-1: a schema bump must EVOLVE an existing board.db, not rebuild it. Seed a
-  // db at v1 with real rows + history, then run a v2 migration (an ALTER that
-  // adds a column) against the SAME file. The rows + events must survive intact,
-  // the new column must be present, and user_version must advance to 2.
-  it("a v1->v2 bump evolves an existing db with real rows, losing no data", () => {
+  // db through the store (it lands at the current SCHEMA_VERSION) with real rows
+  // + history, then run a further synthetic migration (an ALTER that adds a
+  // column) against the SAME file. The rows + events must survive intact, the new
+  // column must be present, and user_version must advance.
+  it("a forward bump evolves an existing db with real rows, losing no data", () => {
     const dir = mkdtempSync(join(tmpdir(), "hark-board-migrate-"));
     const file = join(dir, "board.db");
     try {
-      // Seed v1 with genuine data through the normal store API (rows + events).
+      // Seed with genuine data through the normal store API (rows + events).
       const v1 = new BoardStore(file);
-      expect(v1.schemaVersion()).toBe(1);
+      expect(v1.schemaVersion()).toBe(SCHEMA_VERSION);
       v1.setTask("task-1", { title: "durable", status: "ready", assignee: "coder" });
       v1.setTask("task-2", { title: "second", status: "in-progress" });
       v1.setTask("task-1", { status: "review" }); // a second event on task-1
       v1.close();
 
-      // A synthetic forward migration to v2: add a column WITHOUT touching rows.
+      // A synthetic forward migration ABOVE the shipped schema: add a column
+      // WITHOUT touching rows. (Sits one past SCHEMA_VERSION so it always runs.)
       const addLabels: Migration = {
-        to: 2,
+        to: SCHEMA_VERSION + 1,
         up: (db) => db.exec("ALTER TABLE tasks ADD COLUMN labels TEXT"),
       };
 
-      // Run the full ordered list (v1 is skipped — already applied; v2 runs).
+      // Run the full ordered list (shipped migrations skipped — already applied;
+      // the synthetic one runs).
       const raw = new DatabaseSync(file);
       raw.exec("PRAGMA journal_mode = WAL");
       raw.exec("PRAGMA busy_timeout = 5000");
@@ -117,7 +120,7 @@ describe("schema migrations", () => {
 
       // Version advanced.
       const ver = raw.prepare("PRAGMA user_version").get() as { user_version: number };
-      expect(ver.user_version).toBe(2);
+      expect(ver.user_version).toBe(SCHEMA_VERSION + 1);
       // New shape present.
       const cols = (raw.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map(
         (c) => c.name,
@@ -155,7 +158,7 @@ describe("schema migrations", () => {
       v1.close();
 
       const boom: Migration = {
-        to: 2,
+        to: SCHEMA_VERSION + 1,
         up: (db) => {
           db.exec("ALTER TABLE tasks ADD COLUMN half_done TEXT");
           throw new Error("migration blew up mid-way");
@@ -167,9 +170,10 @@ describe("schema migrations", () => {
       raw.exec("PRAGMA busy_timeout = 5000");
       expect(() => runMigrations(raw, [...MIGRATIONS, boom])).toThrow(/blew up/);
 
-      // Rolled back: version still 1, the half-added column is gone, row intact.
+      // Rolled back: version stays at the shipped schema, the half-added column
+      // is gone, row intact.
       const ver = raw.prepare("PRAGMA user_version").get() as { user_version: number };
-      expect(ver.user_version).toBe(1);
+      expect(ver.user_version).toBe(SCHEMA_VERSION);
       const cols = (raw.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map(
         (c) => c.name,
       );
@@ -301,6 +305,109 @@ describe("setTask idempotency", () => {
     db.setTask("t1", { status: "review" });
     expect(db.getTask("t1")?.closedAt).toBeNull();
     db.close();
+  });
+
+  it("closing stamps closed_by (who) alongside closed_at (when)", () => {
+    const db = new BoardStore(":memory:");
+    db.setTask("t1", { title: "x" });
+    const closed = db.setTask("t1", { status: "done", closedBy: "pm-head-7" });
+    expect(closed.task.closedAt).not.toBeNull();
+    expect(closed.task.closedBy).toBe("pm-head-7");
+    db.close();
+  });
+
+  it("clears closed_by when a task moves back out of done", () => {
+    const db = new BoardStore(":memory:");
+    db.setTask("t1", { status: "done", closedBy: "pm-head-7" });
+    expect(db.getTask("t1")?.closedBy).toBe("pm-head-7");
+    db.setTask("t1", { status: "backlog" });
+    expect(db.getTask("t1")?.closedBy).toBeNull();
+    db.close();
+  });
+
+  it("closing on creation stamps closed_by", () => {
+    const db = new BoardStore(":memory:");
+    const r = db.setTask("t1", { title: "born done", status: "done", closedBy: "pm-9" });
+    expect(r.task.closedBy).toBe("pm-9");
+    expect(r.task.closedAt).not.toBeNull();
+    db.close();
+  });
+
+  it("an explicit closedBy corrects attribution on an already-done task", () => {
+    const db = new BoardStore(":memory:");
+    db.setTask("t1", { status: "done", closedBy: "alice" });
+    // Re-close with a different, explicit closer — must overwrite + record it.
+    const r = db.setTask("t1", { status: "done", closedBy: "bob" });
+    expect(r.changed).toBe(true);
+    expect(r.task.closedBy).toBe("bob");
+    const events = db.getEvents("t1");
+    expect((events[events.length - 1].data as { closedBy?: string }).closedBy).toBe("bob");
+    db.close();
+  });
+
+  it("a bare re-close (no closedBy) never clears existing attribution — stays a no-op", () => {
+    const db = new BoardStore(":memory:");
+    db.setTask("t1", { status: "done", closedBy: "alice" });
+    const r = db.setTask("t1", { status: "done" }); // no closedBy
+    expect(r.changed).toBe(false);
+    expect(r.task.closedBy).toBe("alice");
+    db.close();
+  });
+
+  it("accepts the inbox status (the keyed replacement for PLAN's Inbox)", () => {
+    const db = new BoardStore(":memory:");
+    const r = db.setTask("t1", { title: "captured note", status: "inbox" });
+    expect(r.task.status).toBe("inbox");
+    expect(db.listTasks({ status: "inbox" }).map((t) => t.id)).toEqual(["t1"]);
+    db.close();
+  });
+});
+
+// ---- Per-project path resolution + legacy migration ------------------------
+
+describe("ensureProjectBoardDb", () => {
+  it("creates <projectRoot>/.hark/board.db on first open", async () => {
+    const { ensureProjectBoardDb } = await import("./boardStore.js");
+    const root = mkdtempSync(join(tmpdir(), "hark-proj-"));
+    try {
+      const target = ensureProjectBoardDb(root);
+      expect(target).toBe(join(root, ".hark", "board.db"));
+      const db = new BoardStore(target);
+      db.setTask("t1", { title: "scoped" });
+      expect(db.getTask("t1")?.title).toBe("scoped");
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates a legacy global board into the project on first open", async () => {
+    const { ensureProjectBoardDb } = await import("./boardStore.js");
+    // Point the legacy global path at a temp orchestrations dir, seed a board
+    // there, then ensure a fresh project picks it up.
+    const base = mkdtempSync(join(tmpdir(), "hark-legacy-"));
+    const prev = process.env.HARK_ORCH_DIR;
+    process.env.HARK_ORCH_DIR = join(base, "orchestrations");
+    try {
+      const legacy = join(base, "board.db");
+      const seed = new BoardStore(legacy);
+      seed.setTask("legacy-task", { title: "from the old global board", status: "ready" });
+      seed.close();
+
+      const root = mkdtempSync(join(tmpdir(), "hark-proj-"));
+      try {
+        const target = ensureProjectBoardDb(root);
+        const db = new BoardStore(target);
+        expect(db.getTask("legacy-task")?.title).toBe("from the old global board");
+        db.close();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    } finally {
+      if (prev === undefined) delete process.env.HARK_ORCH_DIR;
+      else process.env.HARK_ORCH_DIR = prev;
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 
