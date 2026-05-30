@@ -425,9 +425,11 @@ export interface OrchAgent {
   // Undefined for legacy cold-team agents (their charter is the whole goal).
   // Threaded into the briefing so the worker knows what slice it owns.
   task?: string;
-  // Id of an upstream agent this worker's work derives from. Reserved for the
-  // handoff-time worktree derivation (PLAN inbox item); carried here so the
-  // head can express dependencies at spawn time.
+  // Id of an upstream agent this worker's work derives from. Drives handoff-time
+  // worktree derivation: a --depends-on worker is DEFERRED at spawn (pending, no
+  // worktree) until the upstream hands off (review/done), then its worktree is
+  // branched off the upstream's branch HEAD so it inherits the upstream's commits
+  // (see resolveDependentBase / Orchestrator.materializeDependents).
   dependsOn?: string;
   metrics: AgentMetrics;
 }
