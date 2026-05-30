@@ -14,10 +14,15 @@ import {
 import {
   MetricsDb,
   SCHEMA_VERSION,
+  analyzeCostPerTurn,
   captureTurns,
   classifyToolCalls,
   headAgentId,
+  missingColumnAlters,
   tokenSampleRow,
+  type AgentCostPerTurn,
+  type CapturedTurn,
+  type ClassifiedToolCall,
 } from "./metricsDb.js";
 
 // ---- Cost calculator (the pricing shared with the web bundle) --------------
@@ -748,3 +753,227 @@ function readAll(db: MetricsDb, sql: string): Record<string, unknown>[] {
   const handle = (db as unknown as { db: DatabaseSync }).db;
   return handle.prepare(sql).all() as Record<string, unknown>[];
 }
+
+function columnNames(db: MetricsDb, table: string): string[] {
+  return readAll(db, `PRAGMA table_info(${table})`).map((r) => String(r.name));
+}
+
+// ---- Additive migration (the lying-version repair) -------------------------
+
+describe("missingColumnAlters", () => {
+  it("emits ADD COLUMN only for columns the table lacks", () => {
+    // A v2-shape tool_calls (none of the v3 result-side columns present).
+    const v2ToolCalls = [
+      "id", "call_id", "agent_id", "orch_id", "session_id", "turn_index",
+      "turn_uuid", "batch_size", "batch_position", "channel", "ts",
+    ];
+    expect(missingColumnAlters("tool_calls", v2ToolCalls)).toEqual([
+      "ALTER TABLE tool_calls ADD COLUMN result_seen INTEGER",
+      "ALTER TABLE tool_calls ADD COLUMN is_error INTEGER",
+      "ALTER TABLE tool_calls ADD COLUMN result_ts INTEGER",
+      "ALTER TABLE tool_calls ADD COLUMN outcome_class TEXT",
+      "ALTER TABLE tool_calls ADD COLUMN cascade INTEGER",
+    ]);
+  });
+
+  it("is idempotent — a fully-migrated table needs no ALTERs", () => {
+    const v3ToolCalls = [
+      "id", "call_id", "channel", "ts",
+      "result_seen", "is_error", "result_ts", "outcome_class", "cascade",
+    ];
+    expect(missingColumnAlters("tool_calls", v3ToolCalls)).toEqual([]);
+  });
+
+  it("emits only the still-missing columns for a half-applied migration", () => {
+    // Crashed after adding result_seen + is_error; the rest must still come.
+    const partial = ["id", "call_id", "channel", "result_seen", "is_error"];
+    expect(missingColumnAlters("tool_calls", partial)).toEqual([
+      "ALTER TABLE tool_calls ADD COLUMN result_ts INTEGER",
+      "ALTER TABLE tool_calls ADD COLUMN outcome_class TEXT",
+      "ALTER TABLE tool_calls ADD COLUMN cascade INTEGER",
+    ]);
+  });
+
+  it("scopes to the requested table (turns gets its own additive columns)", () => {
+    const v2Turns = [
+      "id", "agent_id", "orch_id", "session_id", "turn_index", "uuid", "ts",
+      "model", "tool_call_count", "stop_reason",
+    ];
+    expect(missingColumnAlters("turns", v2Turns)).toEqual([
+      "ALTER TABLE turns ADD COLUMN is_api_error INTEGER",
+      "ALTER TABLE turns ADD COLUMN retry_attempt INTEGER",
+    ]);
+  });
+});
+
+describe("MetricsDb migration — repairs the lying-version DB", () => {
+  // Reproduce the production bug: a DB whose turns/tool_calls are at the v2
+  // shape but whose user_version was already stamped 3 (the version lies). Open
+  // MetricsDb on it and prove the v3 columns are added, prior rows survive, and
+  // the outcome write/read path works — without ever trusting user_version.
+  it("adds the v3 columns to a pre-existing v2 DB whose version already claims 3", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hark-metrics-mig-"));
+    const file = join(dir, "metrics.db");
+    try {
+      // Hand-build the v2 shape (no result-side / no platform-self-report cols).
+      const raw = new DatabaseSync(file);
+      raw.exec(`CREATE TABLE tool_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, call_id TEXT, agent_id TEXT,
+        orch_id TEXT, session_id TEXT, turn_index INTEGER, turn_uuid TEXT,
+        batch_size INTEGER, batch_position INTEGER, channel TEXT, ts INTEGER)`);
+      raw.exec("CREATE UNIQUE INDEX idx_tool_calls_call_id ON tool_calls (call_id)");
+      raw.exec(`CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, orch_id TEXT,
+        session_id TEXT, turn_index INTEGER, uuid TEXT, ts INTEGER, model TEXT,
+        tool_call_count INTEGER, stop_reason TEXT)`);
+      raw.exec("CREATE UNIQUE INDEX idx_turns_agent_index ON turns (agent_id, turn_index)");
+      // A pre-existing v2 row that must survive the migration.
+      raw
+        .prepare(
+          `INSERT INTO tool_calls
+             (call_id, agent_id, orch_id, turn_index, batch_size, batch_position, channel, ts)
+           VALUES ('old-call', 'ag-old', 'orch-1', 0, 1, 0, 'Bash', 1)`,
+        )
+        .run();
+      raw.exec("PRAGMA user_version = 3"); // the lie: version says 3, columns are v2
+      raw.close();
+
+      const db = new MetricsDb(file);
+
+      // The v3 columns now exist on both tables.
+      for (const col of ["result_seen", "is_error", "result_ts", "outcome_class", "cascade"]) {
+        expect(columnNames(db, "tool_calls")).toContain(col);
+      }
+      for (const col of ["is_api_error", "retry_attempt"]) {
+        expect(columnNames(db, "turns")).toContain(col);
+      }
+
+      // Historical row preserved; its new columns are null (attribute forward,
+      // never backfill).
+      const old = readAll(db, "SELECT call_id, outcome_class, result_seen FROM tool_calls WHERE call_id='old-call'");
+      expect(old).toHaveLength(1);
+      expect(old[0].outcome_class).toBeNull();
+      expect(old[0].result_seen).toBeNull();
+
+      // The previously-dead write path now works end-to-end.
+      const turn: CapturedTurn = {
+        turnIndex: 0,
+        uuid: "u0",
+        ts: 10,
+        model: "claude-opus-4-8",
+        stopReason: "tool_use",
+        isApiError: false,
+        retryAttempt: null,
+        toolCalls: [
+          { callId: "c-new", channel: "Bash", batchPosition: 0, resultSeen: true, isError: true, resultTs: 11 },
+        ],
+      };
+      db.ingestTurns("ag-new", "orch-1", "sess-1", [turn]);
+      const classified: ClassifiedToolCall[] = [
+        {
+          callId: "c-new", turnIndex: 0, channel: "Bash", batchPosition: 0,
+          batchSize: 1, resultSeen: true, isError: true, resultTs: 11,
+          outcomeClass: "worker_misread_candidate", cascade: false,
+        },
+      ];
+      expect(db.applyToolCallOutcomes(classified)).toBe(1);
+      const outcomes = db.getToolCallOutcomes({ agentId: "ag-new" });
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0].outcomeClass).toBe("worker_misread_candidate");
+      expect(outcomes[0].isError).toBe(true);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---- Cost-per-turn outlier proxy (live wedge detector) ---------------------
+
+describe("analyzeCostPerTurn", () => {
+  const mk = (agentId: string, costUsd: number, turns: number): AgentCostPerTurn => ({
+    agentId, role: null, costUsd, turns, costPerTurn: turns > 0 ? costUsd / turns : 0,
+  });
+
+  it("flags the cost-per-turn outlier (the mprai81x shape) and not the healthy peers", () => {
+    // Head + 4 healthy workers cluster near $0.9–1.3/turn; one wedged worker at
+    // $3.82/turn. The wedged one trips; nobody else does.
+    const rows = [
+      mk("head", 297, 338), // ~0.88/turn
+      mk("w1", 195, 152), // ~1.28
+      mk("w2", 54, 145), // ~0.37
+      mk("w3", 41, 123), // ~0.33
+      mk("w4", 33, 115), // ~0.29
+      mk("wedged", 630, 165), // ~3.82
+    ];
+    const report = analyzeCostPerTurn(rows);
+    expect(report.outliers.map((o) => o.agentId)).toEqual(["wedged"]);
+    expect(report.outliers[0].z).toBeGreaterThan(2);
+    // Sorted desc by cost/turn, wedged on top.
+    expect(report.agents[0].agentId).toBe("wedged");
+  });
+
+  it("ignores agents below minTurns — a 2-turn agent can't be a stable outlier", () => {
+    const rows = [
+      mk("a", 10, 100), mk("b", 11, 100), mk("c", 12, 100),
+      mk("spike", 8, 2), // $4/turn but only 2 turns — noise, excluded
+    ];
+    const report = analyzeCostPerTurn(rows, { minTurns: 5 });
+    expect(report.agents.map((a) => a.agentId)).not.toContain("spike");
+    expect(report.outliers).toEqual([]);
+  });
+
+  it("returns no outliers when the cohort is too small for a stable distribution", () => {
+    const rows = [mk("a", 100, 10), mk("b", 1, 10)]; // 2 agents < minAgents default 3
+    const report = analyzeCostPerTurn(rows);
+    expect(report.outliers).toEqual([]);
+  });
+
+  it("returns no outliers when every agent costs the same per turn (mad 0, meanAd 0)", () => {
+    const rows = [mk("a", 10, 10), mk("b", 20, 20), mk("c", 30, 30)]; // all $1/turn
+    const report = analyzeCostPerTurn(rows);
+    expect(report.mad).toBe(0);
+    expect(report.outliers).toEqual([]);
+  });
+});
+
+describe("MetricsDb.costPerTurnReport", () => {
+  it("computes per-agent cost/turn from token_samples and flags the outlier", () => {
+    const db = new MetricsDb(":memory:");
+    // Cumulative token_samples (the table appends; MAX = final standing). Model
+    // the head + healthy workers + one wedged worker burning input every turn.
+    const sample = (agentId: string, turns: number, inputTokens: number) =>
+      db.insertTokenSample({
+        sessionId: null, agentId, orchId: "orch-1", ts: turns,
+        inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+        turns, model: "claude-opus-4-8",
+      });
+    // cost is priced from tokens; pick input so cost/turn separates clearly.
+    sample("head", 300, 300 * 60_000); // ~uniform
+    sample("w1", 150, 150 * 60_000);
+    sample("w2", 140, 140 * 55_000);
+    sample("w3", 120, 120 * 58_000);
+    // wedged: same turns as w1 but ~5x the input/turn → a clear cost/turn spike.
+    sample("wedged", 150, 150 * 300_000);
+
+    const report = db.costPerTurnReport("orch-1");
+    expect(report.outliers.map((o) => o.agentId)).toEqual(["wedged"]);
+    expect(report.agents[0].agentId).toBe("wedged");
+    expect(report.agents.find((a) => a.agentId === "wedged")!.costPerTurn).toBeGreaterThan(
+      report.agents.find((a) => a.agentId === "head")!.costPerTurn,
+    );
+    db.close();
+  });
+
+  it("scopes to one orchestration", () => {
+    const db = new MetricsDb(":memory:");
+    db.insertTokenSample({
+      sessionId: null, agentId: "other", orchId: "orch-2", ts: 1,
+      inputTokens: 999_000_000, outputTokens: 0, cacheReadTokens: 0,
+      cacheCreationTokens: 0, turns: 1, model: "claude-opus-4-8",
+    });
+    const report = db.costPerTurnReport("orch-1");
+    expect(report.agents).toEqual([]);
+    db.close();
+  });
+});

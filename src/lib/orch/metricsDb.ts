@@ -26,16 +26,68 @@ import type {
 // mappers, the cost calc via shared/pricing), a thin runtime wrapper (the
 // MetricsDb class) below. Zero new deps — Node's built-in node:sqlite.
 
-// Bumped when the schema changes shape. Stored in PRAGMA user_version; a
-// mismatch is the signal to drop + rebuild (Phase 0 just records it — the DB
-// is rebuildable, so a future migration can wipe rather than migrate).
-// v2 adds the turns/tool_calls capture tables (transport instrumentation).
-// v3 adds the result-side columns (result_seen / is_error / result_ts on
-// tool_calls; is_api_error / retry_attempt on turns) plus the mutable
-// outcome_class / cascade verdict columns the transport detector writes. The DB
-// is rebuildable, so the bump just wipes + re-ingests from transcripts — no
-// migration code, and the new columns are populated on the next ingest.
+// Bumped when the schema changes shape. Recorded in PRAGMA user_version, but
+// user_version is ADVISORY ONLY — it is never the input to a migration decision
+// (see migrate() below). v2 adds the turns/tool_calls capture tables (transport
+// instrumentation). v3 adds the result-side columns (result_seen / is_error /
+// result_ts on tool_calls; is_api_error / retry_attempt on turns) plus the
+// mutable outcome_class / cascade verdict columns the transport detector writes.
+//
+// HISTORY — the lying-version bug this code now fixes: v3 originally shipped as
+// a version bump with NO migration, on the assumption the DB was rebuildable
+// (wipe + re-ingest). In production the DB was never wiped, so the v3 columns
+// were never added — `CREATE TABLE IF NOT EXISTS` cannot add a column to a table
+// that already exists — yet the constructor stamped user_version=3 anyway. The
+// version claimed v3 while the tables stayed v2; classifyToolCalls had no
+// columns to write to and every cascade since went uninstrumented. Fix: an
+// introspection-driven additive migration (ADDITIVE_COLUMNS + migrate()) that
+// adds missing columns regardless of what user_version claims, and the version
+// is bumped only AFTER it succeeds.
 export const SCHEMA_VERSION = 3;
+
+// Columns added to a table AFTER its initial CREATE. `CREATE TABLE IF NOT
+// EXISTS` only ever creates a table once, so a DB created at an older schema
+// keeps its original column set and silently lacks every entry here. This list
+// is applied by introspection (PRAGMA table_info) on every open — NOT keyed on
+// user_version, which may lie — so a DB whose version was bumped without the
+// columns ever being added self-heals. `ALTER TABLE … ADD COLUMN` is SQLite's
+// one safe online migration: it appends a nullable column and leaves historical
+// rows null. We attribute FORWARD and never backfill — the raw is_error /
+// result_seen signal was never recorded on pre-fix rows, so a backfill would be
+// fabrication. Append future additive columns here; that is the whole migration.
+export interface ColumnSpec {
+  table: string;
+  column: string;
+  type: string;
+}
+export const ADDITIVE_COLUMNS: readonly ColumnSpec[] = [
+  // v3 — result-side outcome columns on tool_calls (the transport detector's
+  // mutable verdict; result_seen=0 is the dropped/in-flight signal).
+  { table: "tool_calls", column: "result_seen", type: "INTEGER" },
+  { table: "tool_calls", column: "is_error", type: "INTEGER" },
+  { table: "tool_calls", column: "result_ts", type: "INTEGER" },
+  { table: "tool_calls", column: "outcome_class", type: "TEXT" },
+  { table: "tool_calls", column: "cascade", type: "INTEGER" },
+  // v3 — assistant-turn platform self-reports on turns.
+  { table: "turns", column: "is_api_error", type: "INTEGER" },
+  { table: "turns", column: "retry_attempt", type: "INTEGER" },
+];
+
+// The ALTER statements needed to bring `table` up to date, given the columns it
+// currently has. Pure + exported so the migration PLAN is unit-testable with no
+// DB: pass the existing column names and assert the emitted DDL. A column
+// already present is skipped, so this is idempotent — re-running over an
+// already-migrated (or half-migrated) table emits only what is still missing.
+export function missingColumnAlters(
+  table: string,
+  existing: readonly string[],
+  specs: readonly ColumnSpec[] = ADDITIVE_COLUMNS,
+): string[] {
+  const have = new Set(existing);
+  return specs
+    .filter((s) => s.table === table && !have.has(s.column))
+    .map((s) => `ALTER TABLE ${s.table} ADD COLUMN ${s.column} ${s.type}`);
+}
 
 // CREATE TABLE IF NOT EXISTS statements, applied idempotently on open.
 export const SCHEMA_DDL: readonly string[] = [
@@ -623,6 +675,91 @@ export interface ToolCallOutcomeRow {
   cascade: boolean;
 }
 
+// ---- Cost-per-turn outlier detector (live wedge / silent-hang proxy) --------
+//
+// The proxy that ships BEFORE the transport instrumentation is repaired (and
+// works on historical data the migration can't backfill): a wedged agent — the
+// cancel-cascade spiral — keeps re-sending an ever-growing poisoned context
+// every turn, so its cost PER TURN runs far above its healthy peers
+// (agent-mprai81x burned $3.82/turn against a $0.88 head while spiralling). That
+// needs none of the outcome columns: token_samples (intact since Phase 0)
+// already carries cumulative cost + turns per agent. Flag agents whose
+// cost-per-turn is a statistical outlier within their own orchestration.
+
+export interface AgentCostPerTurn {
+  agentId: string;
+  role: string | null;
+  costUsd: number;
+  turns: number;
+  costPerTurn: number;
+}
+
+export interface CostPerTurnOutlier extends AgentCostPerTurn {
+  z: number; // modified (MAD-based) z-score above the orchestration median
+}
+
+export interface CostPerTurnReport {
+  agents: AgentCostPerTurn[]; // qualifying agents (turns >= minTurns), desc by cost/turn
+  median: number; // median cost/turn of the cohort
+  mad: number; // median absolute deviation (the robust spread)
+  outliers: CostPerTurnOutlier[];
+}
+
+export interface CostPerTurnOptions {
+  z?: number; // modified-z threshold to flag (default 3.5, the Iglewicz–Hoaglin value)
+  minAgents?: number; // distribution needs at least this many qualifying agents (default 3)
+  minTurns?: number; // ignore agents below this — cost/turn is noisy in the first few turns (default 5)
+}
+
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+// Pure: given each agent's cumulative cost + turns, flag the high cost-per-turn
+// outliers within the cohort. Uses the ROBUST modified z-score (median + MAD,
+// Iglewicz–Hoaglin) — NOT mean/stddev — on purpose: a wedged agent's runaway
+// cost/turn would inflate the very stddev used to judge it, and for a small
+// cohort the mean/stddev z-score is mathematically capped below 2 (max z is
+// (n-1)/√n ≈ 1.79 at n=5), so the spiral we are hunting could never trip it.
+// The median + MAD are unmoved by the outlier, so the wedged agent's score is
+// huge and the healthy peers stay near 0. MeanAD is the fallback denominator
+// when >half the cohort shares one value (MAD=0). Returns no outliers when the
+// cohort is too small (< minAgents) or perfectly uniform. DB-free + unit-testable.
+export function analyzeCostPerTurn(
+  rows: readonly AgentCostPerTurn[],
+  opts: CostPerTurnOptions = {},
+): CostPerTurnReport {
+  const z = opts.z ?? 3.5;
+  const minAgents = opts.minAgents ?? 3;
+  const minTurns = opts.minTurns ?? 5;
+  const agents = rows
+    .filter((r) => r.turns >= minTurns)
+    .sort((a, b) => b.costPerTurn - a.costPerTurn);
+  if (agents.length < minAgents) {
+    return { agents, median: 0, mad: 0, outliers: [] };
+  }
+  const cpt = agents.map((a) => a.costPerTurn);
+  const med = median(cpt);
+  const absDev = cpt.map((x) => Math.abs(x - med));
+  const mad = median(absDev);
+  // Iglewicz–Hoaglin: 0.6745 scales MAD to a stddev-equivalent. When MAD=0
+  // (>half the cohort identical), fall back to the mean absolute deviation
+  // (scaled by 1.253314). When both are 0 the cohort is uniform → no outliers.
+  const meanAd = absDev.reduce((s, d) => s + d, 0) / absDev.length;
+  const score = (x: number): number => {
+    if (mad > 0) return (0.6745 * (x - med)) / mad;
+    if (meanAd > 0) return (x - med) / (1.253314 * meanAd);
+    return 0;
+  };
+  const outliers = agents
+    .map((a) => ({ ...a, z: score(a.costPerTurn) }))
+    .filter((a) => a.z >= z);
+  return { agents, median: med, mad, outliers };
+}
+
 // ---- Runtime wrapper --------------------------------------------------------
 
 export class MetricsDb {
@@ -634,8 +771,40 @@ export class MetricsDb {
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = OFF");
+    // 1. Create any missing tables (fresh/old DBs). On a fresh DB this lays down
+    //    the full current shape; on an existing DB every statement no-ops.
     for (const ddl of SCHEMA_DDL) this.db.exec(ddl);
+    // 2. Add any columns missing from tables that predate the current shape.
+    //    Must run AFTER step 1 (the tables must exist) and BEFORE the version
+    //    bump (step 3) so the version is only advanced once the columns it
+    //    claims actually exist.
+    this.migrate();
+    // 3. Record the version. If migrate() threw, this never runs and the next
+    //    open retries — the version can't get ahead of the schema. And because
+    //    migrate() reads ACTUAL columns rather than this value, a DB whose
+    //    version already lies (the v3 bug) is still repaired on open.
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  }
+
+  // The column names currently present on a table, per the live DB. The truth
+  // the migration trusts — never user_version.
+  private columnsOf(table: string): string[] {
+    const rows = this.db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as Array<{ name?: string }>;
+    return rows.map((r) => String(r.name));
+  }
+
+  // Apply the additive column migrations. Introspection-driven and idempotent:
+  // each table's missing columns are computed from its actual schema, so this is
+  // safe to run on every open and self-heals a half-applied migration (a crash
+  // after the first ADD COLUMN just re-emits the rest next open).
+  private migrate(): void {
+    for (const table of new Set(ADDITIVE_COLUMNS.map((c) => c.table))) {
+      for (const alter of missingColumnAlters(table, this.columnsOf(table))) {
+        this.db.exec(alter);
+      }
+    }
   }
 
   schemaVersion(): number {
@@ -880,6 +1049,47 @@ export class MetricsDb {
       outcomeClass: r.outcome_class == null ? null : String(r.outcome_class),
       cascade: r.cascade === 1,
     }));
+  }
+
+  // Per-agent cumulative cost + turns for one orchestration, from token_samples.
+  // The table appends a cumulative-tally row each tick, so MAX(cost_usd)/MAX(turns)
+  // is the final standing per agent (both are monotonic). role is joined from the
+  // agents snapshot for display (null if the agent row isn't upserted yet).
+  costPerTurnRows(orchId: string): AgentCostPerTurn[] {
+    const rows = this.db
+      .prepare(
+        `SELECT ts.agent_id AS agent_id,
+                MAX(ts.cost_usd) AS cost_usd,
+                MAX(ts.turns)    AS turns,
+                a.role           AS role
+           FROM token_samples ts
+           LEFT JOIN agents a ON a.id = ts.agent_id
+          WHERE ts.orch_id = ?
+          GROUP BY ts.agent_id`,
+      )
+      .all(orchId) as Record<string, unknown>[];
+    return rows.map((r) => {
+      const costUsd = Number(r.cost_usd ?? 0);
+      const turns = Number(r.turns ?? 0);
+      return {
+        agentId: String(r.agent_id),
+        role: r.role == null ? null : String(r.role),
+        costUsd,
+        turns,
+        costPerTurn: turns > 0 ? costUsd / turns : 0,
+      };
+    });
+  }
+
+  // The live wedge/silent-hang proxy: cost-per-turn outliers within one
+  // orchestration. Computable today off token_samples alone — no transport
+  // instrumentation required, and it sees historical agents the migration can't
+  // backfill. See analyzeCostPerTurn.
+  costPerTurnReport(
+    orchId: string,
+    opts: CostPerTurnOptions = {},
+  ): CostPerTurnReport {
+    return analyzeCostPerTurn(this.costPerTurnRows(orchId), opts);
   }
 
   close(): void {
