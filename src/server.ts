@@ -29,7 +29,12 @@ import { spawnClaudeSession } from "./lib/spawnSession.js";
 import { OrchStore } from "./lib/orch/store.js";
 import { Orchestrator } from "./lib/orch/orchestrator.js";
 import { AutonomyController, type TranscriptMetrics } from "./lib/orch/controller.js";
-import { MetricsDb, captureTurns, headAgentId } from "./lib/orch/metricsDb.js";
+import {
+  MetricsDb,
+  captureTurns,
+  classifyToolCalls,
+  headAgentId,
+} from "./lib/orch/metricsDb.js";
 import {
   correlateAgentSessions,
   correlateHeadSessions,
@@ -1857,7 +1862,12 @@ async function ingestMetrics(
       // idempotent). Independent of the token sample below — intent is recorded
       // whenever we read the transcript, never gated on a tool result.
       const events = agentEvents.get(a.id);
-      if (events) db.ingestTurns(a.id, orchId, a.sessionId, captureTurns(events));
+      if (events) {
+        db.ingestTurns(a.id, orchId, a.sessionId, captureTurns(events));
+        // Classify transport outcomes over the FULL transcript each tick (not
+        // just fresh turns) so in-flight verdicts re-settle as results land.
+        db.applyToolCallOutcomes(classifyToolCalls(events));
+      }
       const tm = samples.get(a.id);
       if (!tm) continue; // no session/transcript read this tick
       db.insertTokenSample({
@@ -1882,6 +1892,7 @@ async function ingestMetrics(
           fresh.head.sessionId,
           captureTurns(headEvents),
         );
+        db.applyToolCallOutcomes(classifyToolCalls(headEvents));
       }
       if (headTm) {
         db.insertTokenSample({
