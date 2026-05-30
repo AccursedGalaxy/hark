@@ -290,6 +290,9 @@ describe("Orchestrator.spawnHead", () => {
     // Spawned with the head env + skip-permissions posture + hark on PATH.
     const call = calls.spawnCalls.find((c) => c.cwd === head.worktreeDir)!;
     expect(call.command).toContain("--dangerously-skip-permissions");
+    // ...and deny the sub-agent spawners so a wedged head can't fan the
+    // cancel-cascade out into nested sub-agents (defense-in-depth).
+    expect(call.command).toContain("--disallowed-tools Task,Agent");
     expect(call.env?.HARK_ROLE).toBe("head");
     expect(call.env?.HARK_ORCH_ID).toBe(created.orchestration.id);
     expect(call.env?.HARK_API).toBe("http://localhost:3000");
@@ -340,6 +343,9 @@ describe("Orchestrator.spawnAgent task/dependsOn", () => {
     const call = calls.spawnCalls.find((c) => c.cwd === a.worktreeDir)!;
     expect(call.env?.HARK_ROLE).toBe("coder");
     expect(call.command).toContain("--dangerously-skip-permissions");
+    // ...and deny the sub-agent spawners so a wedged worker can't fan the
+    // cancel-cascade out into nested sub-agents (defense-in-depth).
+    expect(call.command).toContain("--disallowed-tools Task,Agent");
 
     // The dispatched task flows into the briefing.
     const persisted = await store.getOrchestration(created.orchestration.id);
