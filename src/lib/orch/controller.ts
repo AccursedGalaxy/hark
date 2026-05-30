@@ -8,6 +8,7 @@ import type { Orchestrator } from "./orchestrator.js";
 import { costOfUsage, pricingForModel } from "../../shared/pricing.js";
 import {
   DEFAULT_AUTONOMY_LEVEL,
+  isHandoffReady,
   isTerminalLifecycle,
   type AgentLifecycle,
   type AgentMetrics,
@@ -983,6 +984,14 @@ export class AutonomyController {
           await this.routeManagedHead(orch, agent, note);
         }
       }
+      // Lazy-branch-at-handoff: a worker reaching a handoff-ready lifecycle
+      // (review/done) is the trigger for any DEFERRED --depends-on workers to
+      // fork its branch HEAD and spawn. Idempotent in the orchestrator, so the
+      // marker path here and the reconcile path (wakeHeadForTerminal) can both
+      // cover it without double-spawning.
+      if (isHandoffReady(action.lifecycle)) {
+        await this.deps.orchestrator.materializeDependents(orch.id, agent.id);
+      }
     }
 
     return action;
@@ -1023,6 +1032,14 @@ export class AutonomyController {
       }
     } catch {
       /* best-effort — the guard is set; the record carries the summary/reason */
+    }
+
+    // A terminal `done` is also a handoff: materialize any deferred dependents
+    // off its branch. Covers the reconcile-detected done (no marker reached
+    // onAgentSignal). Idempotent + a no-op for the other terminals (blocked /
+    // failed / stopped aren't handoff-ready, so there's nothing worth forking).
+    if (isHandoffReady(agent.lifecycle)) {
+      await this.deps.orchestrator.materializeDependents(orchId, agentId);
     }
   }
 

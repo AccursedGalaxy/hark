@@ -323,17 +323,15 @@ describe("Orchestrator.createWithHead", () => {
 });
 
 describe("Orchestrator.spawnAgent task/dependsOn", () => {
-  it("records the dispatched task + dependency and clears trust per worker", async () => {
+  it("records the dispatched task and spawns a worker with no dependency", async () => {
     const { deps, calls } = makeDeps(store);
     const orch = new Orchestrator(deps);
     const created = await orch.createTeam({ ...teamInput, roles: [] });
 
     const a = await orch.spawnAgent(created.orchestration.id, "coder", {
       task: "Implement the parser",
-      dependsOn: "agent-upstream",
     });
     expect(a.task).toBe("Implement the parser");
-    expect(a.dependsOn).toBe("agent-upstream");
     expect(calls.trustCleared).toContain(a.worktreeDir);
 
     // Worker env carries its role (gates it OUT of spawning) + orch id.
@@ -345,6 +343,99 @@ describe("Orchestrator.spawnAgent task/dependsOn", () => {
     const persisted = await store.getOrchestration(created.orchestration.id);
     const briefing = orch.briefingFor(persisted!, persisted!.agents[0]);
     expect(briefing).toContain("Implement the parser");
+  });
+
+  it("DEFERS a --depends-on worker whose upstream has not handed off yet", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const created = await orch.createTeam({ ...teamInput, roles: [] });
+    const upstream = await orch.spawnAgent(created.orchestration.id, "coder", {
+      task: "upstream slice",
+    });
+    calls.added.length = 0;
+    calls.spawned.length = 0;
+
+    const dep = await orch.spawnAgent(created.orchestration.id, "reviewer", {
+      task: "review the slice",
+      dependsOn: upstream.id,
+    });
+
+    // Bookkeeping is recorded, but NO worktree / session was created — it's
+    // deferred until the upstream hands off.
+    expect(dep.task).toBe("review the slice");
+    expect(dep.dependsOn).toBe(upstream.id);
+    expect(dep.lifecycle).toBe("pending");
+    expect(calls.added).toHaveLength(0);
+    expect(calls.spawned).toHaveLength(0);
+    const events = await store.readEvents(created.orchestration.id);
+    expect(
+      events.some(
+        (e) => e.kind === "checkpoint" && e.data?.kind === "deferred",
+      ),
+    ).toBe(true);
+  });
+
+  it("materializeDependents forks the upstream branch once it hands off", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const created = await orch.createTeam({ ...teamInput, roles: [] });
+    const upstream = await orch.spawnAgent(created.orchestration.id, "coder", {
+      task: "upstream slice",
+    });
+    const dep = await orch.spawnAgent(created.orchestration.id, "reviewer", {
+      task: "review the slice",
+      dependsOn: upstream.id,
+    });
+    calls.added.length = 0;
+    calls.spawned.length = 0;
+
+    // Before the upstream hands off, nothing materializes.
+    expect(
+      await orch.materializeDependents(created.orchestration.id, upstream.id),
+    ).toHaveLength(0);
+    expect(calls.added).toHaveLength(0);
+
+    // Upstream hands off (HANDOFF marker → review).
+    await store.setAgentLifecycle(created.orchestration.id, upstream.id, "review");
+
+    const spawned = await orch.materializeDependents(
+      created.orchestration.id,
+      upstream.id,
+    );
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0].id).toBe(dep.id);
+    expect(spawned[0].lifecycle).toBe("spawning");
+
+    // The dependent's worktree was branched off the UPSTREAM's branch HEAD,
+    // not the orchestration base — so it inherits the upstream's commits.
+    const add = calls.added.find((c) => c.worktreeDir === dep.worktreeDir)!;
+    expect(add.baseRef).toBe(upstream.branch);
+    expect(calls.spawned).toContain(dep.worktreeDir);
+
+    // Idempotent: a second pass spawns nothing more.
+    expect(
+      await orch.materializeDependents(created.orchestration.id, upstream.id),
+    ).toHaveLength(0);
+  });
+
+  it("spawns a --depends-on worker immediately if the upstream already handed off", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const created = await orch.createTeam({ ...teamInput, roles: [] });
+    const upstream = await orch.spawnAgent(created.orchestration.id, "coder", {
+      task: "upstream slice",
+    });
+    await store.setAgentLifecycle(created.orchestration.id, upstream.id, "done");
+    calls.added.length = 0;
+    calls.spawned.length = 0;
+
+    const dep = await orch.spawnAgent(created.orchestration.id, "reviewer", {
+      task: "review the slice",
+      dependsOn: upstream.id,
+    });
+    expect(dep.lifecycle).toBe("spawning");
+    const add = calls.added.find((c) => c.worktreeDir === dep.worktreeDir)!;
+    expect(add.baseRef).toBe(upstream.branch);
   });
 });
 

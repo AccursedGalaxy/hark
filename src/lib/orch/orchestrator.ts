@@ -7,6 +7,7 @@ import {
 import { newAgentId, OrchStore } from "./store.js";
 import {
   currentBranch as currentBranchIO,
+  resolveDependentBase,
   worktreeBaseDir,
   worktreeBranchName,
   worktreeHeadBranch,
@@ -164,16 +165,59 @@ export class Orchestrator {
       });
     }
 
+    // A --depends-on worker forks the UPSTREAM's branch HEAD (not the orch
+    // base) so it inherits the upstream's commits. Those commits usually don't
+    // exist yet at spawn time, so we branch LAZILY: if the upstream hasn't
+    // handed off, leave this worker DEFERRED — pending, with no worktree or
+    // session — and let the controller materialize it when the upstream
+    // finishes (materializeDependents). If the upstream already handed off
+    // (the head spawned the dependent late), materialize immediately off it.
+    if (opts.dependsOn != null) {
+      const upstream = orch.agents.find((a) => a.id === opts.dependsOn);
+      const resolved = resolveDependentBase(upstream);
+      if (!resolved.ready) {
+        await this.deps.store.appendEvent({
+          ts: Date.now(),
+          orchestrationId: orchId,
+          agentId: id,
+          kind: "checkpoint",
+          message: `${role} deferred — awaiting upstream ${opts.dependsOn} handoff`,
+          data: { kind: "deferred", dependsOn: opts.dependsOn },
+        });
+        // Return the refreshed record so the caller sees the recorded
+        // task/dependsOn — the worktree + session are deferred, not the bookkeeping.
+        const refreshed = await this.deps.store.getOrchestration(orchId);
+        return refreshed?.agents.find((x) => x.id === id) ?? agent;
+      }
+      return this.materializeAgent(orch, agent, resolved.baseRef as string);
+    }
+
+    return this.materializeAgent(orch, agent, orch.baseRef);
+  }
+
+  // The "make it real" half of spawnAgent: create the isolated worktree off
+  // baseRef, clear the folder-trust dialog (Gate 1), spawn the session, and
+  // flip pending → spawning. Split out so a DEFERRED --depends-on worker can be
+  // materialized LATER — at upstream handoff, off the upstream's branch HEAD —
+  // by the exact same path. On any failure the partial state is rolled back
+  // (worktree removed if it was created) and the agent is marked failed.
+  private async materializeAgent(
+    orch: Orchestration,
+    agent: OrchAgent,
+    baseRef: string,
+  ): Promise<OrchAgent> {
+    const { id, role, branch, worktreeDir } = agent;
+
     // 1. Isolated worktree.
     try {
       await this.deps.addWorktree({
         repoRoot: orch.projectRoot,
         worktreeDir,
         branch,
-        baseRef: orch.baseRef,
+        baseRef,
       });
     } catch (err) {
-      await this.fail(orchId, id, `worktree create failed: ${err}`);
+      await this.fail(orch.id, id, `worktree create failed: ${err}`);
       throw err;
     }
 
@@ -188,26 +232,61 @@ export class Orchestrator {
       const result = await this.deps.spawnSession({
         cwd: worktreeDir,
         command: CLAUDE_COMMAND,
-        env: this.sessionEnv(orchId, role),
+        env: this.sessionEnv(orch.id, role),
         pathPrepend: this.deps.cliBinDir,
       });
       pid = result.pid;
     } catch (err) {
       // Roll back the worktree we just made so we don't leak it.
       await this.safeRemoveWorktree(orch.projectRoot, worktreeDir);
-      await this.fail(orchId, id, `session spawn failed: ${err}`);
+      await this.fail(orch.id, id, `session spawn failed: ${err}`);
       throw err;
     }
 
-    await this.deps.store.updateAgent(orchId, id, (a) => {
+    await this.deps.store.updateAgent(orch.id, id, (a) => {
       a.pid = pid;
     });
     const spawned = await this.deps.store.setAgentLifecycle(
-      orchId,
+      orch.id,
       id,
       "spawning",
     );
     return spawned ?? agent;
+  }
+
+  // Materialize any DEFERRED --depends-on workers whose upstream has just handed
+  // off: branch each off the upstream's branch HEAD (so they see its commits)
+  // and spawn its session. Called by the controller when an agent reaches a
+  // handoff lifecycle (review/done). Idempotent — it only acts on workers still
+  // `pending` with no pid (never materialized), so a later tick is a no-op. One
+  // dependent failing doesn't abort the rest. Returns the agents it spawned.
+  async materializeDependents(
+    orchId: string,
+    upstreamId: string,
+  ): Promise<OrchAgent[]> {
+    const orch = await this.deps.store.getOrchestration(orchId);
+    if (!orch) return [];
+    const upstream = orch.agents.find((a) => a.id === upstreamId);
+    const resolved = resolveDependentBase(upstream);
+    if (!resolved.ready) return [];
+
+    const deferred = orch.agents.filter(
+      (a) =>
+        a.dependsOn === upstreamId &&
+        a.lifecycle === "pending" &&
+        a.pid == null,
+    );
+    const spawned: OrchAgent[] = [];
+    for (const dep of deferred) {
+      try {
+        spawned.push(
+          await this.materializeAgent(orch, dep, resolved.baseRef as string),
+        );
+      } catch {
+        /* failure already recorded by materializeAgent */
+      }
+    }
+    return spawned;
   }
 
   // Spawn the coordinating head session for an orchestration: its own isolated
