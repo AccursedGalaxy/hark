@@ -31,3 +31,18 @@ export function shortId(id: string): string {
 // Conservative line/char limits for inline tool output; user expands the rest.
 export const TR_LINE_LIMIT = 24;
 export const TR_CHAR_LIMIT = 2000;
+
+// Format a live thinking-time counter (whole seconds) for the status chip.
+// Keeps short runs terse and big ones legible:
+//   <60s     → "42s"
+//   <1h      → "1m 23s"
+//   ≥1h      → "1h 02m"   (seconds drop off; minutes zero-padded)
+export function formatThinkingDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0s";
+  const s = Math.floor(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${String(m % 60).padStart(2, "0")}m`;
+}
