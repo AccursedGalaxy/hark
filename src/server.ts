@@ -1995,16 +1995,14 @@ async function reconcileOrchestrations(): Promise<void> {
     let headTm: TranscriptMetrics | null = null;
     let headEvents: TranscriptEvent[] | null = null;
     if (o.head) {
-      // Under autonomy onHeadSignal delivers the head briefing + interprets a
-      // head DONE as orch-complete (and refreshes metrics as a side effect).
-      if (ORCH_AUTONOMY) {
-        await orchController.onHeadSignal(o.id, { stopped: false });
-      }
-      // refreshHeadMetrics keeps the dashboard's head card fresh AND returns
-      // the sample + raw events for the DB ingest. The head is a single
-      // session, so calling it even under autonomy (a second cheap read) is
-      // fine and keeps the sample path uniform with the agents'.
-      const refreshed = await orchController.refreshHeadMetrics(o.id);
+      // Under autonomy onHeadSignal already reads the head transcript (briefing
+      // delivery + head-DONE interpretation + metrics refresh) AND returns the
+      // sample + raw events it read, so reuse that for the DB ingest — calling
+      // refreshHeadMetrics as well would read the same transcript a second time
+      // per tick. With autonomy off, refreshHeadMetrics does the (single) read.
+      const refreshed = ORCH_AUTONOMY
+        ? await orchController.onHeadSignal(o.id, { stopped: false })
+        : await orchController.refreshHeadMetrics(o.id);
       if (refreshed) {
         headTm = refreshed.metrics;
         headEvents = refreshed.events;
