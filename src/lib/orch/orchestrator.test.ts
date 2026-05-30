@@ -352,6 +352,26 @@ describe("Orchestrator.spawnAgent task/dependsOn", () => {
     const briefing = orch.briefingFor(persisted!, persisted!.agents[0]);
     expect(briefing).toContain("Implement the parser");
   });
+
+  it("forks the worker worktree from opts.baseRef when given, else the orch base", async () => {
+    const { deps, calls } = makeDeps(store);
+    const orch = new Orchestrator(deps);
+    const created = await orch.createTeam({ ...teamInput, roles: [] });
+
+    // Default: no override → fork from the orchestration's base.
+    const a = await orch.spawnAgent(created.orchestration.id, "coder", {});
+    expect(calls.added.find((w) => w.worktreeDir === a.worktreeDir)?.baseRef).toBe(
+      "main",
+    );
+
+    // Override: --base threads through to the worktree fork.
+    const b = await orch.spawnAgent(created.orchestration.id, "coder", {
+      baseRef: "feature/upstream",
+    });
+    expect(calls.added.find((w) => w.worktreeDir === b.worktreeDir)?.baseRef).toBe(
+      "feature/upstream",
+    );
+  });
 });
 
 describe("Orchestrator.briefingFor", () => {

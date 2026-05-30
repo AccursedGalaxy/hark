@@ -146,7 +146,7 @@ export class Orchestrator {
   async spawnAgent(
     orchId: string,
     role: AgentRole,
-    opts: { task?: string; dependsOn?: string } = {},
+    opts: { task?: string; dependsOn?: string; baseRef?: string } = {},
   ): Promise<OrchAgent> {
     const orch = await this.deps.store.getOrchestration(orchId);
     if (!orch) throw new Error(`orchestration not found: ${orchId}`);
@@ -178,13 +178,15 @@ export class Orchestrator {
       });
     }
 
-    // 1. Isolated worktree.
+    // 1. Isolated worktree. An explicit opts.baseRef forks from that ref
+    //    instead of the orchestration's default base (fork-time only — the
+    //    agent's diff/PR still measure against orch.baseRef).
     try {
       await this.deps.addWorktree({
         repoRoot: orch.projectRoot,
         worktreeDir,
         branch,
-        baseRef: orch.baseRef,
+        baseRef: opts.baseRef ?? orch.baseRef,
       });
     } catch (err) {
       await this.fail(orchId, id, `worktree create failed: ${err}`);
