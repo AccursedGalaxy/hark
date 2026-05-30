@@ -93,6 +93,71 @@ function splitStatements(command: string): string[] {
       cur += ch;
       continue;
     }
+    // `<<` / `<<<` are stdin READS, not tree writes (only `>`/`>>` to a tree
+    // path is a write — see inspectStatement). A here-string (`<<<word`) is
+    // same-line data and needs no special handling, but a heredoc (`<<DELIM`)
+    // introduces a body on the FOLLOWING lines, terminated by a line equal to
+    // DELIM. That body is opaque data — a worker brief routinely carries `;`,
+    // `|`, `>` and blank lines as prose — so we absorb it verbatim instead of
+    // splitting its newlines into statements that inspectStatement would then
+    // misread as shell (this is the heredoc analogue of the `--task` skip).
+    if (ch === "<" && command[i + 1] === "<") {
+      if (command[i + 2] === "<") {
+        cur += "<<<";
+        i += 2;
+        continue;
+      }
+      // Copy `<<`, an optional `-` (tab-stripping form), and the (possibly
+      // quoted) delimiter word, capturing the unquoted delimiter so we can
+      // find where the body ends.
+      cur += "<<";
+      i += 2;
+      if (command[i] === "-") {
+        cur += "-";
+        i++;
+      }
+      while (command[i] === " " || command[i] === "\t") {
+        cur += command[i];
+        i++;
+      }
+      let delim = "";
+      while (i < command.length && !/[\s;&|]/.test(command[i])) {
+        const c = command[i];
+        if (c === '"' || c === "'") {
+          i++;
+          continue; // strip delimiter quotes (`<<'EOF'` disables expansion)
+        }
+        delim += c;
+        cur += c;
+        i++;
+      }
+      // Skip the body only when the delimiter ends the line; otherwise leave
+      // it to normal parsing (degrades to over-strict, never a bypass). The
+      // body is stdin data, so we drop it entirely rather than fold it into
+      // the statement — a `>` or `rm` in brief prose is data, not shell, and
+      // must not reach the tokenizer. The command line itself (incl. any real
+      // `> file` redirection alongside the heredoc) stays in `cur` and is
+      // still inspected.
+      if (delim && command[i] === "\n") {
+        i++; // step past the command line's newline into the body
+        while (i < command.length) {
+          let line = "";
+          while (i < command.length && command[i] !== "\n") {
+            line += command[i];
+            i++;
+          }
+          const closed = line.trim() === delim;
+          if (i < command.length) i++; // consume the body line's newline
+          if (closed) break;
+        }
+        // The terminating newline ends the heredoc command, so flush it; a
+        // mutation chained after the body is a fresh statement, still inspected.
+        stmts.push(cur);
+        cur = "";
+      }
+      i--; // counter the loop's i++ — i is already positioned correctly
+      continue;
+    }
     if (ch === ";" || ch === "\n" || ch === "&" || ch === "|") {
       // Consume the paired second char of `&&` / `||` so it isn't left dangling.
       if ((ch === "&" && command[i + 1] === "&") || (ch === "|" && command[i + 1] === "|")) {
@@ -286,7 +351,8 @@ function inspectStatement(
   if (cw && isHarkDispatch(cw)) return null;
 
   // Redirections (`>`/`>>` target) mutate the target file regardless of the
-  // command. Scan token pairs.
+  // command. Scan token pairs. Input redirections (`<`/`<<`/`<<<`) are stdin
+  // READS, never tree writes, so they are deliberately not flagged here.
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i] === ">" || tokens[i] === ">>") {
       const target = tokens[i + 1];
