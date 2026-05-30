@@ -156,6 +156,21 @@ export const DEFAULT_NO_PROGRESS_TOOL_CALLS = 80;
 export const DEFAULT_HARD_TURN_CEILING = 250;
 export const DEFAULT_HARD_TOKEN_CEILING = 4_000_000;
 
+// Cancel-cascade trigger (Trigger 0 — the transport-wedge backstop). A single
+// benign tool error inside the Claude Code harness (e.g. a shelled-out `grep`
+// that matches nothing and exits 1) has been observed to cascade: every
+// SUBSEQUENT tool call comes back as a cancelled/errored result ("Cancelled:
+// parallel tool call … errored") and the session never recovers. The worker
+// goes blind, keeps issuing varied probes to get ANY output back, and spirals
+// for 100+ turns / 1M+ tokens before the slower progress/ceiling triggers catch
+// it. hark cannot fix the wedge itself (it lives in the `claude` process we
+// spawn, not in our code) — but it CAN see it: the tail of the transcript fills
+// with consecutive `is_error` tool_result events. This trigger reaps at that
+// cliff instead of ~100 turns later. Eight in a row with NO successful result
+// between them is the wedge's signature: a healthy worker interleaves successful
+// reads/edits between failures, so it never accumulates a run this long.
+export const DEFAULT_CANCEL_CASCADE = 8;
+
 // Normalise a tool call into a signature for the "identical command" test.
 // Runs of digits collapse to `#` so a counter-incrementing probe
 // (`recover-check-1`, `recover-check-2`, …) reads as one repeated command.
@@ -211,6 +226,33 @@ export function trailingRepeat(signatures: string[]): {
   return { signature, count };
 }
 
+// Whether a transcript event is a cancelled/errored tool result. Claude Code
+// records both a Bash command exiting non-zero AND the post-wedge "Cancelled:
+// parallel tool call … errored" messages as `tool_result` with `is_error:true`,
+// so this one predicate covers the trigger (the no-match grep) and the cascade
+// that follows it.
+export function isCancelledToolResult(ev: TranscriptEvent): boolean {
+  return ev.kind === "tool_result" && ev.isError === true;
+}
+
+// Length of the trailing run of consecutive cancelled/errored tool results at
+// the END of the transcript — the cancel-cascade signal. Walks newest→oldest,
+// counting errored `tool_result` events and stopping at the first CLEAN one (a
+// successful result means the session is not wedged). Non-result events
+// (assistant turns, user, system) sit between results and are skipped — they
+// neither extend nor break the run. Returns 0 when the most recent result was
+// clean or there are no results yet.
+export function trailingCancelledRun(events: TranscriptEvent[]): number {
+  let run = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.kind !== "tool_result") continue;
+    if (isCancelledToolResult(ev)) run++;
+    else break;
+  }
+  return run;
+}
+
 export interface BreakerInput {
   // Trailing identical-run signature + length from the transcript.
   signature: string | null;
@@ -238,6 +280,11 @@ export interface BreakerInput {
   // Hard ceiling: absolute turns / tokens that trip regardless of progress.
   hardTurnCeiling: number;
   hardTokenCeiling: number;
+  // Cancel-cascade trigger: trailing run of consecutive cancelled/errored tool
+  // results (trailingCancelledRun) + the run length that trips. A run this long
+  // is the Claude Code transport-wedge signature.
+  cancelledResultRun: number;
+  cancelCascadeLimit: number;
 }
 
 export interface BreakerDecision {
@@ -246,7 +293,7 @@ export interface BreakerDecision {
   // Which trigger fired (only meaningful when tripped). The controller gates ONLY
   // `no_progress` on the stuck-judge; `signature` and `hard_ceiling` stay
   // immediate auto-kills, never gated on a judge.
-  trigger?: "signature" | "no_progress" | "hard_ceiling";
+  trigger?: "signature" | "no_progress" | "hard_ceiling" | "cancel_cascade";
   // Always returned — persisted onto the agent so the next tick measures
   // against it.
   snapshot: BreakerState;
@@ -274,6 +321,8 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     noProgressToolCalls,
     hardTurnCeiling,
     hardTokenCeiling,
+    cancelledResultRun,
+    cancelCascadeLimit,
   } = input;
 
   // No-progress window — keyed on the committed DIFF alone, so a commit that
@@ -314,7 +363,24 @@ export function decideCircuitBreaker(input: BreakerInput): BreakerDecision {
     flaggedReason,
   };
 
-  // Trigger 3 (checked first — it's the hard guarantee): an absolute ceiling on
+  // Trigger 0 (checked first — the transport-wedge backstop): the tail of the
+  // transcript is a run of consecutive cancelled/errored tool results. This is
+  // the Claude Code tool-transport wedge — a single tool error cascades into
+  // every later call being cancelled and the worker spirals blind. It is an
+  // immediate auto-kill (NEVER judge-gated): the worker can't recover on its own
+  // and there's no convergent-research story for an all-errors tail. Catching it
+  // here reaps at the cliff instead of waiting for the much slower no-progress /
+  // hard-ceiling triggers (100+ turns later).
+  if (cancelCascadeLimit > 0 && cancelledResultRun >= cancelCascadeLimit) {
+    return {
+      tripped: true,
+      trigger: "cancel_cascade",
+      reason: `circuit-breaker: ${cancelledResultRun} consecutive cancelled/errored tool results — the Claude Code tool transport appears wedged (one tool error cascading into every later call); reaped at the cliff to stop a blind spiral`,
+      snapshot,
+    };
+  }
+
+  // Trigger 3 (the hard guarantee): an absolute ceiling on
   // turns / tokens that ignores progress entirely. Closes the false-negative
   // path where a worker launders every progress-based window yet keeps burning.
   if (turns >= hardTurnCeiling) {
@@ -822,6 +888,9 @@ export interface ControllerDeps {
   // DEFAULT_HARD_TURN_CEILING / DEFAULT_HARD_TOKEN_CEILING.
   hardTurnCeiling?: number;
   hardTokenCeiling?: number;
+  // Consecutive cancelled/errored tool results at the transcript tail that trip
+  // the transport-wedge backstop. Defaults to DEFAULT_CANCEL_CASCADE.
+  cancelCascadeLimit?: number;
   // The Haiku stuck-judge: given a fully-built prompt, run a time-boxed
   // `claude -p` subprocess (or a direct API call) and return its raw stdout.
   // Throws/rejects on error or timeout — the controller treats that as a judge
@@ -984,6 +1053,9 @@ export class AutonomyController {
     const signatures = toolUseSignatures(events);
     const { signature, count } = trailingRepeat(signatures);
     const toolCalls = signatures.length;
+    // Transport-wedge signal: how many cancelled/errored tool results sit at the
+    // very tail of the transcript (resets to 0 the moment a clean result lands).
+    const cancelledResultRun = trailingCancelledRun(events);
     // Total turns + tokens drive the hard ceiling and the no-progress turn
     // count. Only input+output count: cache-read/creation tokens dominate a
     // long-but-healthy session's totals and would trip the ceiling on
@@ -1024,6 +1096,9 @@ export class AutonomyController {
       hardTurnCeiling: this.deps.hardTurnCeiling ?? DEFAULT_HARD_TURN_CEILING,
       hardTokenCeiling:
         this.deps.hardTokenCeiling ?? DEFAULT_HARD_TOKEN_CEILING,
+      cancelledResultRun,
+      cancelCascadeLimit:
+        this.deps.cancelCascadeLimit ?? DEFAULT_CANCEL_CASCADE,
     });
 
     // Persist the snapshot every tick so the next observation measures the run

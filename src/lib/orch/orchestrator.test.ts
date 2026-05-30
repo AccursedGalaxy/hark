@@ -287,9 +287,9 @@ describe("Orchestrator.spawnHead", () => {
     // Trust cleared for the head dir BEFORE the session was spawned.
     expect(calls.trustCleared).toContain(head.worktreeDir);
 
-    // Spawned with the head env + auto permission mode + hark on PATH.
+    // Spawned with the head env + skip-permissions posture + hark on PATH.
     const call = calls.spawnCalls.find((c) => c.cwd === head.worktreeDir)!;
-    expect(call.command).toContain("--permission-mode auto");
+    expect(call.command).toContain("--dangerously-skip-permissions");
     expect(call.env?.HARK_ROLE).toBe("head");
     expect(call.env?.HARK_ORCH_ID).toBe(created.orchestration.id);
     expect(call.env?.HARK_API).toBe("http://localhost:3000");
@@ -339,7 +339,7 @@ describe("Orchestrator.spawnAgent task/dependsOn", () => {
     // Worker env carries its role (gates it OUT of spawning) + orch id.
     const call = calls.spawnCalls.find((c) => c.cwd === a.worktreeDir)!;
     expect(call.env?.HARK_ROLE).toBe("coder");
-    expect(call.command).toContain("--permission-mode auto");
+    expect(call.command).toContain("--dangerously-skip-permissions");
 
     // The dispatched task flows into the briefing.
     const persisted = await store.getOrchestration(created.orchestration.id);

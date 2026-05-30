@@ -17,6 +17,7 @@ import {
   DEFAULT_NO_PROGRESS_TOOL_CALLS,
   DEFAULT_HARD_TURN_CEILING,
   DEFAULT_HARD_TOKEN_CEILING,
+  DEFAULT_CANCEL_CASCADE,
   buildJudgeActivityView,
   buildStuckJudgePrompt,
   parseJudgeVerdict,
@@ -29,6 +30,8 @@ import {
   toolUseSignature,
   toolUseSignatures,
   trailingRepeat,
+  trailingCancelledRun,
+  isCancelledToolResult,
   transcriptText,
   type AutonomyState,
   type HeadNotification,
@@ -790,6 +793,28 @@ const bashTurn = (command: string): TranscriptEvent => ({
   blocks: [{ type: "tool_use", id: "x", name: "Bash", input: { command } }],
 });
 
+// The result side of the transcript. `erroredResult` is what Claude Code writes
+// for a cancelled/errored call (is_error:true); a run of them at the tail is the
+// transport-wedge signature the cancel-cascade trigger reaps on.
+const erroredResult = (
+  output = "Cancelled: parallel tool call … errored",
+): TranscriptEvent => ({
+  kind: "tool_result",
+  uuid: "r",
+  ts: "t",
+  toolUseId: "x",
+  output,
+  isError: true,
+});
+const cleanResult = (output = "ok"): TranscriptEvent => ({
+  kind: "tool_result",
+  uuid: "r",
+  ts: "t",
+  toolUseId: "x",
+  output,
+  isError: false,
+});
+
 describe("toolUseSignature", () => {
   it("normalises a Bash command, collapsing digit runs (counter-suffixed spam)", () => {
     expect(toolUseSignature({ type: "tool_use", id: "1", name: "Bash", input: { command: "recover-check-1" } })).toBe(
@@ -830,6 +855,37 @@ describe("toolUseSignatures + trailingRepeat", () => {
   });
 });
 
+describe("trailingCancelledRun / isCancelledToolResult", () => {
+  it("counts the trailing run of errored results, reset by any clean one", () => {
+    expect(trailingCancelledRun([])).toBe(0);
+    expect(
+      trailingCancelledRun([bashTurn("a"), erroredResult(), bashTurn("b"), erroredResult()]),
+    ).toBe(2);
+    // A clean result at the very tail means the session is NOT wedged → 0.
+    expect(trailingCancelledRun([bashTurn("a"), erroredResult(), cleanResult()])).toBe(0);
+    // Assistant turns sit between results and neither extend nor break the run.
+    expect(
+      trailingCancelledRun([
+        erroredResult(),
+        bashTurn("x"),
+        erroredResult(),
+        bashTurn("y"),
+        erroredResult(),
+      ]),
+    ).toBe(3);
+    // An earlier clean result caps the run at the most recent errored streak.
+    expect(
+      trailingCancelledRun([erroredResult(), cleanResult(), erroredResult(), erroredResult()]),
+    ).toBe(2);
+  });
+
+  it("isCancelledToolResult is true only for errored tool_result events", () => {
+    expect(isCancelledToolResult(erroredResult())).toBe(true);
+    expect(isCancelledToolResult(cleanResult())).toBe(false);
+    expect(isCancelledToolResult(bashTurn("x"))).toBe(false);
+  });
+});
+
 describe("decideCircuitBreaker", () => {
   // Non-tripping defaults for the two NEW triggers, so a test that exercises
   // the signature trigger isn't perturbed by them: huge ceilings, huge
@@ -846,6 +902,8 @@ describe("decideCircuitBreaker", () => {
     noProgressToolCalls: 10_000,
     hardTurnCeiling: 1_000_000,
     hardTokenCeiling: 1_000_000_000,
+    cancelledResultRun: 0,
+    cancelCascadeLimit: 1000,
   };
 
   it("trips once the no-progress run reaches the limit", () => {
@@ -1044,6 +1102,42 @@ describe("decideCircuitBreaker", () => {
     expect(d.reason).toContain("hard ceiling");
     expect(d.reason).toContain("tokens");
   });
+
+  // --- Trigger 0: cancel-cascade (the transport wedge) ---
+
+  it("TRIPS on a cancel-cascade run, immune to progress (the transport wedge)", () => {
+    const d = decideCircuitBreaker({
+      ...base,
+      cancelledResultRun: 8,
+      cancelCascadeLimit: 8,
+      // Fresh committed progress this tick AND a non-repeating signature: every
+      // progress-based trigger is reset, yet the cascade backstop still trips.
+      signature: "bash:vary",
+      repeatCount: 1,
+      diffKey: "5 files +50/-0",
+      turns: 3,
+      prior: {
+        signature: "bash:vary",
+        progressKey: "0:",
+        baseline: 1,
+        diffKey: "1 file",
+      },
+    });
+    expect(d.tripped).toBe(true);
+    expect(d.trigger).toBe("cancel_cascade");
+    expect(d.reason).toContain("cancelled/errored");
+    expect(d.reason.toLowerCase()).toContain("wedged");
+  });
+
+  it("does NOT trip one short of the cancel-cascade limit", () => {
+    const d = decideCircuitBreaker({
+      ...base,
+      repeatCount: 1,
+      cancelledResultRun: 7,
+      cancelCascadeLimit: 8,
+    });
+    expect(d.tripped).toBe(false);
+  });
 });
 
 function makeBreakerController(opts: {
@@ -1054,6 +1148,7 @@ function makeBreakerController(opts: {
   noProgressToolCalls?: number;
   hardTurnCeiling?: number;
   hardTokenCeiling?: number;
+  cancelCascadeLimit?: number;
   // The stuck-judge stub: given the prompt, return raw stdout. Omit to leave the
   // judge unwired (no-progress keeps its immediate-block behavior). Throw to
   // simulate a subprocess error/timeout.
@@ -1082,6 +1177,7 @@ function makeBreakerController(opts: {
     noProgressToolCalls: opts.noProgressToolCalls,
     hardTurnCeiling: opts.hardTurnCeiling,
     hardTokenCeiling: opts.hardTokenCeiling,
+    cancelCascadeLimit: opts.cancelCascadeLimit,
     now: () => 1_000_000,
   });
   return { controller, escalations, judgePrompts };
@@ -1269,6 +1365,48 @@ describe("AutonomyController.checkCircuitBreaker", () => {
     // The breaker escalation IS the wake — the guard is set so the reconcile
     // loop's generic wake-up won't escalate the same trip a second time.
     expect(a.headWokeAt).toBe(1_000_000);
+  });
+
+  it("trips on a cancelled-result cascade → blocked early, never consulting the judge", async () => {
+    const { orchId, agentId } = await makeAgent("sess-run", "running");
+    const events: TranscriptEvent[] = [];
+    let judged = 0;
+    const { controller } = makeBreakerController({
+      transcript: () => events,
+      git: () => ({ diffstat: "", commitCount: 0 }),
+      // Disable every OTHER trigger so this proves the cancel-cascade path alone.
+      limit: 1000,
+      noProgressTurns: 100000,
+      noProgressToolCalls: 100000,
+      hardTurnCeiling: 100000,
+      hardTokenCeiling: 1_000_000_000,
+      cancelCascadeLimit: 4,
+      judge: () => {
+        judged++;
+        return '{"verdict":"progressing","reason":"x"}';
+      },
+    });
+
+    // A benign error followed by a CLEAN result — the run resets; nothing trips.
+    events.push(bashTurn("grep nope src"), erroredResult(), bashTurn("ls"), cleanResult());
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(false);
+
+    // Then the wedge: every later call comes back cancelled, none succeed.
+    for (let n = 0; n < 4; n++) events.push(bashTurn(`probe-${n}`), erroredResult());
+    expect(await controller.checkCircuitBreaker(orchId, agentId)).toBe(true);
+
+    const a = (await store.getOrchestration(orchId))!.agents.find(
+      (x) => x.id === agentId,
+    )!;
+    expect(a.lifecycle).toBe("blocked");
+    expect(a.blockedReason).toContain("cancelled/errored");
+    // Immediate auto-kill: the transport wedge is never handed to the stuck-judge.
+    expect(judged).toBe(0);
+  });
+
+  it("uses DEFAULT_CANCEL_CASCADE when no override is given", () => {
+    expect(DEFAULT_CANCEL_CASCADE).toBeGreaterThanOrEqual(5);
+    expect(DEFAULT_CANCEL_CASCADE).toBeLessThan(DEFAULT_HARD_TURN_CEILING);
   });
 });
 

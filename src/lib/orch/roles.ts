@@ -181,6 +181,17 @@ export function buildAgentBriefing(ctx: BriefingContext): string {
   }
 
   lines.push("");
+  lines.push("## Tooling (prevents a known harness wedge)");
+  lines.push(
+    "- Search and read with the dedicated **Grep**, **Glob**, and **Read** tools — NOT by shelling out to `grep`/`find`/`cat` via Bash. A shell `grep`/`find` that matches nothing exits non-zero, the harness flags that as a tool error, and a single such error can cascade into every later tool call being cancelled — wedging your whole session blind. The Grep/Glob tools return \"no matches\" cleanly, with no error.",
+  );
+  lines.push(
+    "- When you genuinely must search via Bash (a pipeline the tools can't express), guard it so a no-match can't surface as an error — e.g. append `|| true`.",
+  );
+  lines.push(
+    "- If your tool results suddenly come back empty, cancelled, or errored several times in a row, do NOT keep firing varied probes to coax output back — that is the wedge, and it only burns tokens. Commit any good work, then end with the blocked marker so a human can recover the session.",
+  );
+  lines.push("");
   lines.push("## Autonomy protocol");
   lines.push(
     `- Work autonomously toward the definition of done. Make reasonable decisions yourself; record each significant decision and why in a line you can point to later.`,
