@@ -173,12 +173,21 @@ automation; `hark orch stack` DAG view with liveness; base-drift detector;
 
 ---
 
-## 8. Open decisions for the human
-1. **Default landing:** stacked-linked vs auto-integration when ≥2 stack? (User leans
-   integration; proposal: integration when ≥2 workers form one unit, else single PR.)
-2. **`--base pr/N`:** support PR-number resolution via `gh` in v1 (needs `gh` + remote), or
-   only `--base <branch>` for v1?
-3. **Confirm:** no auto-restack in v1 (rule + future detector instead). Agree?
+## 8. Decisions — RESOLVED (human, 2026-05-30)
+1. **Default landing = INTEGRATION-PR.** When ≥2 workers form one shippable unit, the PM
+   routes them to an integrator → one branch off main → ONE PR / one review / one merge. A
+   lone worker still gets its own PR; diamonds always go through an integrator. The PM MAY
+   choose stacked-linked for the rare genuinely-independent-but-coupled case, but it is never
+   the default (it forces push-ordering + bottom-up manual merge sequencing — the fragility we
+   reject). Rationale: collapses N merges→1 (matches the human's minimal merge/deploy
+   friction), kills the push-ordering + merge-ordering rituals, and moves conflict resolution
+   earlier into an isolated integrator worktree instead of surfacing it at human merge time.
+2. **`--base pr/N` = YES.** Support PR-number resolution via `gh` in v1 (resolve `pr/N` → head
+   branch before base resolution). `--base <branch>` still works. Matches what the human sees
+   (PR numbers) vs the long auto-generated branch slugs.
+3. **No auto-restack in v1 = CONFIRMED.** v1 rule (don't `--base` a reworking branch;
+   re-dispatch dependents on rework) now; base-drift *detector* later, tied to the
+   observability epic. No Graphite-grade auto-rebase in v1.
 
 ---
 
