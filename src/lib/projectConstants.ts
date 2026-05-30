@@ -15,22 +15,35 @@
 export const HARK_BLOCK_START = "<!-- hark:start -->";
 export const HARK_BLOCK_END = "<!-- hark:end -->";
 
-// The single paragraph the agent reads every session start. The first
-// line is the handoff motivation — agents follow reasons more reliably
-// than rules, so the "why" sits above the "what". Cadence rules cover
-// the gap left by PLAN.md's section contracts: those define WHAT each
-// section contains, this defines WHEN to update them.
+// The block the agent reads every session start. The first line is the
+// handoff motivation — agents follow reasons more reliably than rules, so
+// the "why" sits above the "what". Two memories, not one: PLAN.md is the
+// NARRATIVE store (vision / strategy / "what just happened"); the board
+// (per-project SQLite, driven via `hark board`) is the TASK store (keyed,
+// reconcilable status). The block names that split so a cold-start agent
+// tracks tasks on the board instead of dual-tracking them in PLAN prose.
+// Cadence rules cover the gap left by PLAN.md's section contracts: those
+// define WHAT each section contains, this defines WHEN to update them.
 export const CLAUDE_MD_BLOCK = [
   HARK_BLOCK_START,
-  "Read PLAN.md before anything else. PLAN.md is the only memory the next",
-  "session has of this project — updates aren't tidying, they're the handoff.",
+  "Read PLAN.md before anything else. It's the project's narrative memory —",
+  "North Star, strategy, cold-start context, \"what just happened\" — and a",
+  "fresh session resumes from it. Updates aren't tidying, they're the handoff.",
   "If it's still the skeleton (sections show `(not yet written)` / `(none)`),",
   "bootstrap it from the codebase before doing anything else.",
   "",
-  "The italicized contract under each section is binding. Cadence:",
+  "Task management runs on the **board**, not in PLAN prose. Keyed,",
+  "reconcilable state — task status, dependencies, ownership, lifecycle —",
+  "lives on the board (a per-project SQLite store); drive it with `hark board`",
+  "(`add` / `list` / `show` / `set` / `link` / `assign` / `close`). PLAN",
+  "*references* the board; it never duplicates task state. The boundary:",
+  "natively keyed + reconcilable → board, narrative prose → PLAN.",
+  "",
+  "The italicized contract under each PLAN section is binding. Cadence:",
   "",
   "- Now / Next / Shipped reflect reality at any moment — update as state",
-  "  changes, not at session end.",
+  "  changes, not at session end. Now bullets point at board workstreams;",
+  "  granular task state stays on the board, not in the bullet.",
   "- Inbox is the required-pass section: drain or tag every bare line",
   "  before this session ends.",
   "- North Star: don't reword casually. Edit only when direction actually shifts.",

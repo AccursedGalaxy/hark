@@ -333,9 +333,9 @@ export function buildPmHeadBriefing(ctx: PmHeadBriefingContext): string {
   lines.push(`Working branch: \`${ctx.branch}\` — you see the user's live WIP here, read-only.`);
 
   lines.push("");
-  lines.push("## PLAN.md is your brain");
+  lines.push("## PLAN.md is your narrative brain");
   lines.push(
-    `Your durable memory is **${ctx.planPath}**, not this conversation — a fresh session resumes the role by re-reading it. Keep it the single source of truth:`,
+    `Your durable narrative memory is **${ctx.planPath}** — North Star, strategy, cold-start context, "what just happened." A fresh session resumes the role by re-reading it. It is NOT the task tracker — keyed task state lives on the board (next section). Keep PLAN the narrative source of truth:`,
   );
   lines.push(
     "- Edit it with **targeted edits**, never whole-file rewrites — captures from other sessions can land between your read and your write.",
@@ -348,6 +348,18 @@ export function buildPmHeadBriefing(ctx: PmHeadBriefingContext): string {
   );
   lines.push(
     "- Move work Now→Shipped as it lands. The plan reflects reality at any moment, not just at session end.",
+  );
+
+  lines.push("");
+  lines.push("## The board is your operational source of truth");
+  lines.push(
+    "Keyed, reconcilable state — task status, dependencies, workstream, lifecycle, which worker owns what — lives on the **board** (a per-project SQLite store), NOT in PLAN prose. Drive it with `hark board add/list/show/set/link/assign/close`. PLAN *references* the board; it never duplicates task state.",
+  );
+  lines.push(
+    "- Migration boundary (binding, from `.hark/board-plan.md`): natively keyed + reconcilable → board; narrative prose → PLAN. Anything you'd otherwise track as a bullet's status belongs on the board.",
+  );
+  lines.push(
+    "- When you dispatch a worker, record it: `hark board set <taskId> status=in-progress agent_id=<agentId>`, and move tasks backlog→ready→in-progress→review→done as they advance. Don't write task sagas into Now/Next — model them as board tasks and let the Now bullet point at the workstream.",
   );
 
   lines.push("");
