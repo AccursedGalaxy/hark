@@ -335,6 +335,41 @@ export function linkNodeModules(repoRoot: string, worktreeDir: string): void {
   }
 }
 
+// Resolve the effective ref a worker branch should be measured against — both
+// when forking it (addWorktree) and when diffing it afterwards (diffBranch et
+// al). When the base is a real branch on origin, fetch it and return the
+// freshly-updated `origin/<base>`; otherwise return the local ref unchanged.
+//
+// This is what keeps a worker's diff honest. Workers fork off `origin/<base>`,
+// so the true fork point is the live remote tip. If we measured against the
+// LOCAL base and it lags origin, the three-dot merge-base would fall behind the
+// real fork point and the diff would surface commits the worker never made
+// (the #18 base-drift bug, but on the read side). Resolving to the same
+// freshly-fetched `origin/<base>` the fork used keeps both ends aligned.
+//
+// Best-effort, like linkNodeModules: a failed fetch (offline, auth, etc.) must
+// never abort a spawn or a diff, so it degrades to the local ref. HEAD,
+// local-only WIP bases, and no-remote repos keep today's local behavior.
+export async function resolveBaseRef(
+  repoRoot: string,
+  baseRef: string,
+): Promise<string> {
+  const originHasBase =
+    baseRef !== "HEAD" &&
+    baseRef !== "" &&
+    (await hasOrigin(repoRoot)) &&
+    (await baseOnOrigin(repoRoot, baseRef));
+  const resolved = resolveWorktreeBase(baseRef, originHasBase);
+  if (resolved.fetchRef) {
+    try {
+      await runGit(["-C", repoRoot, "fetch", "origin", resolved.fetchRef]);
+    } catch {
+      return baseRef;
+    }
+  }
+  return resolved.checkoutRef;
+}
+
 export async function addWorktree(opts: {
   repoRoot: string;
   worktreeDir: string;
@@ -342,25 +377,8 @@ export async function addWorktree(opts: {
   baseRef?: string;
 }): Promise<void> {
   const baseRef = opts.baseRef ?? "HEAD";
-  // Fork the LIVE remote tip, not a stale local ref: when the base is a real
-  // branch on origin, fetch it first and branch off `origin/<base>`. Falls back
-  // to the local ref for HEAD, local-only WIP bases, and no-remote repos.
-  const originHasBase =
-    baseRef !== "HEAD" &&
-    baseRef !== "" &&
-    (await hasOrigin(opts.repoRoot)) &&
-    (await baseOnOrigin(opts.repoRoot, baseRef));
-  const resolved = resolveWorktreeBase(baseRef, originHasBase);
-  let checkoutRef = resolved.checkoutRef;
-  if (resolved.fetchRef) {
-    try {
-      await runGit(["-C", opts.repoRoot, "fetch", "origin", resolved.fetchRef]);
-    } catch {
-      // Best-effort, like linkNodeModules: a failed fetch (offline, auth, etc.)
-      // must not abort the spawn — branch off the local ref instead.
-      checkoutRef = baseRef;
-    }
-  }
+  // Fork the LIVE remote tip, not a stale local ref (see resolveBaseRef).
+  const checkoutRef = await resolveBaseRef(opts.repoRoot, baseRef);
   await runGit(
     buildWorktreeAddArgs(
       opts.repoRoot,
@@ -458,8 +476,9 @@ export async function diffBranch(opts: {
   branch: string;
   full?: boolean;
 }): Promise<string> {
+  const base = await resolveBaseRef(opts.repoRoot, opts.baseRef);
   return runGit(
-    buildDiffArgs(opts.repoRoot, opts.baseRef, opts.branch, opts.full ?? false),
+    buildDiffArgs(opts.repoRoot, base, opts.branch, opts.full ?? false),
   );
 }
 
@@ -469,7 +488,8 @@ export async function logBranch(opts: {
   baseRef: string;
   branch: string;
 }): Promise<string> {
-  return runGit(buildLogArgs(opts.repoRoot, opts.baseRef, opts.branch));
+  const base = await resolveBaseRef(opts.repoRoot, opts.baseRef);
+  return runGit(buildLogArgs(opts.repoRoot, base, opts.branch));
 }
 
 // Compact diffstat + commit count for a worker branch — the figures that go
@@ -482,9 +502,10 @@ export async function branchGitSummary(opts: {
 }): Promise<{ diffstat: string; commitCount: number }> {
   let diffstat = "";
   let commitCount = 0;
+  const base = await resolveBaseRef(opts.repoRoot, opts.baseRef);
   try {
     const ss = await runGit(
-      buildShortstatArgs(opts.repoRoot, opts.baseRef, opts.branch),
+      buildShortstatArgs(opts.repoRoot, base, opts.branch),
     );
     diffstat = formatShortstat(ss);
   } catch {
@@ -492,7 +513,7 @@ export async function branchGitSummary(opts: {
   }
   try {
     const out = await runGit(
-      buildRevListCountArgs(opts.repoRoot, opts.baseRef, opts.branch),
+      buildRevListCountArgs(opts.repoRoot, base, opts.branch),
     );
     const n = Number(out.trim());
     if (Number.isFinite(n)) commitCount = n;
