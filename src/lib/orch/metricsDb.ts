@@ -760,6 +760,52 @@ export function analyzeCostPerTurn(
   return { agents, median: med, mad, outliers };
 }
 
+// ---- Live-flag plumbing (fire-once de-dup over a report) --------------------
+//
+// The reconcile loop runs costPerTurnReport every tick; without de-dup it would
+// re-emit the same outlier every 3s. These two pure helpers turn a report into
+// the NEW alerts to emit, given the set of (orch,agent) keys already flagged
+// this server lifetime. The caller emits the events and records the keys —
+// keeping the loop wiring thin and the de-dup + message-shaping unit-testable.
+// (In-memory de-dup by design: a restart re-flags an active outlier once, which
+// re-surfaces a still-wedged agent rather than going silent.)
+
+export interface CostOutlierAlert {
+  agentId: string;
+  role: string | null;
+  costPerTurn: number;
+  z: number;
+  median: number;
+  turns: number;
+  message: string;
+}
+
+export function costOutlierKey(orchId: string, agentId: string): string {
+  return `${orchId} ${agentId}`;
+}
+
+export function newCostOutlierAlerts(
+  orchId: string,
+  report: CostPerTurnReport,
+  alreadyFlagged: ReadonlySet<string>,
+): CostOutlierAlert[] {
+  return report.outliers
+    .filter((o) => !alreadyFlagged.has(costOutlierKey(orchId, o.agentId)))
+    .map((o) => ({
+      agentId: o.agentId,
+      role: o.role,
+      costPerTurn: o.costPerTurn,
+      z: o.z,
+      median: report.median,
+      turns: o.turns,
+      message:
+        `cost-per-turn outlier: ${o.role ?? o.agentId} at ` +
+        `$${o.costPerTurn.toFixed(2)}/turn (modz ${o.z.toFixed(1)} vs cohort ` +
+        `median $${report.median.toFixed(2)}/turn over ${o.turns} turns) — ` +
+        `possible wedge / silent-hang, review`,
+    }));
+}
+
 // ---- Runtime wrapper --------------------------------------------------------
 
 export class MetricsDb {

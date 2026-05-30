@@ -33,7 +33,9 @@ import {
   MetricsDb,
   captureTurns,
   classifyToolCalls,
+  costOutlierKey,
   headAgentId,
+  newCostOutlierAlerts,
 } from "./lib/orch/metricsDb.js";
 import {
   correlateAgentSessions,
@@ -310,6 +312,20 @@ try {
 } catch (err) {
   console.error("metrics DB unavailable — continuing without it:", err);
 }
+
+// Live wedge / silent-hang proxy: (orch,agent) keys already flagged as a
+// cost-per-turn outlier this server lifetime, so the reconcile loop emits each
+// flag once instead of every 3s tick. In-memory by design — a restart re-flags
+// a still-wedged agent once (re-surfaces it rather than going silent).
+const flaggedCostOutliers = new Set<string>();
+// modified-z threshold for the live flag. Tunable; defaults to the report's
+// Iglewicz–Hoaglin 3.5. The flag is a non-paging `note` (dashboard + audit, NOT
+// a newsroom kind), so a sensitive threshold surfaces candidates without ever
+// interrupting the head.
+const COST_OUTLIER_Z = Number(process.env.HARK_COST_OUTLIER_Z) || 3.5;
+// Ignore agents below this many turns — a wedge needs to have actually burned
+// turns to be worth flagging, and cost/turn is noisy in the first few.
+const COST_OUTLIER_MIN_TURNS = 15;
 // The hark CLI lives at <repo>/bin/hark; __dirname is dist/ after build (or
 // src/ under tsx) — ../bin resolves to <repo>/bin in both. Prepended to the
 // head/worker session PATH so `hark …` just works inside them.
@@ -1924,6 +1940,43 @@ async function ingestMetrics(
         });
       }
     }
+    // Live wedge proxy: flag any cost-per-turn outlier (fire-once per agent).
+    // Computed from the token_samples just written this tick. Emits a `note`
+    // event → dashboard feed + audit; `note` is NOT a newsroom kind, so it
+    // never pushes into the head's conversation. Best-effort inside this try;
+    // the key is recorded only AFTER a successful append, so a throw retries.
+    const report = db.costPerTurnReport(orchId, {
+      z: COST_OUTLIER_Z,
+      minTurns: COST_OUTLIER_MIN_TURNS,
+    });
+    // A LIVE wedge detector targets agents still burning turns — skip terminal
+    // ones (a done agent that was expensive isn't currently wedged). The cohort
+    // distribution still includes everyone (terminal agents are valid context
+    // for "what's normal"); we just don't raise a flag on a finished agent.
+    const live = new Set(
+      fresh.agents.filter((a) => a.lifecycle === "running").map((a) => a.id),
+    );
+    if (fresh.head) live.add(headAgentId(orchId));
+    for (const alert of newCostOutlierAlerts(orchId, report, flaggedCostOutliers)) {
+      if (!live.has(alert.agentId)) continue;
+      await orchStore.appendEvent({
+        ts: now,
+        orchestrationId: orchId,
+        agentId: alert.agentId,
+        kind: "note",
+        message: `⚠ ${alert.message}`,
+        data: {
+          detector: "cost_per_turn_outlier",
+          costPerTurn: alert.costPerTurn,
+          z: alert.z,
+          medianCostPerTurn: alert.median,
+          turns: alert.turns,
+          role: alert.role,
+        },
+      });
+      flaggedCostOutliers.add(costOutlierKey(orchId, alert.agentId));
+    }
+
     // Tail just the bytes appended to events.jsonl since the stored offset.
     const prev = db.getEventsOffset(orchId);
     const { events, offset } = await orchStore.readEventsFromOffset(orchId, prev);

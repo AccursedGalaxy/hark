@@ -17,8 +17,10 @@ import {
   analyzeCostPerTurn,
   captureTurns,
   classifyToolCalls,
+  costOutlierKey,
   headAgentId,
   missingColumnAlters,
+  newCostOutlierAlerts,
   tokenSampleRow,
   type AgentCostPerTurn,
   type CapturedTurn,
@@ -975,5 +977,36 @@ describe("MetricsDb.costPerTurnReport", () => {
     const report = db.costPerTurnReport("orch-1");
     expect(report.agents).toEqual([]);
     db.close();
+  });
+});
+
+describe("newCostOutlierAlerts (fire-once live flag)", () => {
+  const report = {
+    agents: [],
+    median: 0.9,
+    mad: 0.05,
+    outliers: [
+      { agentId: "wedged", role: "coder", costUsd: 630, turns: 165, costPerTurn: 3.82, z: 54.6 },
+    ],
+  };
+
+  it("emits an alert for an unflagged outlier with a review-framed message", () => {
+    const alerts = newCostOutlierAlerts("orch-1", report, new Set());
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].agentId).toBe("wedged");
+    expect(alerts[0].message).toContain("$3.82/turn");
+    expect(alerts[0].message).toContain("modz 54.6");
+    expect(alerts[0].message).toContain("review");
+  });
+
+  it("suppresses an outlier already flagged this lifetime (no re-emit each tick)", () => {
+    const flagged = new Set([costOutlierKey("orch-1", "wedged")]);
+    expect(newCostOutlierAlerts("orch-1", report, flagged)).toEqual([]);
+  });
+
+  it("keys are scoped per-orchestration — same agentId in another orch still fires", () => {
+    const flagged = new Set([costOutlierKey("orch-1", "wedged")]);
+    const alerts = newCostOutlierAlerts("orch-2", report, flagged);
+    expect(alerts).toHaveLength(1);
   });
 });
