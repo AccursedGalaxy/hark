@@ -20,6 +20,7 @@ import {
   buildRevListCountArgs,
   buildShortstatArgs,
   diffBranch,
+  logBranch,
   buildWorktreeAddArgs,
   buildWorktreeListArgs,
   buildWorktreePruneArgs,
@@ -32,6 +33,7 @@ import {
   worktreeHeadBranch,
   worktreePath,
 } from "./worktree.js";
+import { agentBaseRef } from "./orchestrator.js";
 
 describe("linkNodeModules", () => {
   let root: string;
@@ -315,6 +317,155 @@ describe("diff against an advanced base shows only the worker's own changes", ()
       // One worker commit — NOT the two base-ahead commits.
       expect(summary.commitCount).toBe(1);
       expect(summary.diffstat).toBe("1 file +1/-0");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// Keystone of base-selection Slice 2: a STACKED worker (one forked from another
+// worker's branch, not the orch base) must measure diff/log against its own
+// persisted base — `agentBaseRef(agent, orch)` — NOT the global orch.baseRef.
+// This composes the three claimed behaviors end-to-end against a real repo:
+//   (a) the per-agent base flows through the read path,
+//   (b) diff/log target that base — proven load-bearing by the contrast that
+//       orch.baseRef WOULD wrongly include the upstream worker's commit, and
+//   (c) a default worker (no per-agent base) still falls back to orch.baseRef.
+// The unit-level pieces (persistence round-trip + helper resolution) live in
+// orchestrator.test.ts; this ties them to the actual git readers.
+describe("stacked worker measures against its per-agent base, not orch.baseRef", () => {
+  let root: string;
+  let repo: string;
+
+  function git(args: string[]): void {
+    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  }
+
+  function setup(): void {
+    root = mkdtempSync(join(tmpdir(), "hark-stacked-"));
+    repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["init", "-q", repo]);
+    git(["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(["config", "user.email", "t@t"]);
+    git(["config", "user.name", "t"]);
+    git(["config", "commit.gpgsign", "false"]);
+
+    // Orch base (`main`) — the fork point for the whole orchestration.
+    writeFileSync(join(repo, "shared.txt"), "0\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "c0"]);
+
+    // Upstream worker branches off main and lands its OWN commit. A downstream
+    // worker stacks on THIS branch, so this commit is upstream's work — it must
+    // NOT appear in the downstream worker's own diff.
+    git(["checkout", "-q", "-b", "upstream"]);
+    writeFileSync(join(repo, "upstream.txt"), "u\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "upstream commit"]);
+
+    // Downstream worker forks off `upstream` (as `spawnAgent --base upstream`
+    // does) and makes its own single change.
+    git(["checkout", "-q", "-b", "worker"]);
+    writeFileSync(join(repo, "worker.txt"), "w\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "worker commit"]);
+  }
+
+  function cleanup(): void {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  const orch = { baseRef: "main" };
+  const stackedAgent = { baseRef: "upstream" }; // spawned with --base upstream
+  const defaultAgent = { baseRef: undefined }; // plain worker, no --base
+
+  it("resolves the stacked worker's base to its persisted upstream, the default's to orch.baseRef", () => {
+    expect(agentBaseRef(stackedAgent, orch)).toBe("upstream");
+    expect(agentBaseRef(defaultAgent, orch)).toBe("main");
+  });
+
+  it("diffBranch against the per-agent base shows only the worker's change, not upstream's", async () => {
+    setup();
+    try {
+      const stat = await diffBranch({
+        repoRoot: repo,
+        baseRef: agentBaseRef(stackedAgent, orch),
+        branch: "worker",
+      });
+      expect(stat).toContain("worker.txt");
+      expect(stat).not.toContain("upstream.txt");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("CONTRAST: measuring the same worker against orch.baseRef WOULD wrongly include upstream's commit", async () => {
+    // This is the bug the per-agent base fixes: without it, a stacked worker's
+    // diff is polluted by its upstream's work. If this assertion ever flips,
+    // the per-agent base has stopped being load-bearing.
+    setup();
+    try {
+      const stat = await diffBranch({
+        repoRoot: repo,
+        baseRef: orch.baseRef, // the OLD behavior
+        branch: "worker",
+      });
+      expect(stat).toContain("worker.txt");
+      expect(stat).toContain("upstream.txt");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("logBranch against the per-agent base lists only the worker's commit", async () => {
+    setup();
+    try {
+      const log = await logBranch({
+        repoRoot: repo,
+        baseRef: agentBaseRef(stackedAgent, orch),
+        branch: "worker",
+      });
+      expect(log).toContain("worker commit");
+      expect(log).not.toContain("upstream commit");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("branchGitSummary counts one commit for the stacked base, two for the orch base", async () => {
+    setup();
+    try {
+      const stacked = await branchGitSummary({
+        repoRoot: repo,
+        baseRef: agentBaseRef(stackedAgent, orch),
+        branch: "worker",
+      });
+      expect(stacked.commitCount).toBe(1); // worker only
+
+      const fromOrchBase = await branchGitSummary({
+        repoRoot: repo,
+        baseRef: orch.baseRef,
+        branch: "worker",
+      });
+      expect(fromOrchBase.commitCount).toBe(2); // upstream + worker
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("a DEFAULT worker (no --base) measures against orch.baseRef — no regression", async () => {
+    // The default worker forks from main directly, so measuring against the
+    // resolved base (which falls back to orch.baseRef) is correct.
+    setup();
+    try {
+      const stat = await diffBranch({
+        repoRoot: repo,
+        baseRef: agentBaseRef(defaultAgent, orch),
+        branch: "upstream", // a worker that legitimately forked off main
+      });
+      expect(stat).toContain("upstream.txt");
+      expect(stat).not.toContain("worker.txt");
     } finally {
       cleanup();
     }
