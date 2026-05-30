@@ -91,10 +91,21 @@ export interface OrchestratorDeps {
 // `--permission-mode auto` for 88 calls before a benign tool error wedged it —
 // see the cancel-cascade breaker trigger in controller.ts).
 //
+// `--disallowed-tools Task,Agent` is the second, independent layer of that
+// defense-in-depth: it denies the sub-agent-spawning tools so a worker (or the
+// executor head) that DOES wedge mid-run can never fan the cancel-cascade out
+// into nested sub-agents — a wedged session stays a single contained failure
+// instead of seeding a tree of them. Skip-perms can't gate tools (the agent
+// already runs with permissions skipped), so the deny-list is the only lever
+// here. Tool names are comma-separated per `claude --help`; both Task and Agent
+// are listed to cover either naming of the built-in spawner (an unrecognized
+// name is simply ignored).
+//
 // Note: the persistent PM-head is promoted from an existing session, never
 // spawned here, and is held read-only on the real tree by a PreToolUse hook —
 // this command does not govern it.
-const CLAUDE_COMMAND = "claude --dangerously-skip-permissions";
+const CLAUDE_COMMAND =
+  "claude --dangerously-skip-permissions --disallowed-tools Task,Agent";
 
 export interface CreateTeamInput {
   name: string;
