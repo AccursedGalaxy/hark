@@ -360,7 +360,12 @@ function asstTurn(
   uuid: string,
   ts: string,
   tools: Array<{ id: string; name: string }>,
-  extra: { model?: string; stopReason?: string } = {},
+  extra: {
+    model?: string;
+    stopReason?: string;
+    isApiError?: boolean;
+    retryAttempt?: number;
+  } = {},
 ): TranscriptEvent {
   const blocks: ContentBlock[] = tools.map((t) => ({
     type: "tool_use",
@@ -375,6 +380,24 @@ function asstTurn(
     blocks,
     model: extra.model,
     stopReason: extra.stopReason,
+    isApiError: extra.isApiError,
+    retryAttempt: extra.retryAttempt,
+  };
+}
+
+// Build a tool_result event pairing back to a tool_use block by its id. Absence
+// of one of these for a given tool_use id is the dropped/in-flight signal.
+function toolResult(
+  toolUseId: string,
+  opts: { isError?: boolean; ts?: string } = {},
+): TranscriptEvent {
+  return {
+    kind: "tool_result",
+    uuid: `res-${toolUseId}`,
+    ts: opts.ts ?? "2026-05-29T10:00:01.500Z",
+    toolUseId,
+    output: "ok",
+    isError: opts.isError ?? false,
   };
 }
 
@@ -401,14 +424,15 @@ describe("captureTurns (intent extraction)", () => {
     expect(turns[0].ts).toBe(Date.parse("2026-05-29T10:00:01.000Z"));
     expect(turns[0].model).toBe("claude-opus-4-8");
     expect(turns[0].stopReason).toBe("tool_use");
+    // No tool_result events in this stream → every call shows resultSeen=false.
     expect(turns[0].toolCalls).toEqual([
-      { callId: "toolu_1", channel: "Bash", batchPosition: 0 },
-      { callId: "toolu_2", channel: "Edit", batchPosition: 1 },
+      { callId: "toolu_1", channel: "Bash", batchPosition: 0, resultSeen: false, isError: false, resultTs: null },
+      { callId: "toolu_2", channel: "Edit", batchPosition: 1, resultSeen: false, isError: false, resultTs: null },
     ]);
     // Turn index advances per assistant turn (matches the token-metrics count).
     expect(turns[1].turnIndex).toBe(1);
     expect(turns[1].toolCalls).toEqual([
-      { callId: "toolu_3", channel: "Write", batchPosition: 0 },
+      { callId: "toolu_3", channel: "Write", batchPosition: 0, resultSeen: false, isError: false, resultTs: null },
     ]);
   });
 
@@ -431,6 +455,36 @@ describe("captureTurns (intent extraction)", () => {
   it("yields a null ts for an unparseable timestamp", () => {
     const turns = captureTurns([asstTurn("a1", "", [{ id: "t1", name: "Bash" }])]);
     expect(turns[0].ts).toBeNull();
+  });
+
+  it("pairs each tool_use with its tool_result outcome (seen / error / ts)", () => {
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [
+        { id: "ok1", name: "Bash" }, // clean result
+        { id: "err1", name: "Bash" }, // error result
+        { id: "drop1", name: "Edit" }, // NO result (dropped)
+      ]),
+      toolResult("ok1", { ts: "2026-05-29T10:00:01.500Z" }),
+      toolResult("err1", { isError: true }),
+    ];
+    const [t] = captureTurns(events);
+    expect(t.toolCalls[0]).toMatchObject({ callId: "ok1", resultSeen: true, isError: false });
+    expect(t.toolCalls[0].resultTs).toBe(Date.parse("2026-05-29T10:00:01.500Z"));
+    expect(t.toolCalls[1]).toMatchObject({ callId: "err1", resultSeen: true, isError: true });
+    expect(t.toolCalls[2]).toMatchObject({ callId: "drop1", resultSeen: false, isError: false, resultTs: null });
+  });
+
+  it("captures the turn's platform self-reports (isApiError / retryAttempt)", () => {
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [{ id: "t1", name: "Bash" }], {
+        isApiError: true,
+        retryAttempt: 2,
+      }),
+      asstTurn("a2", "2026-05-29T10:00:02.000Z", [{ id: "t2", name: "Bash" }]),
+    ];
+    const turns = captureTurns(events);
+    expect(turns[0]).toMatchObject({ isApiError: true, retryAttempt: 2 });
+    expect(turns[1]).toMatchObject({ isApiError: false, retryAttempt: null });
   });
 });
 
@@ -462,6 +516,28 @@ describe("MetricsDb.ingestTurns", () => {
     const turns = readAll(db, "SELECT tool_call_count FROM turns");
     expect(turns).toHaveLength(1);
     expect(turns[0].tool_call_count).toBe(2);
+    db.close();
+  });
+
+  it("INVARIANT: a dropped result persists result_seen=0 with the intent row intact", () => {
+    // The PR-1 guard: a tool_use whose result was dropped must still land an
+    // intent row — only its OUTCOME columns reflect the loss (result_seen=0).
+    const db = new MetricsDb(":memory:");
+    const events: TranscriptEvent[] = [
+      asstTurn("a1", "2026-05-29T10:00:01.000Z", [
+        { id: "seen", name: "Bash" },
+        { id: "dropped", name: "Edit" },
+      ]),
+      toolResult("seen"), // only the first call's result came back
+    ];
+    db.ingestTurns("agent-1", "orch-1", "sess-1", captureTurns(events));
+    const rows = readAll(
+      db,
+      "SELECT call_id, result_seen, is_error FROM tool_calls ORDER BY batch_position",
+    );
+    expect(rows).toHaveLength(2); // BOTH intent rows exist
+    expect(rows[0]).toMatchObject({ call_id: "seen", result_seen: 1 });
+    expect(rows[1]).toMatchObject({ call_id: "dropped", result_seen: 0 });
     db.close();
   });
 
