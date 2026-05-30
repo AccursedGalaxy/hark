@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, symlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { type AgentLifecycle, isHandoffReady } from "../../shared/protocol.js";
 
 // Isolated git worktrees are how orchestration keeps N agents working the same
 // repo without stepping on each other: each agent gets its own branch checked
@@ -106,6 +107,26 @@ export function resolveWorktreeBase(
     return { fetchRef: null, checkoutRef: baseRef };
   }
   return { fetchRef: baseRef, checkoutRef: `origin/${baseRef}` };
+}
+
+// Decide how to base a DEPENDENT (--depends-on) worker's worktree, given its
+// upstream worker. Mirrors resolveWorktreeBase, but the fork point is the
+// UPSTREAM's branch HEAD — not the orchestration base — so the dependent
+// inherits the upstream's commits. The catch is timing: at spawn time the
+// upstream usually hasn't produced those commits yet, so we branch lazily at
+// HANDOFF time. Pure so the decision is unit-testable without a real repo (the
+// orchestrator does the IO and the deferral bookkeeping).
+//
+// - upstream missing, or not yet handed off: NOT ready — the dependent stays
+//   deferred (no worktree), to be materialized when the upstream finishes.
+// - upstream handed off (review/done): ready — branch off the upstream's branch.
+export function resolveDependentBase(
+  upstream: { branch: string; lifecycle: AgentLifecycle } | undefined,
+): { ready: boolean; baseRef: string | null } {
+  if (!upstream || !isHandoffReady(upstream.lifecycle)) {
+    return { ready: false, baseRef: null };
+  }
+  return { ready: true, baseRef: upstream.branch };
 }
 
 // `git -C <repoRoot> worktree remove [--force] <path>`. Force is needed when

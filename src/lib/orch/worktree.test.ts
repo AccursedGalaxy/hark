@@ -26,7 +26,9 @@ import {
   buildWorktreeRemoveArgs,
   formatShortstat,
   parseWorktreeList,
+  resolveDependentBase,
   resolveWorktreeBase,
+  addWorktree,
   slugify,
   worktreeBranchName,
   worktreeHeadBranch,
@@ -150,6 +152,101 @@ describe("resolveWorktreeBase", () => {
       fetchRef: "main",
       checkoutRef: "origin/main",
     });
+  });
+});
+
+describe("resolveDependentBase", () => {
+  it("defers when the upstream is missing", () => {
+    expect(resolveDependentBase(undefined)).toEqual({
+      ready: false,
+      baseRef: null,
+    });
+  });
+
+  it("defers while the upstream is still running", () => {
+    expect(
+      resolveDependentBase({ branch: "hark/o/coder-abc", lifecycle: "running" }),
+    ).toEqual({ ready: false, baseRef: null });
+  });
+
+  it("defers when the upstream failed (nothing worth forking)", () => {
+    expect(
+      resolveDependentBase({ branch: "hark/o/coder-abc", lifecycle: "failed" }),
+    ).toEqual({ ready: false, baseRef: null });
+  });
+
+  it("forks the upstream branch once it hands off to review", () => {
+    expect(
+      resolveDependentBase({ branch: "hark/o/coder-abc", lifecycle: "review" }),
+    ).toEqual({ ready: true, baseRef: "hark/o/coder-abc" });
+  });
+
+  it("forks the upstream branch once it is done", () => {
+    expect(
+      resolveDependentBase({ branch: "hark/o/coder-abc", lifecycle: "done" }),
+    ).toEqual({ ready: true, baseRef: "hark/o/coder-abc" });
+  });
+});
+
+describe("a dependent worktree branched at handoff sees the upstream's diff", () => {
+  let root: string;
+  let repo: string;
+
+  function git(args: string[]): void {
+    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  }
+
+  function setup(): void {
+    root = mkdtempSync(join(tmpdir(), "hark-dep-"));
+    repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["init", "-q", repo]);
+    git(["symbolic-ref", "HEAD", "refs/heads/base"]);
+    git(["config", "user.email", "t@t"]);
+    git(["config", "user.name", "t"]);
+    git(["config", "commit.gpgsign", "false"]);
+
+    // The orchestration base.
+    writeFileSync(join(repo, "shared.txt"), "0\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "c0"]);
+
+    // The UPSTREAM worker's branch, with a commit the dependent must inherit.
+    git(["branch", "upstream"]);
+    git(["checkout", "-q", "upstream"]);
+    writeFileSync(join(repo, "upstream.txt"), "from upstream\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "upstream commit"]);
+    git(["checkout", "-q", "base"]);
+  }
+
+  function cleanup(): void {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  it("forks the upstream branch HEAD so the upstream's file is present", async () => {
+    setup();
+    try {
+      const worktreeDir = join(root, "dependent");
+      // Handoff-time branching: base off the upstream's branch, not the orch base.
+      await addWorktree({
+        repoRoot: repo,
+        worktreeDir,
+        branch: "dependent",
+        baseRef: "upstream",
+      });
+      // The dependent's checkout contains the upstream's commit...
+      expect(existsSync(join(worktreeDir, "upstream.txt"))).toBe(true);
+      // ...and its branch carries no extra changes versus the upstream yet.
+      const summary = await branchGitSummary({
+        repoRoot: repo,
+        baseRef: "upstream",
+        branch: "dependent",
+      });
+      expect(summary.commitCount).toBe(0);
+    } finally {
+      cleanup();
+    }
   });
 });
 

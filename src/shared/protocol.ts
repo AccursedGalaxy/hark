@@ -292,6 +292,21 @@ export function isTerminalLifecycle(lifecycle: AgentLifecycle): boolean {
   return TERMINAL_LIFECYCLES.includes(lifecycle);
 }
 
+// Lifecycles at which an upstream worker has finished producing its commits, so
+// a downstream (--depends-on) worker may fork its branch HEAD and inherit them.
+// A worker reaches these by emitting [[HARK:HANDOFF]] (→ review) or [[HARK:DONE]]
+// (→ done). A failed / stopped / cancelled upstream produced nothing worth
+// forking, so its dependents stay deferred. The single source of truth for the
+// handoff-time worktree derivation (resolveDependentBase).
+export const HANDOFF_READY_LIFECYCLES: readonly AgentLifecycle[] = [
+  "review",
+  "done",
+];
+
+export function isHandoffReady(lifecycle: AgentLifecycle): boolean {
+  return HANDOFF_READY_LIFECYCLES.includes(lifecycle);
+}
+
 // Per-agent metrics, accumulated from the transcript (tokens/cost) and the
 // lifecycle timeline (autonomy time, interventions). The "document everything"
 // half of the brief — these power the orchestration dashboard.
