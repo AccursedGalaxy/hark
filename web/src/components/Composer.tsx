@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import { useKeyboardInset } from "../hooks/useKeyboardInset";
+import { composerEnterAction, spliceNewline } from "../lib/composerKeys";
 import type {
   Pending,
   PromptKind,
@@ -400,21 +401,19 @@ export function Composer({
   const onKeyDown = (e: React.KeyboardEvent) => {
     noteKeyForHardwareDetection(e);
     if (slashMenu.onKeyDown(e)) return;
+    const action = composerEnterAction(e, shouldSendOnEnter());
     // Alt+Enter inserts a literal newline at the caret instead of submitting,
     // matching the Claude Code CLI. Alt+Enter does not insert a newline
     // natively, so splice it into the controlled value and restore the caret.
-    if (e.key === "Enter" && e.altKey) {
+    if (action === "newline") {
       e.preventDefault();
       const ta = taRef.current;
       const start = ta?.selectionStart ?? text.length;
       const end = ta?.selectionEnd ?? text.length;
-      commitSlashEdit({
-        text: `${text.slice(0, start)}\n${text.slice(end)}`,
-        caret: start + 1,
-      });
+      commitSlashEdit(spliceNewline(text, start, end));
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey && shouldSendOnEnter()) {
+    if (action === "submit") {
       e.preventDefault();
       void submitText();
     }
