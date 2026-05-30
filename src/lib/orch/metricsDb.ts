@@ -705,14 +705,24 @@ export class MetricsDb {
       .run(...tokenSampleRow(s));
   }
 
+  // Best-effort: this DB is a derived AUGMENT, never the source of truth, so a
+  // sqlite throw here must NEVER propagate. By the time `hark pr` calls us the
+  // PR has already been opened (or the attempt already classified) — a
+  // metrics-write failure cannot be allowed to 500 an outcome that already
+  // happened. Swallow + log, mirroring the reconcile-loop ingest which is
+  // likewise best-effort.
   insertPrOutcome(p: PrOutcomeInput): void {
-    this.db
-      .prepare(
-        `INSERT INTO pr_outcomes
-           (orch_id, agent_id, ts, status, url, base_ref, branch, message)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(...prOutcomeRow(p));
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO pr_outcomes
+             (orch_id, agent_id, ts, status, url, base_ref, branch, message)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(...prOutcomeRow(p));
+    } catch (err) {
+      console.error("metrics insertPrOutcome failed", err);
+    }
   }
 
   // Append events tailed from events.jsonl. Caller passes only the new lines

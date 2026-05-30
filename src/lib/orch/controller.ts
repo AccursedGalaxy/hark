@@ -1329,16 +1329,23 @@ export class AutonomyController {
   // This only (1) delivers the head briefing once its session is ready, (2)
   // keeps head metrics fresh, and (3) interprets a head DONE marker as the
   // ORCHESTRATION being complete (Sharp Edge 6 — head markers are orch-scoped).
+  // Returns the sample it read (metrics + raw events, same shape as
+  // refreshHeadMetrics) so the reconcile loop can reuse it for the DB ingest
+  // instead of re-reading the head transcript a second time per tick; null when
+  // there's no head, or no session yet to read.
   async onHeadSignal(
     orchId: string,
     _opts: { stopped: boolean },
-  ): Promise<void> {
+  ): Promise<{ metrics: TranscriptMetrics; events: TranscriptEvent[] } | null> {
     const orch = await this.deps.store.getOrchestration(orchId);
-    if (!orch?.head) return;
+    if (!orch?.head) return null;
     const head = orch.head;
 
-    // Metrics + marker scan (only once the session has registered).
+    // Metrics + marker scan (only once the session has registered). The sample
+    // we read here is returned so the caller needn't re-read the transcript.
     let scan: MarkerScan = { kind: null, summary: "" };
+    let sample: { metrics: TranscriptMetrics; events: TranscriptEvent[] } | null =
+      null;
     if (head.sessionId) {
       const events = await this.deps.readTranscript(head.sessionId);
       scan = scanMarkers(transcriptText(events));
@@ -1351,6 +1358,7 @@ export class AutonomyController {
         h.metrics.costUsd = tm.costUsd;
         h.metrics.turns = tm.turns;
       });
+      sample = { metrics: tm, events };
     }
 
     // A managed PM-head (promoted session) is NOT a task-scoped executor: its
@@ -1358,7 +1366,7 @@ export class AutonomyController {
     // user + the idle loop, and it never emits an orchestration-closing DONE.
     // So skip the executor briefing-delivery + DONE-completion flow entirely —
     // we only keep its metrics fresh (above).
-    if (orch.managed) return;
+    if (orch.managed) return sample;
 
     // Deliver the head briefing once, when ready and not yet briefed.
     if (head.briefedAt == null && this.deps.sendToHead && this.deps.headReady) {
@@ -1375,7 +1383,7 @@ export class AutonomyController {
           message: "head briefing delivered",
           data: { kind: "head_briefing" },
         });
-        return;
+        return sample;
       }
     }
 
@@ -1383,6 +1391,7 @@ export class AutonomyController {
     if (scan.kind === "done" && orch.status === "active") {
       await this.deps.store.setStatus(orchId, "completed");
     }
+    return sample;
   }
 
   private async perform(
