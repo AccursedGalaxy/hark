@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { SessionView } from "../hooks/useSessions";
-import { shortId, tildeify } from "../lib/format";
+import { formatThinkingDuration, shortId, tildeify } from "../lib/format";
 import {
   BranchIcon,
   ForkIcon,
@@ -48,7 +48,7 @@ export function TopBar({
   const chip = STATE_TO_CHIP[session.state] ?? STATE_TO_CHIP.idle;
   const chipText =
     session.state === "busy"
-      ? `${chip.label} · ${busySeconds}s`
+      ? `${chip.label} · ${formatThinkingDuration(busySeconds)}`
       : chip.label;
 
   const project = tildeify(session.cwd);
