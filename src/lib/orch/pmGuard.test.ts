@@ -266,6 +266,43 @@ describe("evaluatePreToolUse — worker-dispatch + quote awareness", () => {
     ).toBe("deny");
   });
 
+  it("allows stdin/heredoc reads (<, <<, <<<) — they are reads, not writes", () => {
+    // Bare `<` reads a tree file into stdin; never a write.
+    expect(bash("cat < src/index.ts").decision).toBe("allow");
+    // Here-string `<<<` feeds same-line data to stdin.
+    expect(bash("grep foo <<< src/index.ts").decision).toBe("allow");
+    // Heredoc `<<DELIM`: the body is opaque data, even when it contains
+    // shell-looking prose like `>` or `rm` that would otherwise be flagged.
+    const heredoc =
+      "cat <<EOF\n" +
+      "ship src/x.ts; emit a > marker then rm the stub & retry | tee\n" +
+      "EOF";
+    expect(bash(heredoc).decision).toBe("allow");
+  });
+
+  it("allows a hark dispatch whose brief is piped via a heredoc (--task-file -)", () => {
+    const cmd =
+      "hark agent spawn coder --task-file - <<BRIEF\n" +
+      "Refactor the PR flow.\n" +
+      "Steps: read src/lib/orch/pr.ts; pipe it | grep foo; emit a > marker.\n" +
+      "Then write src/out.ts > here and rm the scratch file.\n" +
+      "BRIEF";
+    expect(bash(cmd).decision).toBe("allow");
+  });
+
+  it("still denies > / >> into a tree path chained after a heredoc body", () => {
+    // The terminating delimiter line ends the heredoc statement, so a real
+    // write redirection on the next line is still inspected and denied.
+    expect(bash("cat <<EOF\nbody text\nEOF\necho x > src/index.ts").decision).toBe(
+      "deny",
+    );
+    expect(bash("cat <<EOF\nbody text\nEOF\ncat foo >> src/notes.txt").decision).toBe(
+      "deny",
+    );
+    // And a write redirection on the command line itself (not the body).
+    expect(bash("echo x > src/index.ts").decision).toBe("deny");
+  });
+
   it("keeps existing deny cases intact alongside the dispatch allowlist", () => {
     // Write to source still denied.
     expect(
