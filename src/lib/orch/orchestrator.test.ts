@@ -343,6 +343,9 @@ describe("Orchestrator.spawnAgent task/dependsOn", () => {
     const call = calls.spawnCalls.find((c) => c.cwd === a.worktreeDir)!;
     expect(call.env?.HARK_ROLE).toBe("coder");
     expect(call.command).toContain("--dangerously-skip-permissions");
+    // ...and deny the sub-agent spawners so a wedged worker can't fan the
+    // cancel-cascade out into nested sub-agents (defense-in-depth).
+    expect(call.command).toContain("--disallowed-tools Task,Agent");
 
     // The dispatched task flows into the briefing.
     const persisted = await store.getOrchestration(created.orchestration.id);
