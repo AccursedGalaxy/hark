@@ -30,6 +30,19 @@ import {
 // the orchestration logic — id derivation, ordering, rollback, lifecycle and
 // event bookkeeping — is unit-testable with fakes, no git/tmux required.
 
+// The base ref an agent's read paths (diff / log / PR) measure against: its
+// own persisted base when present, else the orchestration default. The fallback
+// keeps legacy agents — spawned before per-agent base was persisted — measuring
+// against orch.baseRef exactly as they did before. This is the single source of
+// truth for "what is this agent's base"; every read site uses it so the diff,
+// log, and PR target can never drift apart.
+export function agentBaseRef(
+  agent: Pick<OrchAgent, "baseRef">,
+  orch: Pick<Orchestration, "baseRef">,
+): string {
+  return agent.baseRef ?? orch.baseRef;
+}
+
 export interface SpawnSessionResult {
   pid: number | null;
 }
@@ -159,12 +172,18 @@ export class Orchestrator {
       orchId,
       id,
     );
+    // Resolve the base once: an explicit --base, else the orchestration's
+    // default. Persisted on the agent AND used to fork the worktree so the two
+    // never diverge — every downstream read (diff/log/PR) measures against the
+    // same ref the worktree was cut from.
+    const baseRef = opts.baseRef ?? orch.baseRef;
 
     const agent = await this.deps.store.addAgent(orchId, {
       id,
       role,
       branch,
       worktreeDir,
+      baseRef,
       lifecycle: "pending",
     });
     if (!agent) throw new Error(`orchestration not found: ${orchId}`);
@@ -178,15 +197,14 @@ export class Orchestrator {
       });
     }
 
-    // 1. Isolated worktree. An explicit opts.baseRef forks from that ref
-    //    instead of the orchestration's default base (fork-time only — the
-    //    agent's diff/PR still measure against orch.baseRef).
+    // 1. Isolated worktree, forked from the resolved base (persisted above so
+    //    the agent's diff/log/PR measure against this same ref).
     try {
       await this.deps.addWorktree({
         repoRoot: orch.projectRoot,
         worktreeDir,
         branch,
-        baseRef: opts.baseRef ?? orch.baseRef,
+        baseRef,
       });
     } catch (err) {
       await this.fail(orchId, id, `worktree create failed: ${err}`);

@@ -371,6 +371,13 @@ export interface OrchAgent {
   // Isolated branch + worktree directory this agent owns.
   branch: string;
   worktreeDir: string;
+  // The ref this agent's worktree was forked from AND the ref its diff/log/PR
+  // measure against — the resolved `--base` at spawn, or the orchestration's
+  // default base when no `--base` was given. Persisting it per-agent is what
+  // lets a stacked worker's diff/PR target its upstream branch instead of the
+  // whole-orch baseRef. Undefined on legacy records spawned before this field
+  // existed; read paths fall back to orch.baseRef in that case.
+  baseRef?: string;
   // Claude Code session id once the spawned process registers itself; null
   // until then. PID is captured at spawn so the agent can be correlated to its
   // session/pane even before the session id exists.
