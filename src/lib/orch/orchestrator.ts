@@ -66,6 +66,9 @@ export interface OrchestratorDeps {
     command?: string;
     env?: Record<string, string>;
     pathPrepend?: string;
+    // Human-facing tmux window name (e.g. "hark-coder"). Cosmetic — the
+    // orchestrator still correlates sessions by pid, never by window name.
+    windowName?: string;
   }) => Promise<SpawnSessionResult>;
   // Kill a spawned session's process (by its pane pid) during teardown. The
   // live `claude` TUI must be killed BEFORE its worktree is removed — otherwise
@@ -190,6 +193,7 @@ export class Orchestrator {
         command: CLAUDE_COMMAND,
         env: this.sessionEnv(orchId, role),
         pathPrepend: this.deps.cliBinDir,
+        windowName: `${orch.projectName}-${role}`,
       });
       pid = result.pid;
     } catch (err) {
@@ -244,6 +248,7 @@ export class Orchestrator {
         command: CLAUDE_COMMAND,
         env: this.sessionEnv(orchId, "head"),
         pathPrepend: this.deps.cliBinDir,
+        windowName: `${orch.projectName}-head`,
       });
       pid = result.pid;
     } catch (err) {

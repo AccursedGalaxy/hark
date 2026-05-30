@@ -8,6 +8,11 @@ export interface SpawnInput {
   sessionName: string;
   cwd: string;
   command: string;
+  // Optional human-facing tmux window name (e.g. "hark-coder"). Cosmetic only:
+  // the rest of the system targets panes by pid, never by window name, so this
+  // just makes the window legible in the tmux status bar instead of showing the
+  // default command. Omitted → tmux picks its own name.
+  windowName?: string;
 }
 
 // Build a shell-command that runs `claude` inside the user's login +
@@ -71,6 +76,7 @@ export function buildNewWindowArgs(input: SpawnInput): string[] {
     "#{pane_pid}",
     "-t",
     input.sessionName,
+    ...(input.windowName ? ["-n", input.windowName] : []),
     "-c",
     input.cwd,
     input.command,
@@ -86,6 +92,7 @@ export function buildNewSessionArgs(input: SpawnInput): string[] {
     "#{pane_pid}",
     "-s",
     input.sessionName,
+    ...(input.windowName ? ["-n", input.windowName] : []),
     "-c",
     input.cwd,
     input.command,
@@ -184,6 +191,8 @@ export async function spawnClaudeSession(opts: {
   env?: Record<string, string>;
   // Directory prepended to PATH (puts the `hark` CLI on the session's PATH).
   pathPrepend?: string;
+  // Human-facing tmux window name (e.g. "hark-coder"). Cosmetic — see SpawnInput.
+  windowName?: string;
 }): Promise<SpawnResult> {
   const userShell = os.userInfo().shell || "/bin/sh";
   const inner = opts.command ?? "claude";
@@ -200,6 +209,7 @@ export async function spawnClaudeSession(opts: {
         sessionName: target.name,
         cwd: opts.cwd,
         command,
+        windowName: opts.windowName,
       }),
     );
     return {
@@ -214,6 +224,7 @@ export async function spawnClaudeSession(opts: {
       sessionName: "claude",
       cwd: opts.cwd,
       command,
+      windowName: opts.windowName,
     }),
   );
   return {

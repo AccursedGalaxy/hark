@@ -322,8 +322,8 @@ const orchestrator = new Orchestrator({
   addWorktree,
   removeWorktree,
   clearTrust,
-  spawnSession: ({ cwd, command, env, pathPrepend }) =>
-    spawnClaudeSession({ cwd, command, env, pathPrepend }),
+  spawnSession: ({ cwd, command, env, pathPrepend, windowName }) =>
+    spawnClaudeSession({ cwd, command, env, pathPrepend, windowName }),
   // Terminate the session's pane process on teardown. The spawn pid is the
   // pane's process (sh → user shell → claude, same pid across the exec chain),
   // so SIGTERM-ing it exits claude and lets tmux close the window. Wrapped so a
