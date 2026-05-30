@@ -5,6 +5,7 @@ import path from "node:path";
 import { OrchStore } from "./store.js";
 import {
   Orchestrator,
+  agentBaseRef,
   type OrchestratorDeps,
   type SpawnSessionResult,
 } from "./orchestrator.js";
@@ -370,6 +371,31 @@ describe("Orchestrator.spawnAgent task/dependsOn", () => {
     });
     expect(calls.added.find((w) => w.worktreeDir === b.worktreeDir)?.baseRef).toBe(
       "feature/upstream",
+    );
+
+    // ...and the resolved base is PERSISTED on each agent record (the linchpin
+    // for the read path — diff/log/PR measure against this, not orch.baseRef).
+    const persisted = await store.getOrchestration(created.orchestration.id);
+    expect(persisted!.agents.find((x) => x.id === a.id)?.baseRef).toBe("main");
+    expect(persisted!.agents.find((x) => x.id === b.id)?.baseRef).toBe(
+      "feature/upstream",
+    );
+  });
+});
+
+describe("agentBaseRef", () => {
+  // The read paths (diff / log / PR) resolve their base through this helper, so
+  // a stacked worker measures against its own base and a default worker still
+  // measures against the orchestration base.
+  it("uses the agent's persisted base when set (a spawned-with-base worker)", () => {
+    expect(
+      agentBaseRef({ baseRef: "feature/upstream" }, { baseRef: "main" }),
+    ).toBe("feature/upstream");
+  });
+
+  it("falls back to the orch base for a default / legacy agent (no per-agent base)", () => {
+    expect(agentBaseRef({ baseRef: undefined }, { baseRef: "main" })).toBe(
+      "main",
     );
   });
 });
