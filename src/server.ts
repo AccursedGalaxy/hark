@@ -1427,21 +1427,30 @@ app.post("/api/orchestrations/:id/agents", async (req, res) => {
     role?: unknown;
     task?: unknown;
     dependsOn?: unknown;
+    base?: unknown;
   };
   const known = new Set<AgentRole>(AGENT_ROLES);
   if (typeof body.role !== "string" || !known.has(body.role as AgentRole)) {
     res.status(400).json({ error: `role must be one of: ${AGENT_ROLES.join(", ")}` });
     return;
   }
+  // An explicit --base forks the worker's worktree from <ref> instead of the
+  // orchestration's default base. Fork-time only: diff/PR still measure against
+  // orch.baseRef, so it isn't persisted on the agent.
+  const baseOverride =
+    typeof body.base === "string" && body.base.trim().length > 0
+      ? body.base.trim()
+      : undefined;
   try {
     const agent = await orchestrator.spawnAgent(orch.id, body.role as AgentRole, {
       task: typeof body.task === "string" ? body.task : undefined,
       dependsOn: typeof body.dependsOn === "string" ? body.dependsOn : undefined,
+      baseRef: baseOverride,
     });
-    // baseRef lives on the orchestration, not the agent; echo it alongside so
-    // the spawn CLI can print everything the head needs to run `hark pr <id>`
-    // without a follow-up status/git lookup.
-    res.json({ ok: true, agent, baseRef: orch.baseRef });
+    // baseRef lives on the orchestration, not the agent; echo the base the
+    // worktree was actually forked from so the spawn CLI can print everything
+    // the head needs to run `hark pr <id>` without a follow-up status/git lookup.
+    res.json({ ok: true, agent, baseRef: baseOverride ?? orch.baseRef });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

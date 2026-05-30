@@ -72,7 +72,7 @@ const USAGE = `hark — orchestration head CLI
   hark orch status [--all]                  show active agents + the head (compact); --all includes terminal workers
   hark orch watch                           block until the next event, print it, exit
   hark orch set-base <ref>                  re-point the orchestration's base branch
-  hark agent spawn <role> (--task "…" | --task-file <path|->) [--depends-on <id>]   spawn a worker (head only)
+  hark agent spawn <role> (--task "…" | --task-file <path|->) [--depends-on <id>] [--base <ref>]   spawn a worker (head only; --base forks its worktree from <ref> instead of the orch base)
   hark agent send  <id> "<message>"         steer a worker
   hark agent brief <id> ("<task>" | --task-file <path|->)   assign a worker its next task
   hark agent stop  <id>                      halt a worker (SIGTERM + mark stopped, keeps the worktree)
@@ -282,6 +282,12 @@ export function planCommand(argv: string[], env: CliEnv): CliPlan {
         const body: Record<string, unknown> = { role, task };
         if (typeof flags["--depends-on"] === "string") {
           body.dependsOn = flags["--depends-on"];
+        }
+        // --base forks the worker's worktree from <ref> instead of the
+        // orchestration's default base. Fork-time only — diff/PR still
+        // measure against the orch base.
+        if (typeof flags["--base"] === "string") {
+          body.base = flags["--base"];
         }
         return {
           kind: "request",
