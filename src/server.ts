@@ -1435,8 +1435,9 @@ app.post("/api/orchestrations/:id/agents", async (req, res) => {
     return;
   }
   // An explicit --base forks the worker's worktree from <ref> instead of the
-  // orchestration's default base. Fork-time only: diff/PR still measure against
-  // orch.baseRef, so it isn't persisted on the agent.
+  // orchestration's default base. The resolved base is now PERSISTED on the
+  // agent record (see spawnAgent), so the worker's diff/log/PR measure against
+  // the same ref its worktree was cut from — see agentBaseRef.
   const baseOverride =
     typeof body.base === "string" && body.base.trim().length > 0
       ? body.base.trim()
@@ -1447,10 +1448,10 @@ app.post("/api/orchestrations/:id/agents", async (req, res) => {
       dependsOn: typeof body.dependsOn === "string" ? body.dependsOn : undefined,
       baseRef: baseOverride,
     });
-    // baseRef lives on the orchestration, not the agent; echo the base the
-    // worktree was actually forked from so the spawn CLI can print everything
-    // the head needs to run `hark pr <id>` without a follow-up status/git lookup.
-    res.json({ ok: true, agent, baseRef: baseOverride ?? orch.baseRef });
+    // Echo the agent's resolved base (its persisted per-agent base, falling
+    // back to the orch default) so the spawn CLI can print everything the head
+    // needs to run `hark pr <id>` without a follow-up status/git lookup.
+    res.json({ ok: true, agent, baseRef: agentBaseRef(agent, orch) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
