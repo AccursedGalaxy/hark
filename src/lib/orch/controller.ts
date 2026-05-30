@@ -966,29 +966,29 @@ export class AutonomyController {
     // Head-session model: when a worker actually TRANSITIONS to a state the
     // head must act on, notify the head. Gated on a real transition so the
     // reconcile tick can't spam every 3s while an agent sits in place.
-    if (
-      action.type === "set_lifecycle" &&
-      action.lifecycle !== prevLifecycle &&
-      orch.head
-    ) {
-      if (isTerminalLifecycle(action.lifecycle)) {
-        // Terminal (done/blocked): route through the fire-once wake so the head
-        // is woken exactly once whether the transition is seen here (marker) or
-        // by the reconcile loop — robust to the marker-vs-reconcile race.
-        await this.wakeHeadForTerminal(orch.id, agent.id);
-      } else if (action.lifecycle === "review") {
-        // Handoff → review is NOT terminal (the work is awaiting review, not
-        // finished), so it keeps the immediate transition-guarded notification.
-        const note = await this.notifyHead(orch, agent, "handoff", scan.summary);
-        if (orch.managed && note) {
-          await this.routeManagedHead(orch, agent, note);
+    if (action.type === "set_lifecycle" && action.lifecycle !== prevLifecycle) {
+      if (orch.head) {
+        if (isTerminalLifecycle(action.lifecycle)) {
+          // Terminal (done/blocked): route through the fire-once wake so the
+          // head is woken exactly once whether the transition is seen here
+          // (marker) or by the reconcile loop — robust to the marker-vs-reconcile
+          // race.
+          await this.wakeHeadForTerminal(orch.id, agent.id);
+        } else if (action.lifecycle === "review") {
+          // Handoff → review is NOT terminal (the work is awaiting review, not
+          // finished), so it keeps the immediate transition-guarded notification.
+          const note = await this.notifyHead(orch, agent, "handoff", scan.summary);
+          if (orch.managed && note) {
+            await this.routeManagedHead(orch, agent, note);
+          }
         }
       }
       // Lazy-branch-at-handoff: a worker reaching a handoff-ready lifecycle
       // (review/done) is the trigger for any DEFERRED --depends-on workers to
-      // fork its branch HEAD and spawn. Idempotent in the orchestrator, so the
-      // marker path here and the reconcile path (wakeHeadForTerminal) can both
-      // cover it without double-spawning.
+      // fork its branch HEAD and spawn. Independent of the head (a dependent
+      // forks the branch whether or not a head is coordinating) and idempotent
+      // in the orchestrator, so the marker path here and the reconcile path
+      // (wakeHeadForTerminal) can both cover it without double-spawning.
       if (isHandoffReady(action.lifecycle)) {
         await this.deps.orchestrator.materializeDependents(orch.id, agent.id);
       }

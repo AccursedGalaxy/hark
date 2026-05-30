@@ -2114,6 +2114,74 @@ async function makeManagedWithWorker(opts: {
   return { orchId: o.id, agentId: agent!.id };
 }
 
+describe("AutonomyController lazy-branch-at-handoff", () => {
+  it("materializes a deferred dependent off the upstream branch when it hands off", async () => {
+    const added: { worktreeDir: string; baseRef: string }[] = [];
+    orchestrator = new Orchestrator({
+      store,
+      addWorktree: async (o) => {
+        added.push({ worktreeDir: o.worktreeDir, baseRef: o.baseRef });
+      },
+      removeWorktree: async () => {},
+      clearTrust: async () => {},
+      killSession: async () => {},
+      spawnSession: async () => ({ pid: 7 }),
+    });
+
+    const o = await store.createOrchestration({
+      name: "Ship login",
+      goal: "Add OAuth",
+      projectRoot: "/home/u/app",
+      projectName: "app",
+      baseRef: "main",
+    });
+    // Upstream worker, running + briefed, with a transcript that hands off.
+    const upstream = await store.addAgent(o.id, {
+      role: "coder",
+      branch: "hark/ship-login/coder-up",
+      worktreeDir: "/wt/up",
+      sessionId: "sess-up",
+      lifecycle: "running",
+    });
+    await store.updateAgent(o.id, upstream!.id, (a) => (a.briefedAt = 1));
+    // Deferred dependent: pending, depends on the upstream, no worktree/session.
+    const dep = await store.addAgent(o.id, {
+      role: "reviewer",
+      branch: "hark/ship-login/reviewer-dn",
+      worktreeDir: "/wt/dn",
+      sessionId: null,
+      lifecycle: "pending",
+    });
+    await store.updateAgent(o.id, dep!.id, (a) => (a.dependsOn = upstream!.id));
+
+    const { controller } = makeController({
+      ready: true,
+      transcript: [
+        {
+          kind: "assistant",
+          uuid: "u",
+          ts: "t",
+          blocks: [{ type: "text", text: `Handing off.\n${HANDOFF_MARKER}` }],
+        },
+      ],
+    });
+
+    const action = await controller.onAgentSignal(o.id, upstream!.id, {
+      stopped: true,
+    });
+    expect(action).toMatchObject({ type: "set_lifecycle", lifecycle: "review" });
+
+    const after = await store.getOrchestration(o.id);
+    const depAfter = after!.agents.find((a) => a.id === dep!.id)!;
+    // The dependent was materialized — spawning, branched off the UPSTREAM's
+    // branch HEAD (not the orchestration base "main").
+    expect(depAfter.lifecycle).toBe("spawning");
+    expect(added.find((x) => x.worktreeDir === "/wt/dn")?.baseRef).toBe(
+      "hark/ship-login/coder-up",
+    );
+  });
+});
+
 describe("AutonomyController.wakeHeadForTerminal (reliable wake-up)", () => {
   it("wakes the head exactly once, even across repeated calls", async () => {
     const { orchId, agentId } = await makeManagedWithWorker({
