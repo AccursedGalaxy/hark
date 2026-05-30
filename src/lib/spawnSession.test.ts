@@ -37,6 +37,29 @@ describe("buildNewWindowArgs", () => {
     });
     expect(args[args.length - 1]).toBe("claude --resume");
   });
+
+  it("names the window with -n when windowName is given (cosmetic only)", () => {
+    const args = buildNewWindowArgs({
+      sessionName: "claude",
+      cwd: "/tmp",
+      command: "claude",
+      windowName: "hark-coder",
+    });
+    const i = args.indexOf("-n");
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe("hark-coder");
+    // Pane targeting still keys off the session name, untouched by -n.
+    expect(args[args.indexOf("-t") + 1]).toBe("claude");
+  });
+
+  it("omits -n when no windowName is given", () => {
+    const args = buildNewWindowArgs({
+      sessionName: "claude",
+      cwd: "/tmp",
+      command: "claude",
+    });
+    expect(args).not.toContain("-n");
+  });
 });
 
 describe("parsePanePid", () => {
@@ -182,6 +205,20 @@ describe("buildNewSessionArgs", () => {
       "/home/aki",
       "claude",
     ]);
+  });
+
+  it("names the window with -n when windowName is given", () => {
+    const args = buildNewSessionArgs({
+      sessionName: "claude",
+      cwd: "/home/aki",
+      command: "claude",
+      windowName: "hark-head",
+    });
+    const i = args.indexOf("-n");
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe("hark-head");
+    // Session targeting still keys off -s, untouched by -n.
+    expect(args[args.indexOf("-s") + 1]).toBe("claude");
   });
 });
 

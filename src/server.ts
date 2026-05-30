@@ -322,8 +322,8 @@ const orchestrator = new Orchestrator({
   addWorktree,
   removeWorktree,
   clearTrust,
-  spawnSession: ({ cwd, command, env, pathPrepend }) =>
-    spawnClaudeSession({ cwd, command, env, pathPrepend }),
+  spawnSession: ({ cwd, command, env, pathPrepend, windowName }) =>
+    spawnClaudeSession({ cwd, command, env, pathPrepend, windowName }),
   // Terminate the session's pane process on teardown. The spawn pid is the
   // pane's process (sh → user shell → claude, same pid across the exec chain),
   // so SIGTERM-ing it exits claude and lets tmux close the window. Wrapped so a
@@ -1438,7 +1438,10 @@ app.post("/api/orchestrations/:id/agents", async (req, res) => {
       task: typeof body.task === "string" ? body.task : undefined,
       dependsOn: typeof body.dependsOn === "string" ? body.dependsOn : undefined,
     });
-    res.json({ ok: true, agent });
+    // baseRef lives on the orchestration, not the agent; echo it alongside so
+    // the spawn CLI can print everything the head needs to run `hark pr <id>`
+    // without a follow-up status/git lookup.
+    res.json({ ok: true, agent, baseRef: orch.baseRef });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

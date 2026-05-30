@@ -450,9 +450,18 @@ export function renderResponse(render: RenderKind, data: unknown): string {
     case "status":
       return renderStatus(data as OrchStatusView);
     case "spawn": {
-      const agent = d.agent as { id?: string; role?: string } | undefined;
-      if (agent?.id) return `spawned ${agent.role ?? "worker"}: ${agent.id}`;
-      return JSON.stringify(d);
+      const agent = d.agent as
+        | { id?: string; role?: string; branch?: string; orchestrationId?: string }
+        | undefined;
+      if (!agent?.id) return JSON.stringify(d);
+      const baseRef = typeof d.baseRef === "string" ? d.baseRef : undefined;
+      const lines = [`spawned ${agent.role ?? "worker"}: ${agent.id}`];
+      // Echo the worker's branch / base / orch key so the head can run
+      // `hark pr <id>` straight away without a separate git or status lookup.
+      if (agent.branch) lines.push(`  branch: ${agent.branch}`);
+      if (baseRef) lines.push(`  base:   ${baseRef}`);
+      if (agent.orchestrationId) lines.push(`  orch:   ${agent.orchestrationId}`);
+      return lines.join("\n");
     }
     case "diff": {
       const diff = typeof d.diff === "string" ? d.diff : "";

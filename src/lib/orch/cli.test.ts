@@ -212,6 +212,33 @@ describe("planCommand — pr", () => {
   });
 });
 
+describe("renderResponse — spawn", () => {
+  it("echoes role, id, branch, base, and orch key so `hark pr` is runnable", () => {
+    const out = renderResponse("spawn", {
+      ok: true,
+      baseRef: "main",
+      agent: {
+        id: "agent-abc",
+        role: "coder",
+        branch: "hark/pm-hark/coder-abc123",
+        orchestrationId: "orch-xyz",
+      },
+    });
+    expect(out).toContain("spawned coder: agent-abc");
+    expect(out).toContain("branch: hark/pm-hark/coder-abc123");
+    expect(out).toContain("base:   main");
+    expect(out).toContain("orch:   orch-xyz");
+  });
+
+  it("falls back to a one-line summary when extra fields are absent", () => {
+    const out = renderResponse("spawn", {
+      ok: true,
+      agent: { id: "agent-1", role: "tester" },
+    });
+    expect(out).toBe("spawned tester: agent-1");
+  });
+});
+
 describe("env-fallback resolution", () => {
   it("builds a resolve GET from cwd when orchId is unset", () => {
     const req = buildResolveRequest({
