@@ -1,3 +1,4 @@
+import compression from "compression";
 import express from "express";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -22,7 +23,6 @@ import {
 } from "./lib/recentDirs.js";
 import { sendInput, sendKey } from "./lib/sendKeys.js";
 import { discoverCommands } from "./lib/slashCommands.js";
-import { dedupeBySessionId } from "./lib/sessionList.js";
 import { spawnClaudeSession } from "./lib/spawnSession.js";
 import { applyManagedBlock } from "./lib/claudemdBlock.js";
 import { captureToBoard } from "./lib/projectCapture.js";
@@ -42,15 +42,12 @@ import {
 } from "./lib/projectResolution.js";
 import {
   formatLocation,
-  listPaneLocations,
   type PaneLocation,
 } from "./lib/tmuxLocations.js";
 import type { ProjectInfo } from "./shared/protocol.js";
-import {
-  readSessionTitle,
-  readTranscriptFile,
-  type TranscriptEvent,
-} from "./lib/transcript.js";
+import { SessionIndex, type SessionFile } from "./lib/sessionIndex.js";
+import { TranscriptCache } from "./lib/transcriptCache.js";
+import type { TranscriptEvent } from "./lib/transcript.js";
 import {
   openEmptyStream,
   openLazyTranscriptStream,
@@ -86,25 +83,6 @@ const MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024;
 const MAX_UPLOAD_FILES = 10;
 
-type SessionFile = {
-  pid: number;
-  sessionId: string;
-  cwd: string;
-  startedAt: number;
-  updatedAt: number;
-  version: string;
-  kind: "interactive" | "bg" | string;
-  // Newer Claude Code emits "waiting" when the TUI is blocked on a prompt
-  // (permission, AskUserQuestion, ExitPlanMode, trust dialog). Older versions
-  // only set "busy" / "idle". Keep the union open with `string` so unknown
-  // values flow through rather than getting silently dropped.
-  status?: "busy" | "idle" | "waiting" | string;
-  // Free-text hint that accompanies status="waiting" (e.g. "permission
-  // prompt", "ask user question"). Surfaced for header chips.
-  waitingFor?: string;
-  name?: string;
-};
-
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -114,39 +92,23 @@ function isAlive(pid: number): boolean {
   }
 }
 
+// Watcher-backed caches over the session dir, transcript locations, titles
+// and tmux panes — the per-request directory scans + tmux shell-outs these
+// replace were the dominant cost of every `/api/sessions` poll.
+const sessionIndex = new SessionIndex({ sessionsDir, projectsDir });
+sessionIndex.start();
+
+// Single parsed copy of each transcript, shared by the transcript GET, the
+// stream's ToolNameIndex priming, and the PromptState history replay (which
+// used to be three full reads of the same multi-MB file per session open).
+const transcriptCache = new TranscriptCache();
+
 async function listLiveSessions(): Promise<SessionFile[]> {
-  let entries: string[];
-  try {
-    entries = await fs.readdir(sessionsDir);
-  } catch {
-    return [];
-  }
-  const out: SessionFile[] = [];
-  await Promise.all(
-    entries
-      .filter((f) => f.endsWith(".json"))
-      .map(async (f) => {
-        try {
-          const raw = await fs.readFile(path.join(sessionsDir, f), "utf8");
-          const data = JSON.parse(raw) as SessionFile;
-          if (isAlive(data.pid)) out.push(data);
-        } catch {
-          /* skip */
-        }
-      }),
-  );
-  // Collapse PIDs that share a sessionId — `claude --resume` leaves the old
-  // PID alive briefly, and both write a sessions/<pid>.json. The newest one
-  // is the live TUI; the older is a zombie that would just confuse the UI
-  // and (worse) be a stale send-keys target.
-  const deduped = dedupeBySessionId(out);
-  deduped.sort((a, b) => b.updatedAt - a.updatedAt);
-  return deduped;
+  return sessionIndex.listSessions();
 }
 
 async function findSession(sessionId: string): Promise<SessionFile | null> {
-  const all = await listLiveSessions();
-  return all.find((s) => s.sessionId === sessionId) ?? null;
+  return sessionIndex.findSession(sessionId);
 }
 
 // Resolve a session id (registered UUID or synthetic `pending-<pid>`) to the
@@ -227,24 +189,21 @@ async function projectInfoForKey(
   };
 }
 
-async function findTranscriptPath(sessionId: string): Promise<string | null> {
-  let projects: string[];
-  try {
-    projects = await fs.readdir(projectsDir);
-  } catch {
-    return null;
-  }
-  for (const p of projects) {
-    const candidate = path.join(projectsDir, p, `${sessionId}.jsonl`);
-    try {
-      await fs.access(candidate);
-      return candidate;
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
-}
+// gzip/brotli responses. The big win is transcripts (a 2.3MB JSON body is
+// ~150–250KB on the wire), but session lists and static assets benefit too.
+// SSE endpoints are excluded: compression buffers output, which would hold
+// events back indefinitely.
+app.use(
+  compression({
+    threshold: 1024,
+    filter: (req, res) => {
+      if (req.path === "/api/events" || req.path.endsWith("/stream")) {
+        return false;
+      }
+      return compression.filter(req, res);
+    },
+  }),
+);
 
 app.use(express.json({ limit: "1mb" }));
 
@@ -260,13 +219,19 @@ function broadcastHook(ev: HookBroadcast): void {
       /* skip broken subscriber */
     }
   }
+  // Attention changes alter the session list (needsAttention, lastEvent,
+  // pending prompts) — fold them into the debounced SSE list push so the
+  // sidebar updates without waiting for the client's fallback poll.
+  scheduleSessionsPush();
 }
 
-app.get("/api/sessions", async (_req, res) => {
+// Build the full augmented session list (the `/api/sessions` body). Shared
+// by the GET handler and the SSE `sessions` push.
+async function buildSessionList(): Promise<unknown[]> {
   const [sessions, pending, paneLocations] = await Promise.all([
     listLiveSessions(),
     listPendingSessions(),
-    listPaneLocations(),
+    sessionIndex.paneLocations(),
   ]);
   const attention = promptState.snapshot();
   const registeredPids = new Set(sessions.map((s) => s.pid));
@@ -275,8 +240,8 @@ app.get("/api/sessions", async (_req, res) => {
     sessions.map(async (s) => {
       const att = attention[s.sessionId];
       const [pane, transcriptPath, project] = await Promise.all([
-        resolveTmuxPaneForPid(s.pid),
-        findTranscriptPath(s.sessionId),
+        sessionIndex.paneFor(s.pid),
+        sessionIndex.transcriptPathFor(s.sessionId),
         resolveProjectCached(s.cwd),
       ]);
       const loc: PaneLocation | undefined =
@@ -286,7 +251,7 @@ app.get("/api/sessions", async (_req, res) => {
       // sidebar label become meaningful instead of just the cwd basename.
       // SessionFile.name (if Claude Code ever writes one) wins.
       const aiTitle = transcriptPath
-        ? await readSessionTitle(transcriptPath)
+        ? await sessionIndex.titleFor(transcriptPath)
         : null;
       return {
         ...s,
@@ -341,8 +306,46 @@ app.get("/api/sessions", async (_req, res) => {
       }),
   );
 
-  res.json({ sessions: [...augmented, ...pendingRows] });
+  return [...augmented, ...pendingRows];
+}
+
+app.get("/api/sessions", async (_req, res) => {
+  res.json({ sessions: await buildSessionList() });
 });
+
+// Debounced "sessions changed" push over the /api/events SSE channel.
+// Triggers: session-dir watch fires (spawn/close/status flips) and attention
+// broadcasts. Identical consecutive lists are suppressed so hook bursts
+// don't spam every subscriber with byte-identical frames.
+const SESSIONS_PUSH_DEBOUNCE_MS = 250;
+type SessionListSubscriber = (sessions: unknown[]) => void;
+const sessionListSubscribers = new Set<SessionListSubscriber>();
+let sessionsPushTimer: NodeJS.Timeout | null = null;
+let lastPushedSessionsJson = "";
+
+function scheduleSessionsPush(): void {
+  if (sessionsPushTimer) return;
+  sessionsPushTimer = setTimeout(() => {
+    sessionsPushTimer = null;
+    if (sessionListSubscribers.size === 0) return;
+    void buildSessionList()
+      .then((sessions) => {
+        const json = JSON.stringify(sessions);
+        if (json === lastPushedSessionsJson) return;
+        lastPushedSessionsJson = json;
+        for (const fn of sessionListSubscribers) {
+          try {
+            fn(sessions);
+          } catch {
+            /* skip broken subscriber */
+          }
+        }
+      })
+      .catch(() => {});
+  }, SESSIONS_PUSH_DEBOUNCE_MS);
+}
+
+sessionIndex.onChange(scheduleSessionsPush);
 
 app.post("/api/hook", (req, res) => {
   // Legacy decision hooks (the removed orchestration harness registered
@@ -375,10 +378,26 @@ app.get("/api/events", (req, res) => {
   const sub: HookSubscriber = (ev) => writeEvent(res, "hook", ev);
   hookSubscribers.add(sub);
 
+  const sessionsSub: SessionListSubscriber = (sessions) =>
+    writeEvent(res, "sessions", { sessions });
+  sessionListSubscribers.add(sessionsSub);
+
+  // One list frame right after the attention snapshot so a fresh client
+  // (or a mobile tab returning from suspension, which reopens the stream)
+  // renders the current sidebar without waiting for a poll.
+  let open = true;
+  void buildSessionList()
+    .then((sessions) => {
+      if (open) writeEvent(res, "sessions", { sessions });
+    })
+    .catch(() => {});
+
   const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
   req.on("close", () => {
+    open = false;
     clearInterval(heartbeat);
     hookSubscribers.delete(sub);
+    sessionListSubscribers.delete(sessionsSub);
     res.end();
   });
 });
@@ -391,8 +410,18 @@ app.get("/api/sessions/:id/transcript", async (req, res) => {
     res.json({ events: [], offset: 0 });
     return;
   }
-  const filePath = await findTranscriptPath(req.params.id);
-  if (!filePath) {
+  const filePath = await sessionIndex.transcriptPathFor(req.params.id);
+  let stat: { size: number; mtimeMs: number } | null = null;
+  if (filePath) {
+    try {
+      stat = await fs.stat(filePath);
+    } catch {
+      // Cached path went stale (transcript deleted) — forget it and fall
+      // through to the no-transcript handling below.
+      sessionIndex.invalidateTranscriptPath(req.params.id);
+    }
+  }
+  if (!filePath || !stat) {
     // The session itself exists but hasn't written any events yet (fresh
     // claude that just cleared its trust gate, or a session that hasn't
     // produced output). Return an empty transcript so the UI shows a
@@ -404,7 +433,19 @@ app.get("/api/sessions/:id/transcript", async (req, res) => {
     res.status(404).json({ error: "transcript not found" });
     return;
   }
-  const { events, offset } = await readTranscriptFile(filePath);
+  // Conditional GET: the ETag is derived from the stat alone, so an
+  // unchanged transcript revisit is a 304 with zero file reads. no-cache
+  // (= revalidate every time) keeps browsers honest while still letting
+  // them reuse the cached body on a match.
+  const etag = `W/"${stat.size}-${stat.mtimeMs}"`;
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("ETag", etag);
+  const ifNoneMatch = req.headers["if-none-match"];
+  if (typeof ifNoneMatch === "string" && ifNoneMatch.includes(etag)) {
+    res.status(304).end();
+    return;
+  }
+  const { events, offset } = await transcriptCache.read(filePath);
   res.json({ events, offset });
 });
 
@@ -419,12 +460,24 @@ app.get("/api/sessions/:id/stream", async (req, res) => {
   // the first turn lands in the JSONL but never reaches the client.
   let filePath: string | null = null;
   if (!isPending) {
-    filePath = await findTranscriptPath(sessionId);
+    filePath = await sessionIndex.transcriptPathFor(sessionId);
     if (!filePath && !(await findSession(sessionId))) {
       res.status(404).json({ error: "transcript not found" });
       return;
     }
   }
+
+  // Resume cursor from the client (the offset returned by its transcript
+  // fetch, or its last streamed position). Events between that byte and EOF
+  // are re-delivered on open — closing the fetch→stream race window — and
+  // the client dedupes by uuid. Offsets beyond EOF (file rewritten) are
+  // clamped to 0 inside openTranscriptStream.
+  const offsetParam =
+    typeof req.query.offset === "string" ? Number(req.query.offset) : NaN;
+  const initialOffset =
+    Number.isFinite(offsetParam) && offsetParam >= 0
+      ? Math.floor(offsetParam)
+      : undefined;
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -452,23 +505,37 @@ app.get("/api/sessions/:id/stream", async (req, res) => {
     // the watcher. `openTranscriptStream` only fires onEvents for content
     // written after `offset`, so without this pass an AskUserQuestion /
     // ExitPlanMode tool_use already on disk would never get promoted into
-    // pending state and the web form would stay invisible.
+    // pending state and the web form would stay invisible. The cache makes
+    // this replay (and the ToolNameIndex the stream needs) free when the
+    // transcript GET just parsed the same file.
+    let toolNames;
     try {
-      const { events: historical } = await readTranscriptFile(filePath);
+      const cached = await transcriptCache.read(filePath);
+      toolNames = cached.toolNames;
       const broadcast = promptState.noteTranscriptEvents(
         sessionId,
-        historical,
+        cached.events,
       );
       if (broadcast) broadcastHook(broadcast);
     } catch {
       /* transient read failure — stream will catch up live anyway */
     }
-    handle = await openTranscriptStream(filePath, writer, streamOpts);
+    handle = await openTranscriptStream(filePath, writer, {
+      ...streamOpts,
+      toolNames,
+      initialOffset,
+    });
   } else if (isPending) {
     handle = openEmptyStream(writer);
   } else {
+    // Invalidate before each poll probe: the index negative-caches misses
+    // for ~2s, which would make this 500ms poll loop see a stale null and
+    // delay a brand-new session's first turn.
     handle = openLazyTranscriptStream(
-      () => findTranscriptPath(sessionId),
+      () => {
+        sessionIndex.invalidateTranscriptPath(sessionId);
+        return sessionIndex.transcriptPathFor(sessionId);
+      },
       writer,
       streamOpts,
     );
