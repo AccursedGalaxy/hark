@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   ContentBlock,
   ToolResultEvent,
@@ -15,6 +15,13 @@ import { ChevIcon, ListIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import { ToolCapsule } from "./ToolCapsule";
 
+// Windowed tail: only the newest TAIL_ROWS rows hit the DOM on open — a
+// 5k-event transcript would otherwise mean tens of thousands of nodes on a
+// phone. "Show earlier" pages backwards. Pending-prompt rows are always
+// newest, so the jump-to-question affordance stays inside the window.
+const TAIL_ROWS = 300;
+const PAGE_ROWS = 300;
+
 export function Transcript({
   events,
   loading,
@@ -30,6 +37,8 @@ export function Transcript({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // Mounted per session (keyed by the parent), so this resets on switch.
+  const [visibleCount, setVisibleCount] = useState(TAIL_ROWS);
 
   const onScroll = () => {
     const el = ref.current;
@@ -109,17 +118,30 @@ export function Transcript({
           ? "Form requested"
           : null;
 
+  const hiddenCount = Math.max(0, rows.length - visibleCount);
+  const visibleRows = hiddenCount > 0 ? rows.slice(hiddenCount) : rows;
+
   return (
     <div className="transcript" ref={ref} onScroll={onScroll}>
       <div className="thread">
-        {rows.map(({ ev, showWho }, i) => (
-          <EventRow
-            key={ev.uuid || `${ev.kind}-${i}`}
-            ev={ev}
-            showWho={showWho}
-            resultsById={resultsById}
-            taskSubjectsById={taskSubjectsById}
-          />
+        {hiddenCount > 0 && (
+          <button
+            type="button"
+            className="show-earlier"
+            onClick={() => setVisibleCount((c) => c + PAGE_ROWS)}
+          >
+            Show earlier · {hiddenCount} more
+          </button>
+        )}
+        {visibleRows.map(({ ev, showWho }, i) => (
+          <div className="t-row" key={ev.uuid || `${ev.kind}-${hiddenCount + i}`}>
+            <MemoEventRow
+              ev={ev}
+              showWho={showWho}
+              resultsById={resultsById}
+              taskSubjectsById={taskSubjectsById}
+            />
+          </div>
         ))}
         {lastQuestionText && (
           <button
@@ -156,17 +178,46 @@ function hasVisibleBlocks(blocks: ContentBlock[]): boolean {
   });
 }
 
-function EventRow({
-  ev,
-  showWho,
-  resultsById,
-  taskSubjectsById,
-}: {
+interface EventRowProps {
   ev: TranscriptEvent;
   showWho: boolean;
   resultsById: Map<string, ToolResultEvent>;
   taskSubjectsById: Map<string, string>;
-}) {
+}
+
+// The Maps get a fresh identity on every appended event, which would
+// re-render (and re-run Markdown for) every row in the window per event.
+// Events themselves are immutable, so a row only needs to re-render when
+// its own event changes or when one of *its* tool_use results lands.
+//
+// COUPLING: the TaskUpdate special-case below mirrors lookupTaskSubject,
+// which only resolves subjects for TaskUpdate blocks. If another block
+// type ever consumes taskSubjectsById, extend this comparator with it or
+// those rows will render stale subjects.
+const MemoEventRow = memo(EventRow, (prev, next) => {
+  if (prev.ev !== next.ev || prev.showWho !== next.showWho) return false;
+  if (prev.ev.kind !== "assistant") return true;
+  for (const b of prev.ev.blocks) {
+    if (b.type !== "tool_use") continue;
+    if (prev.resultsById.get(b.id) !== next.resultsById.get(b.id)) {
+      return false;
+    }
+    if (b.name === "TaskUpdate") {
+      const input = b.input as Record<string, unknown> | null | undefined;
+      const taskId =
+        input && typeof input.taskId === "string" ? input.taskId : "";
+      if (
+        taskId &&
+        prev.taskSubjectsById.get(taskId) !== next.taskSubjectsById.get(taskId)
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+});
+
+function EventRow({ ev, showWho, resultsById, taskSubjectsById }: EventRowProps) {
   switch (ev.kind) {
     case "user":
       return (

@@ -1,4 +1,10 @@
 import fs from "node:fs/promises";
+import {
+  asNumber,
+  asObject,
+  extractToolMeta,
+  ToolNameIndex,
+} from "../shared/protocol.js";
 import type {
   ContentBlock,
   MessageUsage,
@@ -14,6 +20,9 @@ export type {
   ToolResultMeta,
   TranscriptEvent,
 };
+// Moved to the shared protocol (the web client needs them for delta
+// enrichment); re-exported so server-side callers keep their import path.
+export { extractToolMeta, ToolNameIndex };
 
 type RawEntry = {
   type?: string;
@@ -225,168 +234,6 @@ function parseMultiContentUser(entry: RawEntry): TranscriptEvent | null {
   };
 }
 
-// Type-narrowing helpers for the raw JSONL records — every field is unknown
-// until proven otherwise. Keeps `extractToolMeta` readable.
-function asObject(v: unknown): Record<string, unknown> | null {
-  return v && typeof v === "object" && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : null;
-}
-function asString(v: unknown, fallback = ""): string {
-  return typeof v === "string" ? v : fallback;
-}
-function asNumber(v: unknown, fallback = 0): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
-}
-function asBool(v: unknown, fallback = false): boolean {
-  return typeof v === "boolean" ? v : fallback;
-}
-function asStringArray(v: unknown): string[] {
-  if (!Array.isArray(v)) return [];
-  return v.filter((x): x is string => typeof x === "string");
-}
-
-/**
- * Map a raw `toolUseResult` blob to a typed `ToolResultMeta`. The `toolName`
- * is optional — when omitted (e.g. the matching tool_use hasn't been seen
- * yet), we still return `{kind: "raw", data}` so the consumer can render
- * something useful. When the shape doesn't match the expected schema for a
- * known tool, we also fall back to `raw` rather than emit a half-parsed view.
- */
-export function extractToolMeta(
-  toolName: string | undefined,
-  raw: unknown,
-): ToolResultMeta {
-  const obj = asObject(raw);
-  if (!obj) return { kind: "raw", data: raw };
-
-  switch (toolName) {
-    case "Read": {
-      const file = asObject(obj.file);
-      if (!file) return { kind: "raw", data: raw };
-      return {
-        kind: "read",
-        filePath: asString(file.filePath),
-        numLines: asNumber(file.numLines),
-        totalLines: asNumber(file.totalLines),
-        startLine: asNumber(file.startLine, 1),
-      };
-    }
-    case "Bash": {
-      return {
-        kind: "bash",
-        stderr: asString(obj.stderr),
-        interrupted: asBool(obj.interrupted),
-        backgroundTaskId:
-          typeof obj.backgroundTaskId === "string"
-            ? obj.backgroundTaskId
-            : undefined,
-        returnCodeInterpretation:
-          typeof obj.returnCodeInterpretation === "string"
-            ? obj.returnCodeInterpretation
-            : undefined,
-      };
-    }
-    case "Edit": {
-      if (typeof obj.filePath !== "string") return { kind: "raw", data: raw };
-      return {
-        kind: "edit",
-        filePath: obj.filePath,
-        replaceAll: asBool(obj.replaceAll),
-        userModified: asBool(obj.userModified),
-        structuredPatch: obj.structuredPatch,
-      };
-    }
-    case "Write": {
-      if (typeof obj.filePath !== "string") return { kind: "raw", data: raw };
-      return {
-        kind: "write",
-        filePath: obj.filePath,
-        type: asString(obj.type, "update"),
-        userModified: asBool(obj.userModified),
-        structuredPatch: obj.structuredPatch,
-      };
-    }
-    case "Glob": {
-      return {
-        kind: "glob",
-        numFiles: asNumber(obj.numFiles),
-        truncated: asBool(obj.truncated),
-        durationMs: asNumber(obj.durationMs),
-        filenames: asStringArray(obj.filenames),
-      };
-    }
-    case "WebFetch": {
-      return {
-        kind: "webfetch",
-        url: asString(obj.url),
-        code: asNumber(obj.code),
-        codeText: asString(obj.codeText),
-        bytes: asNumber(obj.bytes),
-        durationMs: asNumber(obj.durationMs),
-      };
-    }
-    case "WebSearch": {
-      const results = Array.isArray(obj.results) ? obj.results : [];
-      return {
-        kind: "websearch",
-        query: asString(obj.query),
-        searchCount: asNumber(obj.searchCount),
-        durationSeconds: asNumber(obj.durationSeconds),
-        resultCount: results.length,
-      };
-    }
-    default:
-      return { kind: "raw", data: raw };
-  }
-}
-
-/**
- * Tracks tool-use id → tool name across a stream of events. Same instance
- * works for both the batch parse and the SSE streaming path. The stateful
- * wrapper exists because a `tool_result` line on its own doesn't know which
- * tool produced it — only the prior `tool_use` block does.
- *
- * Memory: one Map entry per assistant tool call. We never delete entries
- * (a single transcript stays bounded by the actual tool calls in it), so a
- * long-running stream holds at most O(toolCalls) names. For interactive
- * sessions that's negligible; if it ever isn't, we can evict on result.
- */
-export class ToolNameIndex {
-  private names = new Map<string, string>();
-
-  /** Record every tool_use block from an assistant event. Idempotent. */
-  noteAssistant(blocks: ContentBlock[]): void {
-    for (const b of blocks) {
-      if (b.type === "tool_use") this.names.set(b.id, b.name);
-    }
-  }
-
-  /** Resolve a tool_use_id to its name, or undefined if unknown. */
-  resolve(toolUseId: string): string | undefined {
-    return this.names.get(toolUseId);
-  }
-
-  /**
-   * Enrich a tool_result event in place: fills `toolName` from the index
-   * and re-runs `extractToolMeta` against the resolved name. Returns a new
-   * event (we don't mutate). If `rawMeta` is supplied, it overrides the
-   * event's existing `meta`; otherwise we re-extract from the existing
-   * `meta.data` when it's a `raw` carry-over.
-   */
-  enrich(ev: ToolResultEvent): ToolResultEvent {
-    const toolName = this.resolve(ev.toolUseId);
-    if (!toolName) return ev;
-    // If meta is still `raw` (parsed without name context), re-extract now
-    // that we have the name.
-    const meta =
-      ev.meta?.kind === "raw"
-        ? extractToolMeta(toolName, ev.meta.data)
-        : ev.meta;
-    return { ...ev, toolName, meta };
-  }
-}
-
 export function parseLine(line: string): TranscriptEvent | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
@@ -561,6 +408,106 @@ export async function readSessionTitle(
   } finally {
     await handle.close();
   }
+}
+
+// How far back from the client's offset we look for the event the client
+// saw last. Trailing rows are often non-events (system rows, ai-title
+// rewrites) and individual event lines can be large, so the window has to
+// be generous. When a window yields no verdict at all (every line in it is
+// the middle of one giant record — multi-MB tool_results exist) we retry
+// once with the wide window before giving up. Giving up fails the check
+// (→ reset), which is the safe direction — just a wasted full refetch.
+const CONTINUITY_WINDOW_BYTES = 64 * 1024;
+const CONTINUITY_WIDE_WINDOW_BYTES = 1024 * 1024;
+
+/**
+ * Continuity check for `?after=<offset>` delta reads: does the content
+ * immediately before `offset` end with the event the client saw last?
+ * JSONL is append-only, so byte offsets are perfect cursors — except when a
+ * file is rewritten (compaction, manual truncation). Reading a window
+ * ending at the cursor and matching against the client's `lastUuid`
+ * detects that case without hashing or a server-side transcript DB.
+ *
+ * Two passes over the window, both walking backwards (the window's first
+ * line is usually truncated mid-record and parses to null):
+ *
+ * 1. The last complete *client-visible event* line must carry `lastUuid` —
+ *    strict positional match.
+ * 2. If the window holds no event line at all (the tail is bookkeeping
+ *    rows, which is common — they're what usually separates the cursor
+ *    from the last real event), accept a raw line whose `uuid` or
+ *    `parentUuid` references `lastUuid`: descendants prove the client's
+ *    last event exists in this file before the cursor.
+ */
+export async function confirmTranscriptContinuity(
+  filePath: string,
+  offset: number,
+  lastUuid: string,
+): Promise<boolean> {
+  if (offset <= 0) return false;
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(filePath, "r");
+  } catch {
+    return false;
+  }
+  try {
+    const stat = await handle.stat();
+    if (offset > stat.size) return false;
+    const first = await continuityVerdict(
+      handle,
+      offset,
+      lastUuid,
+      CONTINUITY_WINDOW_BYTES,
+    );
+    if (first !== "no-verdict") return first === "match";
+    if (offset <= CONTINUITY_WINDOW_BYTES) return false;
+    const wide = await continuityVerdict(
+      handle,
+      offset,
+      lastUuid,
+      CONTINUITY_WIDE_WINDOW_BYTES,
+    );
+    return wide === "match";
+  } finally {
+    await handle.close();
+  }
+}
+
+async function continuityVerdict(
+  handle: Awaited<ReturnType<typeof fs.open>>,
+  offset: number,
+  lastUuid: string,
+  windowBytes: number,
+): Promise<"match" | "mismatch" | "no-verdict"> {
+  const length = Math.min(offset, windowBytes);
+  const buf = Buffer.alloc(length);
+  await handle.read(buf, 0, length, offset - length);
+  // Append-only JSONL means a valid cursor always sits just past a
+  // newline. A cursor landing mid-line is a rewritten file no matter what
+  // uuids appear earlier in the window.
+  if (buf[buf.length - 1] !== 0x0a) return "mismatch";
+  const lines = buf.toString("utf8").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const ev = parseLine(lines[i]);
+    if (ev && ev.uuid) return ev.uuid === lastUuid ? "match" : "mismatch";
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) continue;
+    try {
+      const raw = JSON.parse(trimmed) as {
+        uuid?: unknown;
+        parentUuid?: unknown;
+      };
+      if (raw.uuid === lastUuid || raw.parentUuid === lastUuid) {
+        return "match";
+      }
+    } catch {
+      /* truncated head line — keep walking */
+    }
+  }
+  return "no-verdict";
 }
 
 export async function readFromOffset(
