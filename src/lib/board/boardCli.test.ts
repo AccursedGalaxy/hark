@@ -6,7 +6,6 @@ import {
   renderBoardResult,
   type BoardOp,
 } from "./boardCli.js";
-import { planCommand } from "./cli.js";
 
 // planBoard takes the positionals AFTER the `board` token; a small helper splits
 // a flat token list (no flags here) the way parseArgs would.
@@ -78,19 +77,6 @@ describe("planBoard parsing", () => {
   it("bare board shows usage; unknown verb errors", () => {
     expect(plan([]).kind).toBe("message");
     expect(plan(["frobnicate"]).kind).toBe("error");
-  });
-});
-
-describe("planCommand routes the board group", () => {
-  it("returns a board op (no orchId / server needed)", () => {
-    const p = planCommand(["board", "add", "x"], { api: "http://localhost:3000" });
-    expect(p.kind).toBe("board");
-  });
-
-  it("hark board --help routes to board usage, not the global usage", () => {
-    const p = planCommand(["board", "--help"], { api: "http://localhost:3000" });
-    expect(p.kind).toBe("message");
-    if (p.kind === "message") expect(p.text).toMatch(/keyed task store/);
   });
 });
 

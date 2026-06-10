@@ -1,11 +1,8 @@
-// Model pricing + cost estimation — the single source of truth shared by the
-// web bundle (the ContextRail's cost line) and the server (the metrics DB's
-// per-tick `cost_usd`). Both sides import from here so the price table never
-// forks into two divergent copies.
+// Model pricing + cost estimation — the price table behind the web bundle's
+// cost display (the ContextRail's cost line).
 //
 // Web reaches this file via web/src/lib/usage.ts, which re-exports it (same
-// pattern as web/src/lib/protocol.ts → src/shared/protocol.ts). The server
-// imports it directly (src/lib/orch/*).
+// pattern as web/src/lib/protocol.ts → src/shared/protocol.ts).
 //
 // Pure: no React, no I/O. Pricing tables are best-effort and may drift from
 // Anthropic's posted rates; treat the cost figure as an estimate, not an

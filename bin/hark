@@ -1,84 +1,51 @@
 #!/usr/bin/env node
-// The `hark` CLI runner — the head's action surface (see docs/orchestration-head.md).
-// Thin by design: all logic (arg parsing → request spec, response → text) lives
-// in src/lib/orch/cli.ts and is unit-tested; this file only does fetch + IO.
+// The `hark` CLI — the per-project task board. Thin by design: parsing,
+// execution, and rendering live in src/lib/board/boardCli.ts and are
+// unit-tested; this file only does argv splitting + IO.
 //
 // It imports the COMPILED helpers from ../dist (relative to this file, so it
-// works from any cwd). Run `npm run build` before spawning orchestration
-// sessions. The orchestrator prepends this dir to the session's PATH and sets
-// HARK_ORCH_ID / HARK_ROLE / HARK_API, so `hark …` just works inside the head.
-import fs from "node:fs";
-import {
-  planCommand,
-  renderResponse,
-  envFromProcess,
-  buildResolveRequest,
-  mergeResolved,
-  taskFileArg,
-  injectTask,
-} from "../dist/lib/orch/cli.js";
+// works from any cwd). Run `npm run build` first. The board acts directly on
+// its SQLite source of truth — no server round-trip, fully offline.
 import {
   BoardStore,
   ensureProjectBoardDb,
   findProjectRoot,
-} from "../dist/lib/orch/boardStore.js";
-import { applyBoardOp, renderBoardResult } from "../dist/lib/orch/boardCli.js";
+} from "../dist/lib/board/boardStore.js";
+import {
+  planBoard,
+  applyBoardOp,
+  renderBoardResult,
+} from "../dist/lib/board/boardCli.js";
 
-// Read all of stdin to end (used for `--task-file -`). Returns the full text.
-function readStdin() {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => (data += chunk));
-    process.stdin.on("end", () => resolve(data));
-    process.stdin.on("error", reject);
-  });
-}
+const USAGE = `hark — Claude Code session manager
 
-async function getJson(api, path) {
-  const res = await fetch(api + path, { headers: { "content-type": "application/json" } });
-  if (!res.ok) return null;
-  const text = await res.text();
-  try {
-    return text ? JSON.parse(text) : {};
-  } catch {
-    return null;
+  hark board <add|list|show|set|link|assign|close>   per-project task board
+  hark board --help                                  full board usage
+`;
+
+function main() {
+  const argv = process.argv.slice(2);
+  const [group, ...rest] = argv;
+
+  if (!group || group === "help" || group === "--help" || group === "-h") {
+    process.stdout.write(USAGE);
+    return 0;
   }
-}
-
-async function main() {
-  let argv = process.argv.slice(2);
-  let env = envFromProcess(process.env, process.cwd());
-
-  // --task-file <path|->: read the brief from a file (or stdin for "-") and
-  // splice it in as a normal --task, so big multi-paragraph briefs don't need
-  // shell-escaping. The only IO for this lives here; the parsing is pure.
-  const taskFile = taskFileArg(argv);
-  if (taskFile != null) {
-    let contents;
-    try {
-      contents = taskFile === "-" ? await readStdin() : fs.readFileSync(taskFile, "utf8");
-    } catch (e) {
-      process.stderr.write(`hark: cannot read task file ${taskFile}: ${e.message}\n`);
-      return 1;
-    }
-    // Drop a single trailing newline (common with files/heredocs); the rest is
-    // opaque task data, passed through verbatim.
-    contents = contents.replace(/\n$/, "");
-    argv = injectTask(argv, contents);
+  if (group !== "board") {
+    process.stderr.write(`hark: unknown command "${group}" — only "board" is supported\n`);
+    return 2;
   }
 
-  // Env-fallback: a promoted PM-head has no HARK_ORCH_ID/ROLE (it was never
-  // spawned by hark), so resolve the project's active managed head from cwd.
-  // Best-effort — if it fails, planCommand surfaces the missing-target error.
-  const resolveReq = buildResolveRequest(env);
-  if (resolveReq) {
-    const data = await getJson(env.api, resolveReq.path).catch(() => null);
-    if (data) env = mergeResolved(env, data);
+  // Split flags (-x / --x) from positionals; board field=value args are
+  // positionals (they don't start with "-"), so this split is all planBoard needs.
+  const positionals = [];
+  const flags = {};
+  for (const tok of rest) {
+    if (tok.startsWith("-")) flags[tok] = true;
+    else positionals.push(tok);
   }
 
-  const plan = planCommand(argv, env);
-
+  const plan = planBoard(positionals, flags);
   if (plan.kind === "message") {
     process.stdout.write(plan.text + "\n");
     return 0;
@@ -88,58 +55,21 @@ async function main() {
     return 2;
   }
 
-  // The board acts directly on its SQLite source of truth — no server round-trip.
-  // It is per-project: resolve the project root from cwd and open that project's
-  // own board.db (migrating a legacy global board into place on first open).
-  if (plan.kind === "board") {
-    const store = new BoardStore(ensureProjectBoardDb(findProjectRoot(process.cwd())));
-    try {
-      const result = applyBoardOp(store, plan.op);
-      process.stdout.write(renderBoardResult(result) + "\n");
-      return 0;
-    } finally {
-      store.close();
-    }
-  }
-
-  const { method, path, body } = plan.request;
-  const headers = { "content-type": "application/json" };
-  if (env.role) headers["x-hark-role"] = env.role;
-
-  let res;
+  // Per-project: resolve the project root from cwd and open that project's own
+  // board.db (migrating a legacy global board into place on first open).
+  const store = new BoardStore(ensureProjectBoardDb(findProjectRoot(process.cwd())));
   try {
-    res = await fetch(env.api + path, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  } catch (e) {
-    process.stderr.write(`hark: cannot reach ${env.api} (${e.message})\n`);
-    return 1;
+    const result = applyBoardOp(store, plan.op);
+    process.stdout.write(renderBoardResult(result) + "\n");
+    return 0;
+  } finally {
+    store.close();
   }
-
-  const text = await res.text();
-  let data;
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { raw: text };
-  }
-
-  if (!res.ok) {
-    const msg = data && data.error ? data.error : `HTTP ${res.status}`;
-    process.stderr.write(`hark: ${msg}\n`);
-    return 1;
-  }
-
-  process.stdout.write(renderResponse(plan.render, data) + "\n");
-  return 0;
 }
 
-main().then(
-  (code) => process.exit(code),
-  (e) => {
-    process.stderr.write(`hark: ${e && e.stack ? e.stack : e}\n`);
-    process.exit(1);
-  },
-);
+try {
+  process.exit(main());
+} catch (e) {
+  process.stderr.write(`hark: ${e && e.stack ? e.stack : e}\n`);
+  process.exit(1);
+}

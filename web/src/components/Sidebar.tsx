@@ -37,9 +37,6 @@ export function Sidebar({
   currentProject,
   onPickProject,
   onCapture,
-  orchestrationsActive,
-  orchestrationCount,
-  onOpenOrchestrations,
 }: {
   sessions: SessionView[];
   current: string | null;
@@ -53,9 +50,6 @@ export function Sidebar({
   currentProject: string | null;
   onPickProject: (key: string | null) => void;
   onCapture: () => void;
-  orchestrationsActive: boolean;
-  orchestrationCount: number;
-  onOpenOrchestrations: () => void;
 }) {
   const [filter, setFilter] = useState("");
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -243,23 +237,6 @@ export function Sidebar({
           </span>
         </button>
       )}
-
-      <button
-        type="button"
-        className={"orch-nav-btn" + (orchestrationsActive ? " active" : "")}
-        onClick={onOpenOrchestrations}
-        title="Multi-agent orchestrations"
-      >
-        <span className="orch-nav-icn" aria-hidden>
-          <BranchIcon />
-        </span>
-        <span>Orchestrations</span>
-        {orchestrationCount > 0 && (
-          <span className="count" style={{ marginLeft: "auto" }}>
-            {orchestrationCount}
-          </span>
-        )}
-      </button>
 
       <div className="section-label">
         <span>Needs you</span>

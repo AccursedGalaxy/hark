@@ -125,12 +125,12 @@ describe("buildLoginShellCommand", () => {
     const out = buildLoginShellCommand(
       "claude --permission-mode auto",
       "/bin/bash",
-      { env: { HARK_ORCH_ID: "orch-1", HARK_ROLE: "head" } },
+      { env: { HARK_FOO: "foo-1", HARK_BAR: "bar" } },
     );
     // Env assignments live INSIDE the login shell's command so they apply to
     // the exec'd claude, after rc files have run.
     expect(out).toBe(
-      `exec /bin/bash -ilc 'HARK_ORCH_ID='\\''orch-1'\\'' HARK_ROLE='\\''head'\\'' exec claude --permission-mode auto'`,
+      `exec /bin/bash -ilc 'HARK_FOO='\\''foo-1'\\'' HARK_BAR='\\''bar'\\'' exec claude --permission-mode auto'`,
     );
   });
 

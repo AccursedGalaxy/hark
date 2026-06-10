@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildDecisionHookCommand,
   buildHookCommand,
   installHooks,
   isManagedCommand,
@@ -23,22 +22,6 @@ describe("buildHookCommand", () => {
 
   it("discards stdout for fire-and-forget notification hooks", () => {
     expect(buildHookCommand(URL)).toContain(">/dev/null");
-  });
-});
-
-describe("buildDecisionHookCommand", () => {
-  it("preserves stdout so Claude Code reads the decision JSON", () => {
-    const cmd = buildDecisionHookCommand(URL);
-    expect(cmd).toContain("curl");
-    expect(cmd).toContain(URL);
-    // stdout must NOT be discarded (that's the whole point) — no `>/dev/null`
-    // for fd 1, and not the fire-and-forget pattern.
-    expect(cmd).not.toContain(">/dev/null 2>&1");
-    expect(cmd).not.toMatch(/(?:^|\s|1)>\/dev\/null/);
-    // stderr discarded, fails open so a server outage never blocks tools.
-    expect(cmd).toContain("2>/dev/null");
-    expect(cmd).toMatch(/\|\|\s*true/);
-    expect(cmd).not.toBe(buildHookCommand(URL));
   });
 });
 
@@ -65,35 +48,54 @@ const MANAGED = [
   "SubagentStop",
   "CwdChanged",
 ];
-const DECISION = ["PreToolUse", "UserPromptSubmit"];
+// Events the removed orchestration harness used for synchronous decision
+// hooks. Never installed anymore; install actively strips stale entries.
+const LEGACY = ["PreToolUse", "UserPromptSubmit"];
 
 describe("installHooks", () => {
   it("creates entries for every managed hook event on empty settings", () => {
     const next = installHooks({}, URL);
     // The exhaustive list lives in installHook.ts MANAGED_EVENTS; we assert
     // each event is wired so adding one there forces a test update too.
-    for (const ev of [...MANAGED, ...DECISION]) {
+    for (const ev of MANAGED) {
       expect(next.hooks[ev]).toHaveLength(1);
-      expect(next.hooks[ev][0].hooks[0].command).toContain(URL);
+      expect(next.hooks[ev][0].hooks[0].command).toBe(buildHookCommand(URL));
     }
   });
 
-  it("wires decision hooks with the stdout-preserving command", () => {
+  it("does not register the legacy decision events", () => {
     const next = installHooks({}, URL);
-    for (const ev of DECISION) {
-      const cmd = next.hooks[ev][0].hooks[0].command;
-      expect(cmd).toBe(buildDecisionHookCommand(URL));
+    for (const ev of LEGACY) {
+      expect(next.hooks[ev] ?? []).toHaveLength(0);
     }
-    for (const ev of MANAGED) {
-      const cmd = next.hooks[ev][0].hooks[0].command;
-      expect(cmd).toBe(buildHookCommand(URL));
-    }
+  });
+
+  it("strips stale managed decision hooks a previous version installed", () => {
+    // Simulate settings written by the old orchestration-era installer: a
+    // synchronous managed curl under each legacy event, next to a user entry.
+    const legacyCurl = `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${URL}' 2>/dev/null || true`;
+    const existing = {
+      hooks: {
+        PreToolUse: [
+          { matcher: "Bash", hooks: [{ type: "command", command: "echo before" }] },
+          { hooks: [{ type: "command", command: legacyCurl }] },
+        ],
+        UserPromptSubmit: [
+          { hooks: [{ type: "command", command: legacyCurl }] },
+        ],
+      },
+    };
+    const next = installHooks(existing, URL);
+    // Ours is gone, the user's own entry survives.
+    expect(next.hooks.PreToolUse).toHaveLength(1);
+    expect(next.hooks.PreToolUse[0]).toEqual(existing.hooks.PreToolUse[0]);
+    expect(next.hooks.UserPromptSubmit ?? []).toHaveLength(0);
   });
 
   it("is idempotent — re-installing does not duplicate entries", () => {
     const once = installHooks({}, URL);
     const twice = installHooks(once, URL);
-    for (const ev of [...MANAGED, ...DECISION]) {
+    for (const ev of MANAGED) {
       expect(twice.hooks[ev]).toHaveLength(1);
     }
   });
@@ -102,12 +104,6 @@ describe("installHooks", () => {
     const existing = {
       model: "claude-opus-4-7",
       hooks: {
-        PreToolUse: [
-          {
-            matcher: "Bash",
-            hooks: [{ type: "command", command: "echo before" }],
-          },
-        ],
         Notification: [
           {
             hooks: [{ type: "command", command: "say 'hi'" }],
@@ -117,17 +113,12 @@ describe("installHooks", () => {
     };
     const next = installHooks(existing, URL);
     expect(next.model).toBe("claude-opus-4-7");
-    // The user's own PreToolUse entry is preserved; ours is added alongside.
-    expect(next.hooks.PreToolUse).toHaveLength(2);
-    expect(next.hooks.PreToolUse[0]).toEqual(existing.hooks.PreToolUse[0]);
     // existing user Notification entry preserved, our entry added
     expect(next.hooks.Notification).toHaveLength(2);
-    for (const ev of ["PreToolUse", "Notification"]) {
-      const ours = next.hooks[ev].find((g: any) =>
-        g.hooks.some((h: any) => isManagedCommand(h.command, URL)),
-      );
-      expect(ours).toBeDefined();
-    }
+    const ours = next.hooks.Notification.find((g: any) =>
+      g.hooks.some((h: any) => isManagedCommand(h.command, URL)),
+    );
+    expect(ours).toBeDefined();
   });
 
   it("does not mutate the input object", () => {
@@ -171,10 +162,12 @@ describe("uninstallHooks", () => {
     expect(next).toEqual(input);
   });
 
-  it("removes managed decision-hook entries (PreToolUse / UserPromptSubmit)", () => {
-    const installed = installHooks({}, URL);
-    const next = uninstallHooks(installed, URL);
+  it("removes stale managed legacy entries too", () => {
+    const legacyCurl = `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${URL}' 2>/dev/null || true`;
+    const next = uninstallHooks(
+      { hooks: { PreToolUse: [{ hooks: [{ type: "command", command: legacyCurl }] }] } },
+      URL,
+    );
     expect(next.hooks.PreToolUse ?? []).toHaveLength(0);
-    expect(next.hooks.UserPromptSubmit ?? []).toHaveLength(0);
   });
 });

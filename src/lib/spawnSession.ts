@@ -34,8 +34,8 @@ export interface LoginShellOpts {
   env?: Record<string, string>;
   // A directory prepended to PATH. Written as PATH='<dir>':$PATH so the login
   // shell expands $PATH (the rc-loaded PATH) at exec time — that's why it must
-  // stay unquoted, unlike `env` values. Used to put the `hark` CLI on the
-  // head/worker's PATH.
+  // stay unquoted, unlike `env` values. Lets a caller put the `hark` CLI on
+  // the spawned session's PATH.
   pathPrepend?: string;
 }
 
@@ -185,9 +185,7 @@ export interface SpawnResult {
 export async function spawnClaudeSession(opts: {
   cwd: string;
   command?: string;
-  // Env vars injected into the spawned session (orchestration head/workers
-  // pass HARK_ORCH_ID / HARK_ROLE / HARK_API so the `hark` CLI auto-targets
-  // the run). See LoginShellOpts.
+  // Env vars injected into the spawned session. See LoginShellOpts.
   env?: Record<string, string>;
   // Directory prepended to PATH (puts the `hark` CLI on the session's PATH).
   pathPrepend?: string;
