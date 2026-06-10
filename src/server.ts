@@ -47,7 +47,11 @@ import {
 import type { ProjectInfo } from "./shared/protocol.js";
 import { SessionIndex, type SessionFile } from "./lib/sessionIndex.js";
 import { TranscriptCache } from "./lib/transcriptCache.js";
-import type { TranscriptEvent } from "./lib/transcript.js";
+import {
+  confirmTranscriptContinuity,
+  readFromOffset,
+  type TranscriptEvent,
+} from "./lib/transcript.js";
 import {
   openEmptyStream,
   openLazyTranscriptStream,
@@ -431,6 +435,34 @@ app.get("/api/sessions/:id/transcript", async (req, res) => {
       return;
     }
     res.status(404).json({ error: "transcript not found" });
+    return;
+  }
+  // Delta read: `?after=<offset>&lastUuid=<uuid>` returns only events past
+  // the client's byte cursor (it holds the rest in its local cache). The
+  // lastUuid continuity check catches rewritten files; any mismatch falls
+  // back to `{reset: true}` plus the full payload so the client replaces
+  // its cache instead of appending garbage.
+  const afterRaw =
+    typeof req.query.after === "string" ? Number(req.query.after) : NaN;
+  if (Number.isFinite(afterRaw) && afterRaw >= 0) {
+    const after = Math.floor(afterRaw);
+    const lastUuid =
+      typeof req.query.lastUuid === "string" && req.query.lastUuid
+        ? req.query.lastUuid
+        : null;
+    const continuous =
+      after <= stat.size &&
+      (lastUuid === null ||
+        (await confirmTranscriptContinuity(filePath, after, lastUuid)));
+    if (!continuous) {
+      const { events, offset } = await transcriptCache.read(filePath);
+      res.json({ reset: true, events, offset });
+      return;
+    }
+    // No ToolNameIndex here: tool_results whose tool_use predates the
+    // cursor are enriched client-side against the client's cached history.
+    const { events, offset } = await readFromOffset(filePath, after);
+    res.json({ events, offset });
     return;
   }
   // Conditional GET: the ETag is derived from the stat alone, so an

@@ -17,11 +17,18 @@ import {
   closeSession as closeSessionApi,
   fetchSessions,
   fetchTranscript,
+  fetchTranscriptDelta,
   openHookStream,
   openTranscriptStream,
   sendToSession,
   uploadFiles,
 } from "../lib/transport";
+import {
+  loadTranscript,
+  purgeTranscript,
+  saveTranscript,
+} from "../lib/transcriptCache";
+import { lastUuidOf, mergeDelta } from "../lib/transcriptDelta";
 
 // Fallback poll only — the server pushes `sessions` frames over the
 // /api/events SSE stream whenever the list changes, so this just covers a
@@ -105,8 +112,25 @@ function applyAttention(
   return { ...merged, state: deriveState(merged) };
 }
 
+// Cold-open sidebar snapshot. Hydrating from localStorage paints the rail
+// before the first fetch/SSE frame lands — stale rows reconcile within a
+// round-trip.
+const SESSIONS_SNAPSHOT_KEY = "hark:sessions";
+
+function loadSessionsSnapshot(): RawSession[] {
+  try {
+    const raw = localStorage.getItem(SESSIONS_SNAPSHOT_KEY);
+    const parsed = raw ? (JSON.parse(raw) as RawSession[]) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export function useSessions(): SessionsApi {
-  const [rawSessions, setRawSessions] = useState<RawSession[]>([]);
+  const [rawSessions, setRawSessions] = useState<RawSession[]>(
+    loadSessionsSnapshot,
+  );
   const [attention, setAttention] = useState<Record<string, AttentionInfo>>({});
   const [connected, setConnected] = useState(false);
   const [current, setCurrentState] = useState<string | null>(null);
@@ -117,6 +141,25 @@ export function useSessions(): SessionsApi {
 
   const sessionsRef = useRef<RawSession[]>([]);
   sessionsRef.current = rawSessions;
+
+  // Persist the sidebar snapshot for the next cold open.
+  useEffect(() => {
+    try {
+      localStorage.setItem(SESSIONS_SNAPSHOT_KEY, JSON.stringify(rawSessions));
+    } catch {
+      /* quota / private mode — snapshot is best-effort */
+    }
+  }, [rawSessions]);
+
+  // Byte cursor + continuity marker the current transcript was reconciled
+  // at; what cache saves are stamped with. Frozen at fetch time — streamed
+  // tail events are saved with the older cursor, re-delivered by the next
+  // delta, and deduped by uuid in mergeDelta.
+  const cacheCursorRef = useRef<{
+    sessionId: string;
+    offset: number;
+    lastUuid: string | null;
+  } | null>(null);
 
   const refresh = useCallback(() => {
     fetchSessions()
@@ -288,88 +331,149 @@ export function useSessions(): SessionsApi {
     setTranscriptError(null);
     setEvents([]);
 
-    // Fetch first, then open the stream at the offset the fetch returned.
-    // The server re-delivers anything written between the fetch and the
-    // stream attach (and uuid dedupe below absorbs any overlap), so nothing
-    // can be lost in the gap — this replaces the old buffer-and-merge dance
-    // that opened both in parallel.
+    // Local-first open: paint from the IndexedDB cache immediately, then
+    // reconcile with the server (a small `?after=` delta when cached, the
+    // full transcript otherwise), then attach the live stream at the
+    // reconciled offset. The server re-delivers anything written between
+    // the fetch and the stream attach, and uuid dedupe absorbs overlap, so
+    // nothing can be lost in the gaps.
     let closeStream: (() => void) | null = null;
+    // Synthetic pending-<pid> sessions have no transcript to cache.
+    const synthetic = parseSyntheticSessionId(sessionId) !== null;
 
     const tStart = performance.now();
-    fetchTranscript(sessionId)
-      .then(({ events: initial, offset }) => {
-        if (cancelled) return;
-        const tFetched = performance.now();
-        setEvents(initial);
+    void (async () => {
+      const cached = synthetic ? null : await loadTranscript(sessionId);
+      if (cancelled) return;
+      if (cached && cached.events.length > 0) {
+        setEvents(cached.events);
         setTranscriptLoading(false);
         // eslint-disable-next-line no-console
         console.log(
-          `[timing] session-switch sid=${sessionId.slice(0, 8)} ` +
-            `events=${initial.length} fetch=${(tFetched - tStart).toFixed(0)}ms`,
+          `[timing] cache-paint sid=${sessionId.slice(0, 8)} ` +
+            `events=${cached.events.length} ` +
+            `paint=${(performance.now() - tStart).toFixed(0)}ms`,
         );
+      }
 
-        closeStream = openTranscriptStream(
-          sessionId,
-          {
-            onReady: () => {
-              if (cancelled) return;
-              const tReady = performance.now();
-              // eslint-disable-next-line no-console
-              console.log(
-                `[timing] stream-ready sid=${sessionId.slice(0, 8)} ` +
-                  `open=${(tReady - tStart).toFixed(0)}ms`,
-              );
-            },
-            onEvent: (ev) => {
-              if (cancelled) return;
-              setEvents((prev) =>
-                prev.some((p) => p.uuid === ev.uuid) ? prev : [...prev, ev],
-              );
-              // External resolution: any new transcript event newer than the
-              // pending state means the user already answered the prompt
-              // somewhere else (e.g., typing 1 in the CLI). Clear the local
-              // attention immediately instead of waiting for the server-side
-              // broadcast — which fires from the same signal but takes a
-              // round-trip. Server's PromptState.noteTranscriptEvents is the
-              // authoritative resolver; this is just optimistic UI.
-              const tsMs = Date.parse(ev.ts ?? "");
-              if (!Number.isFinite(tsMs)) return;
-              setAttention((prev) => {
-                const cur = prev[sessionId];
-                const requestedAt =
-                  cur?.pending?.requestedAt ??
-                  cur?.pendingPermission?.requestedAt;
-                if (!cur || requestedAt === undefined || tsMs <= requestedAt)
-                  return prev;
-                return {
-                  ...prev,
-                  [sessionId]: {
-                    ...cur,
-                    needsAttention: false,
-                    pendingPermission: undefined,
-                    pending: undefined,
-                    promptKind: null,
-                  },
-                };
-              });
-            },
-          },
-          offset,
-        );
-      })
-      .catch((err: unknown) => {
+      let merged: TranscriptEvent[];
+      let offset: number;
+      try {
+        if (cached && cached.offset > 0) {
+          const delta = await fetchTranscriptDelta(
+            sessionId,
+            cached.offset,
+            cached.lastUuid,
+          );
+          if (cancelled) return;
+          merged = delta.reset
+            ? delta.events
+            : mergeDelta(cached.events, delta.events);
+          offset = delta.offset;
+        } else {
+          const full = await fetchTranscript(sessionId);
+          if (cancelled) return;
+          merged = full.events;
+          offset = full.offset;
+        }
+      } catch (err: unknown) {
         if (cancelled) return;
-        setTranscriptLoading(false);
-        setTranscriptError(
-          err instanceof Error ? err.message : "Failed to load transcript",
-        );
-      });
+        const msg =
+          err instanceof Error ? err.message : "Failed to load transcript";
+        // Session gone → its cache entry is dead weight.
+        if (msg.includes("404") && !synthetic) void purgeTranscript(sessionId);
+        // If the cache already painted, keep showing it (offline reads work);
+        // only a cold open surfaces the error state.
+        if (!cached || cached.events.length === 0) {
+          setTranscriptLoading(false);
+          setTranscriptError(msg);
+        }
+        return;
+      }
+
+      const tFetched = performance.now();
+      setEvents(merged);
+      setTranscriptLoading(false);
+      if (!synthetic) {
+        cacheCursorRef.current = {
+          sessionId,
+          offset,
+          lastUuid: lastUuidOf(merged),
+        };
+        if (merged.length > 0) {
+          saveTranscript(sessionId, merged, offset, lastUuidOf(merged));
+        }
+      }
+      // eslint-disable-next-line no-console
+      console.log(
+        `[timing] session-switch sid=${sessionId.slice(0, 8)} ` +
+          `events=${merged.length} ` +
+          `${cached ? "delta" : "full"}=${(tFetched - tStart).toFixed(0)}ms`,
+      );
+
+      closeStream = openTranscriptStream(
+        sessionId,
+        {
+          onReady: () => {
+            if (cancelled) return;
+            const tReady = performance.now();
+            // eslint-disable-next-line no-console
+            console.log(
+              `[timing] stream-ready sid=${sessionId.slice(0, 8)} ` +
+                `open=${(tReady - tStart).toFixed(0)}ms`,
+            );
+          },
+          onEvent: (ev) => {
+            if (cancelled) return;
+            setEvents((prev) =>
+              prev.some((p) => p.uuid === ev.uuid) ? prev : [...prev, ev],
+            );
+            // External resolution: any new transcript event newer than the
+            // pending state means the user already answered the prompt
+            // somewhere else (e.g., typing 1 in the CLI). Clear the local
+            // attention immediately instead of waiting for the server-side
+            // broadcast — which fires from the same signal but takes a
+            // round-trip. Server's PromptState.noteTranscriptEvents is the
+            // authoritative resolver; this is just optimistic UI.
+            const tsMs = Date.parse(ev.ts ?? "");
+            if (!Number.isFinite(tsMs)) return;
+            setAttention((prev) => {
+              const cur = prev[sessionId];
+              const requestedAt =
+                cur?.pending?.requestedAt ??
+                cur?.pendingPermission?.requestedAt;
+              if (!cur || requestedAt === undefined || tsMs <= requestedAt)
+                return prev;
+              return {
+                ...prev,
+                [sessionId]: {
+                  ...cur,
+                  needsAttention: false,
+                  pendingPermission: undefined,
+                  pending: undefined,
+                  promptKind: null,
+                },
+              };
+            });
+          },
+        },
+        offset,
+      );
+    })();
 
     return () => {
       cancelled = true;
       closeStream?.();
     };
   }, [current]);
+
+  // Keep the cache fresh as the live stream appends events. saveTranscript
+  // debounces internally (~1s), so per-event invocations are cheap.
+  useEffect(() => {
+    const cursor = cacheCursorRef.current;
+    if (!cursor || cursor.sessionId !== current || events.length === 0) return;
+    saveTranscript(cursor.sessionId, events, cursor.offset, cursor.lastUuid);
+  }, [events, current]);
 
   const send = useCallback(
     async (body: SendBody) => {
@@ -446,6 +550,7 @@ export function useSessions(): SessionsApi {
         return rest;
       });
       setCurrentState((cur) => (cur === id ? null : cur));
+      void purgeTranscript(id);
       try {
         await closeSessionApi(id);
       } finally {

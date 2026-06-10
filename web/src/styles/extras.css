@@ -1867,3 +1867,30 @@
   }
 }
 
+
+/* ── Transcript rendering performance ─────────────────────────────────
+   Offscreen rows skip layout + paint entirely; the intrinsic-size hint
+   keeps scrollbar geometry stable while they're skipped. Pairs with the
+   windowed tail in Transcript.tsx — together they keep multi-thousand-
+   event transcripts scrollable on phones. */
+.thread .t-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 56px;
+}
+
+/* "Show earlier" pager at the top of the windowed tail. */
+.show-earlier {
+  align-self: center;
+  margin: 4px 0 12px;
+  padding: 6px 14px;
+  border: 1px solid var(--line, rgba(128, 128, 128, 0.3));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-2, inherit);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.show-earlier:hover {
+  background: rgba(128, 128, 128, 0.12);
+}
