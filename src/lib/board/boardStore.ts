@@ -3,7 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { defaultOrchDir } from "./store.js";
 
 // The BOARD: a first-class, id-addressed task store — the PM's operational
 // substrate. It replaces brittle PLAN.md prose surgery (long-bullet string-match
@@ -184,10 +183,6 @@ export function runMigrations(
   }
 }
 
-// ~/.hark/board.db — sibling of metrics.db under the same base dir, so a
-// HARK_ORCH_DIR override (e.g. an isolated dogfood instance) carries the board
-// into the same sandbox. A SEPARATE FILE from metrics.db on purpose: wiping the
-// rebuildable metrics read-model must never clear the board source of truth.
 // LEGACY global board path (~/.hark/board.db). The board was originally a single
 // global file; it is now per-project (board-plan.md Part 5: the cell is
 // cross-workstream concurrency under ONE PM context, so the board must scope to
@@ -195,8 +190,7 @@ export function runMigrations(
 // only as (a) the back-compat constructor default and (b) the one-time migration
 // SOURCE — `ensureProjectBoardDb` lifts it into the project's own `.hark/`.
 export function defaultBoardDbPath(): string {
-  const orchDir = defaultOrchDir();
-  return path.join(path.dirname(orchDir) || os.homedir(), "board.db");
+  return path.join(os.homedir(), ".hark", "board.db");
 }
 
 // The per-project board lives beside the project's other `.hark/` coordination
@@ -209,11 +203,14 @@ export function boardDbPathForProject(projectRoot: string): string {
 // exists, and on the FIRST open migrate a legacy global ~/.hark/board.db into
 // place so the PM keeps its existing tasks across the per-project cutover. Idempotent
 // — once the project's board exists, the legacy file is never consulted again.
-export function ensureProjectBoardDb(projectRoot: string): string {
+export function ensureProjectBoardDb(
+  projectRoot: string,
+  legacyPath: string = defaultBoardDbPath(),
+): string {
   const target = boardDbPathForProject(projectRoot);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   if (!fs.existsSync(target)) {
-    const legacy = defaultBoardDbPath();
+    const legacy = legacyPath;
     if (path.resolve(legacy) !== path.resolve(target) && fs.existsSync(legacy)) {
       migrateLegacyBoard(legacy, target);
     }

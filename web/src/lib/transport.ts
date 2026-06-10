@@ -1,8 +1,5 @@
 import type {
   HookBroadcast,
-  Orchestration,
-  OrchestrationSummary,
-  OrchEvent,
   ProjectInfo,
   RawSession,
   SendBody,
@@ -226,86 +223,6 @@ export async function spawnSession(cwd: string): Promise<SpawnResponse> {
     throw new Error(msg);
   }
   return (await r.json()) as SpawnResponse;
-}
-
-// ---- Orchestrations ------------------------------------------------------
-
-export interface OrchestrationWithSummary extends Orchestration {
-  summary: OrchestrationSummary;
-}
-
-export interface OrchestrationDetail {
-  orchestration: Orchestration;
-  summary: OrchestrationSummary;
-  events: OrchEvent[];
-}
-
-export async function fetchOrchestrations(): Promise<OrchestrationWithSummary[]> {
-  const r = await fetch("/api/orchestrations");
-  if (!r.ok) throw new Error(`orchestrations: ${r.status}`);
-  const data = (await r.json()) as {
-    orchestrations: OrchestrationWithSummary[];
-  };
-  return data.orchestrations;
-}
-
-export async function fetchOrchestration(
-  id: string,
-): Promise<OrchestrationDetail> {
-  const r = await fetch(`/api/orchestrations/${encodeURIComponent(id)}`);
-  if (!r.ok) throw new Error(`orchestration: ${r.status}`);
-  return (await r.json()) as OrchestrationDetail;
-}
-
-export interface CreateOrchestrationBody {
-  name: string;
-  goal: string;
-  projectKey: string;
-  baseRef?: string;
-}
-
-async function postJson(url: string, body?: unknown): Promise<unknown> {
-  const r = await fetch(url, {
-    method: "POST",
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!r.ok) {
-    let msg = `request failed (${r.status})`;
-    try {
-      const j = (await r.json()) as { error?: string };
-      if (j.error) msg = j.error;
-    } catch {
-      /* keep default */
-    }
-    throw new Error(msg);
-  }
-  return r.json().catch(() => ({}));
-}
-
-export async function createOrchestration(
-  body: CreateOrchestrationBody,
-): Promise<void> {
-  await postJson("/api/orchestrations", body);
-}
-
-export async function briefAgent(
-  orchId: string,
-  agentId: string,
-): Promise<void> {
-  await postJson(
-    `/api/orchestrations/${encodeURIComponent(orchId)}/agents/${encodeURIComponent(agentId)}/brief`,
-  );
-}
-
-export async function teardownOrchestration(orchId: string): Promise<void> {
-  await postJson(`/api/orchestrations/${encodeURIComponent(orchId)}/teardown`);
-}
-
-// (Re-)spawn the coordinating head for an orchestration. Idempotent on the
-// server when a live head already exists.
-export async function respawnHead(orchId: string): Promise<void> {
-  await postJson(`/api/orchestrations/${encodeURIComponent(orchId)}/head`);
 }
 
 // ---- SSE wrappers. EventSource auto-reconnects on its own; we only need

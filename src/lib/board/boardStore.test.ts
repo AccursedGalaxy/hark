@@ -383,11 +383,9 @@ describe("ensureProjectBoardDb", () => {
 
   it("migrates a legacy global board into the project on first open", async () => {
     const { ensureProjectBoardDb } = await import("./boardStore.js");
-    // Point the legacy global path at a temp orchestrations dir, seed a board
-    // there, then ensure a fresh project picks it up.
+    // Seed a legacy board at a temp path, then ensure a fresh project picks it
+    // up via the injectable legacyPath parameter.
     const base = mkdtempSync(join(tmpdir(), "hark-legacy-"));
-    const prev = process.env.HARK_ORCH_DIR;
-    process.env.HARK_ORCH_DIR = join(base, "orchestrations");
     try {
       const legacy = join(base, "board.db");
       const seed = new BoardStore(legacy);
@@ -396,7 +394,7 @@ describe("ensureProjectBoardDb", () => {
 
       const root = mkdtempSync(join(tmpdir(), "hark-proj-"));
       try {
-        const target = ensureProjectBoardDb(root);
+        const target = ensureProjectBoardDb(root, legacy);
         const db = new BoardStore(target);
         expect(db.getTask("legacy-task")?.title).toBe("from the old global board");
         db.close();
@@ -404,8 +402,6 @@ describe("ensureProjectBoardDb", () => {
         rmSync(root, { recursive: true, force: true });
       }
     } finally {
-      if (prev === undefined) delete process.env.HARK_ORCH_DIR;
-      else process.env.HARK_ORCH_DIR = prev;
       rmSync(base, { recursive: true, force: true });
     }
   });

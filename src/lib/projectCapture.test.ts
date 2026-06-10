@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BoardStore } from "./orch/boardStore.js";
+import { BoardStore } from "./board/boardStore.js";
 import { captureToBoard, type CaptureDeps } from "./projectCapture.js";
 
 // Each test points the capture at a throwaway board file under a temp dir so we

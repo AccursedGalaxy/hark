@@ -10,7 +10,7 @@ import {
   BoardStore,
   ensureProjectBoardDb,
   newTaskId,
-} from "./orch/boardStore.js";
+} from "./board/boardStore.js";
 
 export interface CaptureDeps {
   // Factory for a board store bound to a project root. Injected so tests can
