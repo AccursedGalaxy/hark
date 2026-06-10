@@ -21,10 +21,12 @@
   },
   "dependencies": {
     "busboy": "^1.6.0",
+    "compression": "^1.8.1",
     "express": "^4.21.2"
   },
   "devDependencies": {
     "@types/busboy": "^1.5.4",
+    "@types/compression": "^1.8.1",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.5",
     "concurrently": "^9.1.0",

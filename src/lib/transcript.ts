@@ -490,10 +490,13 @@ export function parseLine(line: string): TranscriptEvent | null {
  * Parse a multi-line JSONL blob and return enriched events. The second pass
  * resolves `toolName` and re-extracts `meta` once the matching tool_use is
  * known — single-pass-with-state because tool_use always precedes its
- * tool_result in the file.
+ * tool_result in the file. Callers that need the populated index afterwards
+ * (e.g. to seed a live stream's enrichment) can pass their own.
  */
-export function parseTranscript(blob: string): TranscriptEvent[] {
-  const index = new ToolNameIndex();
+export function parseTranscript(
+  blob: string,
+  index: ToolNameIndex = new ToolNameIndex(),
+): TranscriptEvent[] {
   const out: TranscriptEvent[] = [];
   for (const line of blob.split("\n")) {
     const ev = parseLine(line);

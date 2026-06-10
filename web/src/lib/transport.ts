@@ -21,10 +21,17 @@ export async function fetchSessions(): Promise<RawSession[]> {
 
 export async function fetchTranscript(
   sessionId: string,
-): Promise<{ events: TranscriptEvent[] }> {
+): Promise<{ events: TranscriptEvent[]; offset: number }> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
   if (!r.ok) throw new Error(`transcript: ${r.status}`);
-  return (await r.json()) as { events: TranscriptEvent[] };
+  const data = (await r.json()) as {
+    events: TranscriptEvent[];
+    offset?: number;
+  };
+  // `offset` is the byte cursor the live stream should resume from. Older
+  // servers omit it — fall back to tail-only streaming (offset undefined
+  // would produce ?offset=NaN, so normalize here).
+  return { events: data.events, offset: data.offset ?? 0 };
 }
 
 export async function sendToSession(
@@ -231,6 +238,9 @@ export async function spawnSession(cwd: string): Promise<SpawnResponse> {
 export interface HookStreamHandlers {
   onSnapshot: (snap: Record<string, HookBroadcast>) => void;
   onHook: (ev: HookBroadcast) => void;
+  // Full session list pushed by the server (on connect, then whenever the
+  // session dir or attention state changes). Replaces fast polling.
+  onSessions?: (sessions: RawSession[]) => void;
   onOpen?: () => void;
   onError?: () => void;
 }
@@ -248,6 +258,14 @@ export function openHookStream(handlers: HookStreamHandlers): () => void {
   es.addEventListener("hook", (e: MessageEvent) => {
     try {
       handlers.onHook(JSON.parse(e.data) as HookBroadcast);
+    } catch {
+      /* ignore */
+    }
+  });
+  es.addEventListener("sessions", (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data) as { sessions?: RawSession[] };
+      if (Array.isArray(data.sessions)) handlers.onSessions?.(data.sessions);
     } catch {
       /* ignore */
     }
@@ -290,9 +308,19 @@ function logEventTiming(ev: TranscriptEvent, t: ServerTiming): void {
 export function openTranscriptStream(
   sessionId: string,
   handlers: TranscriptStreamHandlers,
+  // Byte offset to resume from (the `offset` returned by fetchTranscript).
+  // The server re-delivers everything from here to EOF on open, closing the
+  // fetch→stream race window; duplicates are deduped client-side by uuid.
+  // EventSource auto-reconnects reuse the same offset, so events missed
+  // during a mobile suspension are also re-delivered.
+  offset?: number,
 ): () => void {
+  const qs =
+    offset !== undefined && Number.isFinite(offset)
+      ? `?offset=${Math.max(0, Math.floor(offset))}`
+      : "";
   const es = new EventSource(
-    `/api/sessions/${encodeURIComponent(sessionId)}/stream`,
+    `/api/sessions/${encodeURIComponent(sessionId)}/stream${qs}`,
   );
   es.addEventListener("ready", () => handlers.onReady?.());
   es.addEventListener("event", (e: MessageEvent) => {

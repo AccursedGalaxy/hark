@@ -23,7 +23,11 @@ import {
   uploadFiles,
 } from "../lib/transport";
 
-const POLL_MS = 3000;
+// Fallback poll only — the server pushes `sessions` frames over the
+// /api/events SSE stream whenever the list changes, so this just covers a
+// wedged stream (and sessions dying without a file change, which the
+// server's watcher can't see).
+const POLL_MS = 30000;
 
 export interface SessionView extends RawSession {
   state: SessionState;
@@ -122,7 +126,8 @@ export function useSessions(): SessionsApi {
       });
   }, []);
 
-  // Initial fetch + lightweight polling for new/dead sessions.
+  // Initial fetch + slow fallback polling. Live updates arrive as
+  // `sessions` SSE frames (handled in the hook-stream effect below).
   useEffect(() => {
     refresh();
     const id = setInterval(refresh, POLL_MS);
@@ -161,6 +166,9 @@ export function useSessions(): SessionsApi {
           }
           setAttention(next);
           setConnected(true);
+        },
+        onSessions: (list) => {
+          setRawSessions(list);
         },
         onHook: (ev) => {
           setAttention((prev) => ({
@@ -280,31 +288,73 @@ export function useSessions(): SessionsApi {
     setTranscriptError(null);
     setEvents([]);
 
-    // Buffer SSE events that arrive before fetchTranscript resolves. Without
-    // this, a `setEvents(initial)` from the fetch can wipe events that the
-    // live stream had already appended. Mobile (and any slow fetch) was
-    // losing the user's first prompt this way — the first transcript event
-    // would arrive over SSE during the fetch window, get appended to events,
-    // then get overwritten when the bulk initial result landed.
-    let initialDone = false;
-    const buffered: TranscriptEvent[] = [];
+    // Fetch first, then open the stream at the offset the fetch returned.
+    // The server re-delivers anything written between the fetch and the
+    // stream attach (and uuid dedupe below absorbs any overlap), so nothing
+    // can be lost in the gap — this replaces the old buffer-and-merge dance
+    // that opened both in parallel.
+    let closeStream: (() => void) | null = null;
 
     const tStart = performance.now();
     fetchTranscript(sessionId)
-      .then(({ events: initial }) => {
+      .then(({ events: initial, offset }) => {
         if (cancelled) return;
         const tFetched = performance.now();
-        const seen = new Set(initial.map((e) => e.uuid));
-        const tail = buffered.filter((e) => !seen.has(e.uuid));
-        buffered.length = 0;
-        initialDone = true;
-        setEvents([...initial, ...tail]);
+        setEvents(initial);
         setTranscriptLoading(false);
         // eslint-disable-next-line no-console
         console.log(
           `[timing] session-switch sid=${sessionId.slice(0, 8)} ` +
-            `events=${initial.length} fetch=${(tFetched - tStart).toFixed(0)}ms` +
-            (tail.length ? ` buffered=${tail.length}` : ""),
+            `events=${initial.length} fetch=${(tFetched - tStart).toFixed(0)}ms`,
+        );
+
+        closeStream = openTranscriptStream(
+          sessionId,
+          {
+            onReady: () => {
+              if (cancelled) return;
+              const tReady = performance.now();
+              // eslint-disable-next-line no-console
+              console.log(
+                `[timing] stream-ready sid=${sessionId.slice(0, 8)} ` +
+                  `open=${(tReady - tStart).toFixed(0)}ms`,
+              );
+            },
+            onEvent: (ev) => {
+              if (cancelled) return;
+              setEvents((prev) =>
+                prev.some((p) => p.uuid === ev.uuid) ? prev : [...prev, ev],
+              );
+              // External resolution: any new transcript event newer than the
+              // pending state means the user already answered the prompt
+              // somewhere else (e.g., typing 1 in the CLI). Clear the local
+              // attention immediately instead of waiting for the server-side
+              // broadcast — which fires from the same signal but takes a
+              // round-trip. Server's PromptState.noteTranscriptEvents is the
+              // authoritative resolver; this is just optimistic UI.
+              const tsMs = Date.parse(ev.ts ?? "");
+              if (!Number.isFinite(tsMs)) return;
+              setAttention((prev) => {
+                const cur = prev[sessionId];
+                const requestedAt =
+                  cur?.pending?.requestedAt ??
+                  cur?.pendingPermission?.requestedAt;
+                if (!cur || requestedAt === undefined || tsMs <= requestedAt)
+                  return prev;
+                return {
+                  ...prev,
+                  [sessionId]: {
+                    ...cur,
+                    needsAttention: false,
+                    pendingPermission: undefined,
+                    pending: undefined,
+                    promptKind: null,
+                  },
+                };
+              });
+            },
+          },
+          offset,
         );
       })
       .catch((err: unknown) => {
@@ -315,57 +365,9 @@ export function useSessions(): SessionsApi {
         );
       });
 
-    const close = openTranscriptStream(sessionId, {
-      onReady: () => {
-        if (cancelled) return;
-        const tReady = performance.now();
-        // eslint-disable-next-line no-console
-        console.log(
-          `[timing] stream-ready sid=${sessionId.slice(0, 8)} ` +
-            `open=${(tReady - tStart).toFixed(0)}ms`,
-        );
-      },
-      onEvent: (ev) => {
-        if (cancelled) return;
-        if (!initialDone) {
-          buffered.push(ev);
-        } else {
-          setEvents((prev) =>
-            prev.some((p) => p.uuid === ev.uuid) ? prev : [...prev, ev],
-          );
-        }
-        // External resolution: any new transcript event newer than the
-        // pending state means the user already answered the prompt
-        // somewhere else (e.g., typing 1 in the CLI). Clear the local
-        // attention immediately instead of waiting for the server-side
-        // broadcast — which fires from the same signal but takes a
-        // round-trip. Server's PromptState.noteTranscriptEvents is the
-        // authoritative resolver; this is just optimistic UI.
-        const tsMs = Date.parse(ev.ts ?? "");
-        if (!Number.isFinite(tsMs)) return;
-        setAttention((prev) => {
-          const cur = prev[sessionId];
-          const requestedAt =
-            cur?.pending?.requestedAt ?? cur?.pendingPermission?.requestedAt;
-          if (!cur || requestedAt === undefined || tsMs <= requestedAt)
-            return prev;
-          return {
-            ...prev,
-            [sessionId]: {
-              ...cur,
-              needsAttention: false,
-              pendingPermission: undefined,
-              pending: undefined,
-              promptKind: null,
-            },
-          };
-        });
-      },
-    });
-
     return () => {
       cancelled = true;
-      close();
+      closeStream?.();
     };
   }, [current]);
 

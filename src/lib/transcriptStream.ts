@@ -45,8 +45,15 @@ export interface TranscriptStreamOptions {
   // when the caller knows the file's existing content hasn't been delivered
   // yet — e.g. openLazyTranscriptStream upgrading after a brand-new
   // session's JSONL appears, where fetchTranscript got an empty response
-  // because the file didn't exist at fetch time.
+  // because the file didn't exist at fetch time. An offset beyond EOF means
+  // the file was rewritten under the client — clamped to 0 so everything is
+  // redelivered (the client dedupes by uuid).
   initialOffset?: number;
+  // Pre-populated tool_use-id → name index (e.g. from TranscriptCache).
+  // When provided, the full-file priming read on open is skipped — the
+  // single biggest cost of opening a stream on a large transcript. The
+  // stream keeps appending to it as new assistant events arrive.
+  toolNames?: ToolNameIndex;
 }
 
 const DEFAULT_HEARTBEAT_MS = 15_000;
@@ -159,19 +166,22 @@ export async function openTranscriptStream(
   writer: SseWriter,
   opts: TranscriptStreamOptions = {},
 ): Promise<TranscriptStreamHandle> {
-  const toolNames = new ToolNameIndex();
-  try {
-    const existing = await fs.readFile(filePath, "utf8");
-    for (const line of existing.split("\n")) {
-      const ev = parseLine(line);
-      if (ev?.kind === "assistant") toolNames.noteAssistant(ev.blocks);
+  const toolNames = opts.toolNames ?? new ToolNameIndex();
+  if (!opts.toolNames) {
+    try {
+      const existing = await fs.readFile(filePath, "utf8");
+      for (const line of existing.split("\n")) {
+        const ev = parseLine(line);
+        if (ev?.kind === "assistant") toolNames.noteAssistant(ev.blocks);
+      }
+    } catch {
+      /* missing or transiently unreadable — start with an empty index */
     }
-  } catch {
-    /* missing or transiently unreadable — start with an empty index */
   }
 
   const fileSize = (await fs.stat(filePath)).size;
   let offset = opts.initialOffset ?? fileSize;
+  if (offset > fileSize) offset = 0;
   writer.event("ready", { offset });
   // If the caller asked us to start before EOF, drain the gap up-front so the
   // existing content is delivered as proper `event` frames (not just exposed
