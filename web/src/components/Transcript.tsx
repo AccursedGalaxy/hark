@@ -19,8 +19,14 @@ import { ToolCapsule } from "./ToolCapsule";
 // 5k-event transcript would otherwise mean tens of thousands of nodes on a
 // phone. "Show earlier" pages backwards. Pending-prompt rows are always
 // newest, so the jump-to-question affordance stays inside the window.
-const TAIL_ROWS = 300;
-const PAGE_ROWS = 300;
+//
+// All rows in the window render eagerly. content-visibility was tried and
+// reverted: lazy row heights are estimates, so the open-pin chases a
+// bottom that keeps growing as rows resolve, with scroll anchoring
+// fighting every correction — seconds of visible drift. A fully-laid-out
+// window pins exactly, once.
+const TAIL_ROWS = 150;
+const PAGE_ROWS = 150;
 
 export function Transcript({
   events,
@@ -37,23 +43,70 @@ export function Transcript({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // True between a user gesture (touch/wheel/pointer) and the next return
+  // to the bottom. Scroll events also fire for *non-user* reasons — our own
+  // pins, and the browser's scroll anchoring compensating while
+  // content-visibility rows re-measure after open — and those must not
+  // unstick, or the open-scroll drifts and strands mid-transcript.
+  const userIntent = useRef(false);
   // Mounted per session (keyed by the parent), so this resets on switch.
   const [visibleCount, setVisibleCount] = useState(TAIL_ROWS);
+
+  const markIntent = () => {
+    userIntent.current = true;
+  };
 
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (atBottom) {
+      stick.current = true;
+      userIntent.current = false;
+    } else if (userIntent.current) {
+      stick.current = false;
+    }
   };
 
   useEffect(() => {
     stick.current = true;
   }, [loading]);
 
-  useLayoutEffect(() => {
+  // Pin to the bottom before paint whenever events change — opening a
+  // session paints already scrolled to the latest turn, no visible jump.
+  // `behavior: "instant"` matters: .transcript has CSS scroll-behavior:
+  // smooth (for jump-to-question), which would turn every pin into a
+  // seconds-long animated crawl through the whole transcript on open.
+  const pinToBottom = () => {
     const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [events]);
+    if (el && stick.current) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "instant" });
+    }
+  };
+
+  useLayoutEffect(pinToBottom, [events]);
+
+  // Stay pinned while content sizes settle. Rows use content-visibility:
+  // auto, so offscreen rows re-measure from their 56px estimate to their
+  // real height *after* the initial pin, and Markdown/images settle late
+  // too. Desktop browsers fix this up via scroll anchoring — iOS Safari
+  // has none, so without this the view drifts off the bottom right after
+  // opening a session on the phone. Observing the scroller covers
+  // keyboard/viewport resizes, the thread covers content growth. A user
+  // scroll away from the bottom flips `stick` off (onScroll) and
+  // re-pinning stops. Deps: the scroller only exists once loading/error/
+  // empty states give way to the real list, so re-attach on those flips.
+  const empty = events.length === 0;
+  useEffect(() => {
+    const el = ref.current;
+    const thread = el?.firstElementChild;
+    if (!el || !thread) return;
+    const ro = new ResizeObserver(pinToBottom);
+    ro.observe(el);
+    ro.observe(thread);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, error, empty]);
 
   const { resultsById, claimedIds, taskSubjectsById } = useMemo(() => {
     const resultsById = indexToolResults(events);
@@ -122,7 +175,14 @@ export function Transcript({
   const visibleRows = hiddenCount > 0 ? rows.slice(hiddenCount) : rows;
 
   return (
-    <div className="transcript" ref={ref} onScroll={onScroll}>
+    <div
+      className="transcript"
+      ref={ref}
+      onScroll={onScroll}
+      onTouchStart={markIntent}
+      onWheel={markIntent}
+      onPointerDown={markIntent}
+    >
       <div className="thread">
         {hiddenCount > 0 && (
           <button
