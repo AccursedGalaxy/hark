@@ -34,6 +34,38 @@ export async function fetchTranscript(
   return { events: data.events, offset: data.offset ?? 0 };
 }
 
+export interface TranscriptDeltaResponse {
+  events: TranscriptEvent[];
+  offset: number;
+  // True when the server detected a rewritten/truncated transcript (the
+  // lastUuid continuity check failed) — `events` is then the full payload
+  // and must replace, not extend, the local cache.
+  reset: boolean;
+}
+
+export async function fetchTranscriptDelta(
+  sessionId: string,
+  after: number,
+  lastUuid: string | null,
+): Promise<TranscriptDeltaResponse> {
+  const params = new URLSearchParams({ after: String(after) });
+  if (lastUuid) params.set("lastUuid", lastUuid);
+  const r = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/transcript?${params.toString()}`,
+  );
+  if (!r.ok) throw new Error(`transcript: ${r.status}`);
+  const data = (await r.json()) as {
+    events?: TranscriptEvent[];
+    offset?: number;
+    reset?: boolean;
+  };
+  return {
+    events: data.events ?? [],
+    offset: data.offset ?? 0,
+    reset: data.reset === true,
+  };
+}
+
 export async function sendToSession(
   sessionId: string,
   body: SendBody,

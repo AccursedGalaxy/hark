@@ -14,6 +14,10 @@ import {
 // file is never served stale.
 
 export interface CachedTranscript {
+  // INVARIANT: shared by reference across every concurrent consumer
+  // (transcript GET serialization, PromptState replay, multiple streams).
+  // No consumer may mutate this array or the events in it — enrichment
+  // must copy (ToolNameIndex.enrich already does).
   events: TranscriptEvent[];
   // Byte offset at EOF when parsed — the resume cursor for /stream.
   offset: number;

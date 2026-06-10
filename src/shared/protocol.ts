@@ -365,6 +365,171 @@ export type TranscriptEvent =
   | ToolResultEvent
   | { kind: "system"; uuid: string; ts: string; text: string };
 
+// Type-narrowing helpers for raw JSONL records — every field is unknown
+// until proven otherwise. Exported because the server's transcript parser
+// reuses them.
+export function asObject(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : null;
+}
+export function asString(v: unknown, fallback = ""): string {
+  return typeof v === "string" ? v : fallback;
+}
+export function asNumber(v: unknown, fallback = 0): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+export function asBool(v: unknown, fallback = false): boolean {
+  return typeof v === "boolean" ? v : fallback;
+}
+export function asStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === "string");
+}
+
+/**
+ * Map a raw `toolUseResult` blob to a typed `ToolResultMeta`. The `toolName`
+ * is optional — when omitted (e.g. the matching tool_use hasn't been seen
+ * yet), we still return `{kind: "raw", data}` so the consumer can render
+ * something useful. When the shape doesn't match the expected schema for a
+ * known tool, we also fall back to `raw` rather than emit a half-parsed view.
+ *
+ * Lives in the shared protocol (not the server's transcript parser) because
+ * the web client re-runs it when enriching `?after=` delta events whose
+ * matching tool_use sits in its cached history.
+ */
+export function extractToolMeta(
+  toolName: string | undefined,
+  raw: unknown,
+): ToolResultMeta {
+  const obj = asObject(raw);
+  if (!obj) return { kind: "raw", data: raw };
+
+  switch (toolName) {
+    case "Read": {
+      const file = asObject(obj.file);
+      if (!file) return { kind: "raw", data: raw };
+      return {
+        kind: "read",
+        filePath: asString(file.filePath),
+        numLines: asNumber(file.numLines),
+        totalLines: asNumber(file.totalLines),
+        startLine: asNumber(file.startLine, 1),
+      };
+    }
+    case "Bash": {
+      return {
+        kind: "bash",
+        stderr: asString(obj.stderr),
+        interrupted: asBool(obj.interrupted),
+        backgroundTaskId:
+          typeof obj.backgroundTaskId === "string"
+            ? obj.backgroundTaskId
+            : undefined,
+        returnCodeInterpretation:
+          typeof obj.returnCodeInterpretation === "string"
+            ? obj.returnCodeInterpretation
+            : undefined,
+      };
+    }
+    case "Edit": {
+      if (typeof obj.filePath !== "string") return { kind: "raw", data: raw };
+      return {
+        kind: "edit",
+        filePath: obj.filePath,
+        replaceAll: asBool(obj.replaceAll),
+        userModified: asBool(obj.userModified),
+        structuredPatch: obj.structuredPatch,
+      };
+    }
+    case "Write": {
+      if (typeof obj.filePath !== "string") return { kind: "raw", data: raw };
+      return {
+        kind: "write",
+        filePath: obj.filePath,
+        type: asString(obj.type, "update"),
+        userModified: asBool(obj.userModified),
+        structuredPatch: obj.structuredPatch,
+      };
+    }
+    case "Glob": {
+      return {
+        kind: "glob",
+        numFiles: asNumber(obj.numFiles),
+        truncated: asBool(obj.truncated),
+        durationMs: asNumber(obj.durationMs),
+        filenames: asStringArray(obj.filenames),
+      };
+    }
+    case "WebFetch": {
+      return {
+        kind: "webfetch",
+        url: asString(obj.url),
+        code: asNumber(obj.code),
+        codeText: asString(obj.codeText),
+        bytes: asNumber(obj.bytes),
+        durationMs: asNumber(obj.durationMs),
+      };
+    }
+    case "WebSearch": {
+      const results = Array.isArray(obj.results) ? obj.results : [];
+      return {
+        kind: "websearch",
+        query: asString(obj.query),
+        searchCount: asNumber(obj.searchCount),
+        durationSeconds: asNumber(obj.durationSeconds),
+        resultCount: results.length,
+      };
+    }
+    default:
+      return { kind: "raw", data: raw };
+  }
+}
+
+/**
+ * Tracks tool-use id → tool name across a stream of events. Same instance
+ * works for the batch parse, the SSE streaming path, and the web client's
+ * delta enrichment. The stateful wrapper exists because a `tool_result`
+ * line on its own doesn't know which tool produced it — only the prior
+ * `tool_use` block does.
+ *
+ * Memory: one Map entry per assistant tool call. We never delete entries
+ * (a single transcript stays bounded by the actual tool calls in it), so a
+ * long-running stream holds at most O(toolCalls) names. For interactive
+ * sessions that's negligible; if it ever isn't, we can evict on result.
+ */
+export class ToolNameIndex {
+  private names = new Map<string, string>();
+
+  /** Record every tool_use block from an assistant event. Idempotent. */
+  noteAssistant(blocks: ContentBlock[]): void {
+    for (const b of blocks) {
+      if (b.type === "tool_use") this.names.set(b.id, b.name);
+    }
+  }
+
+  /** Resolve a tool_use_id to its name, or undefined if unknown. */
+  resolve(toolUseId: string): string | undefined {
+    return this.names.get(toolUseId);
+  }
+
+  /**
+   * Enrich a tool_result event: fills `toolName` from the index and re-runs
+   * `extractToolMeta` against the resolved name. Returns a new event (we
+   * don't mutate). If `meta` is still `raw` (parsed without name context),
+   * it's re-extracted now that the name is known.
+   */
+  enrich(ev: ToolResultEvent): ToolResultEvent {
+    const toolName = this.resolve(ev.toolUseId);
+    if (!toolName) return ev;
+    const meta =
+      ev.meta?.kind === "raw"
+        ? extractToolMeta(toolName, ev.meta.data)
+        : ev.meta;
+    return { ...ev, toolName, meta };
+  }
+}
+
 /**
  * Index tool_result events by their `toolUseId` so a renderer can fuse each
  * `tool_use` block with its result inline.

@@ -233,6 +233,7 @@ export default function App() {
                     sessionId={currentSession.sessionId}
                   />
                   <Transcript
+                    key={currentSession.sessionId}
                     events={events}
                     loading={transcriptLoading}
                     error={transcriptError}
