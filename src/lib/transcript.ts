@@ -413,9 +413,12 @@ export async function readSessionTitle(
 // How far back from the client's offset we look for the event the client
 // saw last. Trailing rows are often non-events (system rows, ai-title
 // rewrites) and individual event lines can be large, so the window has to
-// be generous. A window that yields no verdict fails the check (→ reset),
-// which is the safe direction — just a wasted full refetch.
+// be generous. When a window yields no verdict at all (every line in it is
+// the middle of one giant record — multi-MB tool_results exist) we retry
+// once with the wide window before giving up. Giving up fails the check
+// (→ reset), which is the safe direction — just a wasted full refetch.
 const CONTINUITY_WINDOW_BYTES = 64 * 1024;
+const CONTINUITY_WIDE_WINDOW_BYTES = 1024 * 1024;
 
 /**
  * Continuity check for `?after=<offset>` delta reads: does the content
@@ -451,31 +454,60 @@ export async function confirmTranscriptContinuity(
   try {
     const stat = await handle.stat();
     if (offset > stat.size) return false;
-    const length = Math.min(offset, CONTINUITY_WINDOW_BYTES);
-    const buf = Buffer.alloc(length);
-    await handle.read(buf, 0, length, offset - length);
-    const lines = buf.toString("utf8").split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const ev = parseLine(lines[i]);
-      if (ev && ev.uuid) return ev.uuid === lastUuid;
-    }
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const trimmed = lines[i].trim();
-      if (!trimmed) continue;
-      try {
-        const raw = JSON.parse(trimmed) as {
-          uuid?: unknown;
-          parentUuid?: unknown;
-        };
-        if (raw.uuid === lastUuid || raw.parentUuid === lastUuid) return true;
-      } catch {
-        /* truncated head line — keep walking */
-      }
-    }
-    return false;
+    const first = await continuityVerdict(
+      handle,
+      offset,
+      lastUuid,
+      CONTINUITY_WINDOW_BYTES,
+    );
+    if (first !== "no-verdict") return first === "match";
+    if (offset <= CONTINUITY_WINDOW_BYTES) return false;
+    const wide = await continuityVerdict(
+      handle,
+      offset,
+      lastUuid,
+      CONTINUITY_WIDE_WINDOW_BYTES,
+    );
+    return wide === "match";
   } finally {
     await handle.close();
   }
+}
+
+async function continuityVerdict(
+  handle: Awaited<ReturnType<typeof fs.open>>,
+  offset: number,
+  lastUuid: string,
+  windowBytes: number,
+): Promise<"match" | "mismatch" | "no-verdict"> {
+  const length = Math.min(offset, windowBytes);
+  const buf = Buffer.alloc(length);
+  await handle.read(buf, 0, length, offset - length);
+  // Append-only JSONL means a valid cursor always sits just past a
+  // newline. A cursor landing mid-line is a rewritten file no matter what
+  // uuids appear earlier in the window.
+  if (buf[buf.length - 1] !== 0x0a) return "mismatch";
+  const lines = buf.toString("utf8").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const ev = parseLine(lines[i]);
+    if (ev && ev.uuid) return ev.uuid === lastUuid ? "match" : "mismatch";
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) continue;
+    try {
+      const raw = JSON.parse(trimmed) as {
+        uuid?: unknown;
+        parentUuid?: unknown;
+      };
+      if (raw.uuid === lastUuid || raw.parentUuid === lastUuid) {
+        return "match";
+      }
+    } catch {
+      /* truncated head line — keep walking */
+    }
+  }
+  return "no-verdict";
 }
 
 export async function readFromOffset(

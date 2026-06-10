@@ -96,10 +96,26 @@ describe("confirmTranscriptContinuity", () => {
   });
 
   it("handles a window that opens mid-record", async () => {
-    // Make the first line huge so the 4KB window starts inside it; the
+    // Make the first line huge so the window starts inside it; the
     // truncated head fragment must be skipped, not crash the parse.
     const big = userLine("u1", "x".repeat(8000));
     const { p, size } = await write([big, userLine("u2", "b")]);
     expect(await confirmTranscriptContinuity(p, size, "u2")).toBe(true);
+  });
+
+  it("rejects a cursor that does not land on a line boundary", async () => {
+    const { p, size } = await write([userLine("u1", "a"), userLine("u2", "b")]);
+    // Mid-line cursor = rewritten file, even though u1 parses clean inside
+    // the window.
+    expect(await confirmTranscriptContinuity(p, size - 3, "u1")).toBe(false);
+  });
+
+  it("widens the window when the last event line alone exceeds it", async () => {
+    // A single >64KB trailing event: the narrow window sees only the middle
+    // of one record (no verdict), the wide retry must find it.
+    const giant = userLine("u-giant", "x".repeat(80_000));
+    const { p, size } = await write([userLine("u1", "a"), giant]);
+    expect(await confirmTranscriptContinuity(p, size, "u-giant")).toBe(true);
+    expect(await confirmTranscriptContinuity(p, size, "u1")).toBe(false);
   });
 });

@@ -425,8 +425,16 @@ export function useSessions(): SessionsApi {
           },
           onEvent: (ev) => {
             if (cancelled) return;
+            // uuid dedupe guards against stream-resume redelivery. Events
+            // without a uuid always append — `"" === ""` would otherwise
+            // match the first uuid-less event in history and silently drop
+            // distinct rows (mergeDelta makes the same choice: duplicating
+            // a redelivered uuid-less row is visible and benign, dropping
+            // one is not).
             setEvents((prev) =>
-              prev.some((p) => p.uuid === ev.uuid) ? prev : [...prev, ev],
+              ev.uuid && prev.some((p) => p.uuid === ev.uuid)
+                ? prev
+                : [...prev, ev],
             );
             // External resolution: any new transcript event newer than the
             // pending state means the user already answered the prompt

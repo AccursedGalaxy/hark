@@ -189,6 +189,11 @@ interface EventRowProps {
 // re-render (and re-run Markdown for) every row in the window per event.
 // Events themselves are immutable, so a row only needs to re-render when
 // its own event changes or when one of *its* tool_use results lands.
+//
+// COUPLING: the TaskUpdate special-case below mirrors lookupTaskSubject,
+// which only resolves subjects for TaskUpdate blocks. If another block
+// type ever consumes taskSubjectsById, extend this comparator with it or
+// those rows will render stale subjects.
 const MemoEventRow = memo(EventRow, (prev, next) => {
   if (prev.ev !== next.ev || prev.showWho !== next.showWho) return false;
   if (prev.ev.kind !== "assistant") return true;
