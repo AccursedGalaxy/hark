@@ -1869,14 +1869,10 @@
 
 
 /* ── Transcript rendering performance ─────────────────────────────────
-   Offscreen rows skip layout + paint entirely; the intrinsic-size hint
-   keeps scrollbar geometry stable while they're skipped. Pairs with the
-   windowed tail in Transcript.tsx — together they keep multi-thousand-
-   event transcripts scrollable on phones. */
-.thread .t-row {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 56px;
-}
+   NOTE: content-visibility:auto on transcript rows was tried and reverted —
+   lazy row heights are estimates, so scroll-to-bottom on open chases a
+   growing bottom while scroll anchoring fights the corrections. The
+   windowed tail (TAIL_ROWS in Transcript.tsx) bounds the DOM instead. */
 
 /* "Show earlier" pager at the top of the windowed tail. */
 .show-earlier {
