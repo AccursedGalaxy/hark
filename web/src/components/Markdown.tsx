@@ -1,6 +1,8 @@
 import { useMemo } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { splitArtifacts } from "../lib/htmlArtifact";
+import { HtmlArtifact } from "./HtmlArtifact";
 
 // Configure once. GFM gives tables/strikethrough; breaks=true so a single
 // newline becomes <br> (chat-message style, not document style).
@@ -40,7 +42,7 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   }
 });
 
-export function Markdown({
+function MarkdownChunk({
   source,
   tight = false,
 }: {
@@ -59,5 +61,33 @@ export function Markdown({
       // Output is sanitised by DOMPurify above.
       dangerouslySetInnerHTML={{ __html: html }}
     />
+  );
+}
+
+export function Markdown({
+  source,
+  tight = false,
+}: {
+  source: string;
+  tight?: boolean;
+}) {
+  // hark:html fenced blocks render as inline HTML artifacts; everything
+  // else goes through the normal markdown path. Segment indices are stable
+  // for a given source, so they're safe as keys.
+  const segments = useMemo(() => splitArtifacts(source), [source]);
+
+  if (segments.length === 1 && segments[0].kind === "md") {
+    return <MarkdownChunk source={source} tight={tight} />;
+  }
+  return (
+    <>
+      {segments.map((s, i) =>
+        s.kind === "md" ? (
+          <MarkdownChunk key={i} source={s.text} tight={tight} />
+        ) : (
+          <HtmlArtifact key={i} html={s.html} closed={s.closed} />
+        ),
+      )}
+    </>
   );
 }

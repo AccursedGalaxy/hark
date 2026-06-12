@@ -1890,3 +1890,38 @@
 .show-earlier:hover {
   background: rgba(128, 128, 128, 0.12);
 }
+
+/* ───── hark:html artifacts ───────────────────────── */
+/* A sanitized HTML block rendered inline in the transcript (see
+   components/HtmlArtifact.tsx). `contain` fences a malformed artifact's
+   layout damage to its own box; the descendant clamps stop oversized
+   media from forcing horizontal pan on phones. */
+.html-artifact {
+  max-width: 100%;
+  overflow-x: auto;
+  contain: content;
+}
+.html-artifact img,
+.html-artifact svg,
+.html-artifact video,
+.html-artifact canvas {
+  max-width: 100%;
+  height: auto;
+}
+.html-artifact table {
+  max-width: 100%;
+}
+
+.html-artifact-streaming {
+  padding: 10px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 12px;
+  animation: artifact-pulse 1.6s ease-in-out infinite;
+}
+@keyframes artifact-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
