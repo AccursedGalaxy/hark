@@ -9,6 +9,7 @@ import {
   defaultDeps as closeSessionDeps,
   sessionFilePathForPid,
 } from "./lib/closeSession.js";
+import { ARTIFACT_CONTRACT } from "./lib/artifactContract.js";
 import { PromptState, type HookBroadcast } from "./lib/promptState.js";
 import { resolveTmuxPaneForPid } from "./lib/pane.js";
 import { parseMultipart } from "./lib/parseMultipart.js";
@@ -369,6 +370,13 @@ app.post("/api/hook", (req, res) => {
   } catch (err) {
     res.status(400).json({ error: String(err) });
   }
+});
+
+// The hark:html format contract, curled by the managed SessionStart hook;
+// its stdout becomes session context. Plain text on purpose — Claude Code
+// injects hook stdout verbatim.
+app.get("/api/artifact-contract", (_req, res) => {
+  res.type("text/plain").send(ARTIFACT_CONTRACT);
 });
 
 app.get("/api/events", (req, res) => {
