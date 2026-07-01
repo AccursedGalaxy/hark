@@ -159,6 +159,10 @@ export interface RawSession {
   tmuxLocation?: string | null;
   tmuxWindowName?: string | null;
   needsAttention?: boolean;
+  // Severity tier of `needsAttention` (blocking > error > idle), null when
+  // no attention is needed. Same lifecycle as the boolean; see
+  // `deriveAttentionKind`.
+  attentionKind?: AttentionKind;
   lastEvent?: string;
   lastEventAt?: number;
   lastEventMessage?: string;
@@ -566,6 +570,9 @@ export type PromptKind = "permission" | "elicitation" | "idle" | null;
 // Clients render it directly; they no longer derive their own answer.
 export interface AttentionInfo {
   needsAttention: boolean;
+  // Severity classification of `needsAttention` — null exactly when the
+  // boolean is false. See `deriveAttentionKind` for the tier semantics.
+  attentionKind: AttentionKind;
   lastEvent: string;
   lastEventAt: number;
   message?: string;
@@ -636,6 +643,77 @@ export function derivePromptKind(
       // permission so the user still gets Approve/Deny.
       return "permission";
   }
+}
+
+// ---- Attention severity tiers ----
+//
+// `needsAttention` lumps three very different situations into one boolean:
+// "Claude is stuck waiting on a decision", "the turn died with an error",
+// and "the turn finished, your move". `attentionKind` splits them so
+// ambient surfaces (favicon, title, rail ordering) can signal at the right
+// volume instead of treating everything as the same red dot.
+//
+//   "blocking" — Claude is waiting on a decision (tool permission,
+//                AskUserQuestion, ExitPlanMode, MCP elicitation, oauth).
+//                The session makes zero progress until the user acts.
+//   "error"    — StopFailure (rate limit, auth, billing, …). Nothing is
+//                waiting on input, but the user should take a look.
+//   "idle"     — turn finished / idle nudge. Informational "your turn".
+//   null       — no attention needed. Mirrors `needsAttention === false`,
+//                so the two fields always clear together (dismiss, clear,
+//                send-keys, transcript resolution all just flip the bool
+//                and this derivation follows).
+export type AttentionKind = "blocking" | "error" | "idle" | null;
+
+// Pure derivation, computed by PromptState alongside `promptKind` on every
+// state mutation so the wire field can never drift from the fields it is
+// derived from.
+//
+// Unlike `derivePromptKind` (which defaults unknown notification types to
+// "permission" so the composer still offers Approve/Deny), the ambient tier
+// is deliberately conservative: an unknown/future notification type keeps
+// `needsAttention` (safe default — worth a look) but classifies as "idle",
+// never "blocking", so a new benign type Claude Code ships can't spuriously
+// scream "Claude is stuck".
+export function deriveAttentionKind(
+  att:
+    | (Pick<
+        AttentionInfo,
+        "needsAttention" | "lastEvent" | "notificationType" | "lastError"
+      > & {
+        pendingPermission?: PendingPermission;
+        pending?: Pending;
+      })
+    | undefined,
+): AttentionKind {
+  if (!att || !att.needsAttention) return null;
+  // Blocking dominates every other signal. A live pending decision means
+  // the session is stuck regardless of what event arrived last (subagent
+  // chatter, unrelated notifications) — PromptState carries `pending`
+  // across those events, so deriving from it keeps the tier pinned until a
+  // real resolution path (Stop / idle_prompt, matching tool_result, the
+  // transcript resolver, send-keys, clear) drops the pending state.
+  if (att.pending || att.pendingPermission) return "blocking";
+  // Blocking hook events where the payload was too degenerate to build a
+  // structured `pending` (e.g. PermissionRequest without a tool_name).
+  if (att.lastEvent === "PermissionRequest" || att.lastEvent === "Elicitation")
+    return "blocking";
+  // Notification-only signals: only the documented "a prompt is open in the
+  // TUI right now" types count as blocking. Everything else — including
+  // unknown/future types — falls through to "idle" (see note above).
+  if (
+    att.lastEvent === "Notification" &&
+    (att.notificationType === "permission_prompt" ||
+      att.notificationType === "elicitation_dialog")
+  )
+    return "blocking";
+  // Error tier: the last turn died. `lastError` persists across follow-up
+  // notifications until a clean Stop or a user action clears it, so an
+  // unresolved error outranks a later idle nudge.
+  if (att.lastError || att.lastEvent === "StopFailure") return "error";
+  // Everything else that still needs attention is a "your turn" nudge:
+  // Stop, idle_prompt, and unknown notification types.
+  return "idle";
 }
 
 // ---- Send-key payloads (POST /api/sessions/:id/send) ----
