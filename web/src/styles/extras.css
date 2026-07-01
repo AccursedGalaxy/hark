@@ -829,6 +829,78 @@
   font-size: 12px;
 }
 
+/* ───── auth gate (token login) ───────────────────── */
+/* Full-viewport sibling of .trust-prompt: same centered-card language, but
+   it renders *instead of* the app shell, so it owns the whole screen. */
+.auth-gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 40px 24px;
+  background: var(--ink-0);
+}
+.auth-gate-card {
+  max-width: 420px;
+  width: 100%;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-2xl);
+  padding: 28px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.auth-gate-eyebrow {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.auth-gate-title {
+  margin: 0;
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 28px;
+  color: var(--fg-0);
+  letter-spacing: -0.01em;
+}
+.auth-gate-body {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.auth-gate-body code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.auth-gate-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.auth-gate-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-0);
+  background: var(--ink-0);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  outline: none;
+}
+.auth-gate-input:focus { border-color: var(--accent); }
+.auth-gate-err {
+  color: var(--coral);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 /* ───── keypad (raw keys for tmux send) ───────────── */
 .composer-keypad {
   padding: 8px 12px 12px;
