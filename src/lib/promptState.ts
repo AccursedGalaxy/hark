@@ -1,4 +1,5 @@
 import {
+  deriveAttentionKind,
   derivePromptKind,
   type AskQuestion,
   type AttentionInfo,
@@ -633,11 +634,20 @@ export class PromptState {
 
 export type { Pending, SessionError, SubagentInfo };
 
-// Compute the wire-facing `promptKind` once per mutation so every reader
-// sees the same verdict. Kept local so the class body stays focused on
-// state transitions.
+// Compute the wire-facing derived verdicts (`promptKind`, `attentionKind`)
+// once per mutation so every reader sees the same answer. Kept local so the
+// class body stays focused on state transitions. Because both fields are
+// re-derived from the post-mutation state here, every path that clears
+// `needsAttention` / `pending` / `lastError` (clear, dismissAttention,
+// noteSendKeys, transcript resolution, resolveStaleFromTranscripts)
+// automatically keeps the severity tier consistent — there is no separate
+// bookkeeping to forget.
 function finalize(
-  partial: Omit<SessionAttention, "promptKind">,
+  partial: Omit<SessionAttention, "promptKind" | "attentionKind">,
 ): SessionAttention {
-  return { ...partial, promptKind: derivePromptKind(partial) };
+  return {
+    ...partial,
+    promptKind: derivePromptKind(partial),
+    attentionKind: deriveAttentionKind(partial),
+  };
 }

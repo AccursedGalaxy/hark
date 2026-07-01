@@ -351,6 +351,9 @@ async function buildSessionList(): Promise<unknown[]> {
         tmuxLocation: loc ? formatLocation(loc) : null,
         tmuxWindowName: loc?.windowName ?? null,
         needsAttention: att?.needsAttention ?? false,
+        // Severity tier of the attention flag (blocking > error > idle) so
+        // clients can pick ambient signal strength instead of one red dot.
+        attentionKind: att?.attentionKind ?? null,
         lastEvent: att?.lastEvent,
         lastEventAt: att?.lastEventAt,
         lastEventMessage: att?.message,
@@ -389,6 +392,10 @@ async function buildSessionList(): Promise<unknown[]> {
           tmuxLocation: loc ? formatLocation(loc) : null,
           tmuxWindowName: loc?.windowName ?? null,
           needsAttention: true,
+          // The trust dialog blocks the whole session until the user
+          // confirms — same "stuck on a decision" severity as a pending
+          // permission, even though it never flows through PromptState.
+          attentionKind: "blocking" as const,
           lastEvent: "Pending",
           lastEventAt: now,
           lastEventMessage: "Waiting for trust confirmation",

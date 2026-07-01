@@ -1040,4 +1040,237 @@ describe("PromptState", () => {
       }
     });
   });
+
+  // ---- NEW: attentionKind severity tiers ---------------------------------
+  // The tier is derived in finalize() on every mutation, so these tests walk
+  // the real transitions rather than the pure derivation (covered in
+  // protocol.test.ts) — each resolution path must land on the same kind it
+  // lands on for needsAttention.
+  describe("attentionKind severity tiers", () => {
+    it("PermissionRequest → 'blocking'", () => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      expect(ev.attentionKind).toBe("blocking");
+    });
+
+    it("Elicitation → 'blocking'; ElicitationResult → null", () => {
+      const a = state.record({
+        session_id: "s1",
+        hook_event_name: "Elicitation",
+        server_name: "github",
+        form_fields: [{ name: "repo", type: "string" }],
+      });
+      expect(a.attentionKind).toBe("blocking");
+      const b = state.record({
+        session_id: "s1",
+        hook_event_name: "ElicitationResult",
+      });
+      expect(b.attentionKind).toBe(null);
+    });
+
+    it("StopFailure → 'error' (even without a parseable error_type)", () => {
+      const a = state.record({
+        session_id: "s1",
+        hook_event_name: "StopFailure",
+        error_type: "rate_limit",
+        error_message: "Try again in 30s",
+      });
+      expect(a.attentionKind).toBe("error");
+      const fresh = new PromptState();
+      const b = fresh.record({
+        session_id: "s1",
+        hook_event_name: "StopFailure",
+      });
+      expect(b.attentionKind).toBe("error");
+    });
+
+    it("Stop → 'idle'; idle_prompt → 'idle'", () => {
+      const a = state.record({ session_id: "s1", hook_event_name: "Stop" });
+      expect(a.attentionKind).toBe("idle");
+      const b = state.record({
+        session_id: "s1",
+        hook_event_name: "Notification",
+        notification_type: "idle_prompt",
+      });
+      expect(b.attentionKind).toBe("idle");
+    });
+
+    it("unknown notification type → needs-attention but 'idle', never 'blocking'", () => {
+      // Safe default: a future benign type Claude Code ships still lights
+      // the (calm) dot, but must not masquerade as "Claude is stuck".
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "Notification",
+        notification_type: "some_future_type",
+      });
+      expect(ev.needsAttention).toBe(true);
+      expect(ev.attentionKind).toBe("idle");
+    });
+
+    it("informational notifications → null", () => {
+      const ev = state.record({
+        session_id: "s1",
+        hook_event_name: "Notification",
+        notification_type: "auth_success",
+      });
+      expect(ev.attentionKind).toBe(null);
+    });
+
+    it("blocking dominates follow-up events until the pending resolves", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      // Unknown notification while the permission is still pending: the
+      // pending is carried across, so the tier stays pinned to blocking.
+      const a = state.record({
+        session_id: "s1",
+        hook_event_name: "Notification",
+        notification_type: "some_future_type",
+      });
+      expect(a.attentionKind).toBe("blocking");
+      // Subagent churn doesn't demote it either.
+      const b = state.record({
+        session_id: "s1",
+        hook_event_name: "SubagentStart",
+        agent_id: "sub-1",
+      });
+      expect(b.attentionKind).toBe("blocking");
+      // Stop resolves the pending → the same event reclassifies as idle.
+      const c = state.record({ session_id: "s1", hook_event_name: "Stop" });
+      expect(c.attentionKind).toBe("idle");
+    });
+
+    it("permission → resolved via transcript → null; later Stop → 'idle'", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      const futureTs = new Date(Date.now() + 60_000).toISOString();
+      const broadcast = state.noteTranscriptEvents("s1", [
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: futureTs,
+          blocks: [{ type: "text", text: "continuing" }],
+        },
+      ]);
+      expect(broadcast!.attentionKind).toBe(null);
+      const stop = state.record({ session_id: "s1", hook_event_name: "Stop" });
+      expect(stop.attentionKind).toBe("idle");
+    });
+
+    it("noteSendKeys clears the tier along with needsAttention", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      const broadcast = state.noteSendKeys("s1");
+      expect(broadcast!.attentionKind).toBe(null);
+    });
+
+    it("resolveStaleFromTranscripts clears the tier", async () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+        transcript_path: "/tmp/sess.jsonl",
+      });
+      const requestedAt = state.snapshot().s1.pending!.requestedAt;
+      const out = await state.resolveStaleFromTranscripts(async () => ({
+        mtimeMs: requestedAt + 1000,
+      }));
+      expect(out[0].attentionKind).toBe(null);
+      expect(state.snapshot().s1.attentionKind).toBe(null);
+    });
+
+    it("matching tool_result clears the tier for transcript-origin pending", () => {
+      state.noteTranscriptEvents("s1", [
+        {
+          kind: "assistant",
+          uuid: "a1",
+          ts: "2026-05-25T16:18:16.751Z",
+          blocks: [
+            {
+              type: "tool_use",
+              id: "use-ask-1",
+              name: "AskUserQuestion",
+              input: { questions: [] },
+            },
+          ],
+        },
+      ]);
+      expect(state.snapshot().s1.attentionKind).toBe("blocking");
+      const broadcast = state.noteTranscriptEvents("s1", [
+        {
+          kind: "tool_result",
+          uuid: "r1",
+          ts: "2026-05-25T16:20:00.000Z",
+          toolUseId: "use-ask-1",
+          output: "answered",
+          isError: false,
+        },
+      ]);
+      expect(broadcast!.attentionKind).toBe(null);
+    });
+
+    it("dismissAttention nulls the tier while preserving the pending prompt", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "PermissionRequest",
+        tool_name: "AskUserQuestion",
+        tool_input: {
+          questions: [{ question: "?", options: [{ label: "a" }] }],
+        },
+      });
+      const out = state.dismissAttention("s1");
+      // Viewing soft-clears the ambient signal (kind mirrors the boolean)
+      // but the form stays renderable — promptKind still says permission.
+      expect(out!.attentionKind).toBe(null);
+      expect(out!.pending?.kind).toBe("ask_user_question");
+      expect(out!.promptKind).toBe("permission");
+    });
+
+    it("StopFailure then idle_prompt stays 'error' until a clean Stop", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "StopFailure",
+        error_type: "rate_limit",
+        error_message: "x",
+      });
+      // lastError persists across notifications, so the unresolved error
+      // outranks the idle nudge.
+      const a = state.record({
+        session_id: "s1",
+        hook_event_name: "Notification",
+        notification_type: "idle_prompt",
+      });
+      expect(a.attentionKind).toBe("error");
+      // A clean Stop clears the error → idle tier.
+      const b = state.record({ session_id: "s1", hook_event_name: "Stop" });
+      expect(b.attentionKind).toBe("idle");
+    });
+
+    it("clear() nulls the tier", () => {
+      state.record({
+        session_id: "s1",
+        hook_event_name: "StopFailure",
+        error_type: "server_error",
+        error_message: "x",
+      });
+      state.clear("s1");
+      expect(state.snapshot().s1.attentionKind).toBe(null);
+    });
+  });
 });

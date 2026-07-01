@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AttentionInfo,
+  AttentionKind,
   Pending,
   PromptKind,
   RawSession,
@@ -40,10 +41,20 @@ export interface SessionView extends RawSession {
   state: SessionState;
 }
 
+// Attention totals split by severity tier. Drives the favicon color, the
+// document.title bang, and any other ambient surface that wants "how loud
+// should I be" rather than a single count.
+export interface AttentionCounts {
+  blocking: number;
+  error: number;
+  idle: number;
+}
+
 export interface SessionsApi {
   connected: boolean;
   sessions: SessionView[];
   attentionCount: number;
+  attentionCounts: AttentionCounts;
   current: string | null;
   currentSession: SessionView | null;
   setCurrent: (id: string | null) => void;
@@ -73,15 +84,28 @@ export interface SessionsApi {
   refresh: () => void;
 }
 
-// Sort sessions: attention-needing first, then busy, then by recent update.
+// Sort sessions: attention-needing first — tiered by severity (blocking >
+// error > idle nudge) — then busy, then by recent update. Within the
+// attention tiers the secondary key stays lastEventAt (most recent signal
+// first), matching the pre-tier behavior.
+const ATTENTION_RANK: Record<Exclude<AttentionKind, null>, number> = {
+  blocking: 0,
+  error: 1,
+  idle: 2,
+};
+
 function sortSessions(list: SessionView[]): SessionView[] {
   return [...list].sort((a, b) => {
     const rank = (s: SessionView) =>
-      s.needsAttention ? 0 : s.status === "busy" ? 1 : 2;
+      s.attentionKind
+        ? ATTENTION_RANK[s.attentionKind]
+        : s.status === "busy"
+          ? 3
+          : 4;
     const ra = rank(a);
     const rb = rank(b);
     if (ra !== rb) return ra - rb;
-    if (ra === 0) {
+    if (ra <= 2) {
       const ta = a.lastEventAt ?? 0;
       const tb = b.lastEventAt ?? 0;
       if (ta !== tb) return tb - ta;
@@ -98,6 +122,7 @@ function applyAttention(
     ? {
         ...s,
         needsAttention: att.needsAttention,
+        attentionKind: att.attentionKind,
         lastEvent: att.lastEvent ?? s.lastEvent,
         lastEventAt: att.lastEventAt ?? s.lastEventAt,
         lastEventMessage: att.message ?? s.lastEventMessage,
@@ -109,7 +134,18 @@ function applyAttention(
         cwd: att.cwd ?? s.cwd,
       }
     : s;
-  return { ...merged, state: deriveState(merged) };
+  return {
+    ...merged,
+    // Normalize the tier so `attentionKind` and `needsAttention` can never
+    // disagree downstream (counts, sorting, dots all read the kind): the
+    // kind is null exactly when the boolean is false, and rows that carry
+    // the boolean without a kind (pre-tier localStorage snapshots) default
+    // to the calm tier.
+    attentionKind: merged.needsAttention
+      ? (merged.attentionKind ?? "idle")
+      : null,
+    state: deriveState(merged),
+  };
 }
 
 // Cold-open sidebar snapshot. Hydrating from localStorage paints the rail
@@ -195,6 +231,7 @@ export function useSessions(): SessionsApi {
           for (const [sid, v] of Object.entries(snap)) {
             next[sid] = {
               needsAttention: !!v.needsAttention,
+              attentionKind: v.attentionKind ?? null,
               lastEvent: v.lastEvent,
               lastEventAt: v.lastEventAt,
               message: v.message,
@@ -218,6 +255,7 @@ export function useSessions(): SessionsApi {
             ...prev,
             [ev.sessionId]: {
               needsAttention: !!ev.needsAttention,
+              attentionKind: ev.attentionKind ?? null,
               lastEvent: ev.lastEvent,
               lastEventAt: ev.lastEventAt,
               message: ev.message,
@@ -258,6 +296,17 @@ export function useSessions(): SessionsApi {
     () => sessions.filter((s) => s.needsAttention).length,
     [sessions],
   );
+
+  // Per-tier split of the same population (applyAttention guarantees a
+  // non-null kind whenever needsAttention is set, so the tiers sum to
+  // attentionCount).
+  const attentionCounts = useMemo<AttentionCounts>(() => {
+    const counts: AttentionCounts = { blocking: 0, error: 0, idle: 0 };
+    for (const s of sessions) {
+      if (s.attentionKind) counts[s.attentionKind] += 1;
+    }
+    return counts;
+  }, [sessions]);
 
   const currentSession = useMemo(
     () => sessions.find((s) => s.sessionId === current) ?? null,
@@ -313,7 +362,10 @@ export function useSessions(): SessionsApi {
     if (document.hidden) return;
     setAttention((prev) => ({
       ...prev,
-      [current]: { ...att, needsAttention: false },
+      // Viewing soft-clears the ambient signal; the tier mirrors the
+      // boolean everywhere, so drop it too (the server's dismissAttention
+      // re-derives the same null).
+      [current]: { ...att, needsAttention: false, attentionKind: null },
     }));
     void clearAttentionApi(current);
   }, [current, attention]);
@@ -457,6 +509,7 @@ export function useSessions(): SessionsApi {
                 [sessionId]: {
                   ...cur,
                   needsAttention: false,
+                  attentionKind: null,
                   pendingPermission: undefined,
                   pending: undefined,
                   promptKind: null,
@@ -507,6 +560,7 @@ export function useSessions(): SessionsApi {
             [current]: {
               ...cur,
               needsAttention: false,
+              attentionKind: null,
               pendingPermission: undefined,
               pending: undefined,
               lastError: undefined,
@@ -542,7 +596,10 @@ export function useSessions(): SessionsApi {
     setAttention((prev) => {
       const cur = prev[id];
       if (!cur?.needsAttention) return prev;
-      return { ...prev, [id]: { ...cur, needsAttention: false } };
+      return {
+        ...prev,
+        [id]: { ...cur, needsAttention: false, attentionKind: null },
+      };
     });
     void clearAttentionApi(id);
   }, []);
@@ -574,6 +631,7 @@ export function useSessions(): SessionsApi {
     connected,
     sessions,
     attentionCount,
+    attentionCounts,
     current,
     currentSession,
     setCurrent,
