@@ -12,8 +12,28 @@ import type {
 // All paths are relative; in dev Vite proxies /api → :3000, in prod the same
 // Express server serves the built assets so origin is identical.
 
+// Fired on window whenever any API call comes back 401 — AuthGate listens
+// and flips to the login screen (e.g. the token was rotated mid-session).
+export const AUTH_REQUIRED_EVENT = "hark:auth-required";
+
+function notifyAuthRequired(): void {
+  window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+}
+
+// fetch + the auth boundary: the hark_auth cookie flows automatically (same
+// origin), so the only job here is turning a 401 into the auth-required
+// event before throwing. Every REST call site below goes through this.
+async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  const r = await fetch(url, init);
+  if (r.status === 401) {
+    notifyAuthRequired();
+    throw new Error("unauthorized (401)");
+  }
+  return r;
+}
+
 export async function fetchSessions(): Promise<RawSession[]> {
-  const r = await fetch("/api/sessions");
+  const r = await apiFetch("/api/sessions");
   if (!r.ok) throw new Error(`sessions: ${r.status}`);
   const data = (await r.json()) as { sessions: RawSession[] };
   return data.sessions;
@@ -22,7 +42,7 @@ export async function fetchSessions(): Promise<RawSession[]> {
 export async function fetchTranscript(
   sessionId: string,
 ): Promise<{ events: TranscriptEvent[]; offset: number }> {
-  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
+  const r = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
   if (!r.ok) throw new Error(`transcript: ${r.status}`);
   const data = (await r.json()) as {
     events: TranscriptEvent[];
@@ -50,7 +70,7 @@ export async function fetchTranscriptDelta(
 ): Promise<TranscriptDeltaResponse> {
   const params = new URLSearchParams({ after: String(after) });
   if (lastUuid) params.set("lastUuid", lastUuid);
-  const r = await fetch(
+  const r = await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/transcript?${params.toString()}`,
   );
   if (!r.ok) throw new Error(`transcript: ${r.status}`);
@@ -70,7 +90,7 @@ export async function sendToSession(
   sessionId: string,
   body: SendBody,
 ): Promise<void> {
-  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
+  const r = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -111,6 +131,11 @@ export async function uploadFiles(
         } catch (e) {
           reject(e);
         }
+      } else if (xhr.status === 401) {
+        // Same 401 handling as apiFetch — the upload path is XHR-based (for
+        // progress events) so it can't share the wrapper directly.
+        notifyAuthRequired();
+        reject(new Error("unauthorized (401)"));
       } else {
         let msg = `upload failed (${xhr.status})`;
         try {
@@ -127,14 +152,14 @@ export async function uploadFiles(
 }
 
 export async function clearAttention(sessionId: string): Promise<void> {
-  await fetch(
+  await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/attention/clear`,
     { method: "POST" },
   ).catch(() => {});
 }
 
 export async function closeSession(sessionId: string): Promise<void> {
-  const r = await fetch(
+  const r = await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/close`,
     { method: "POST" },
   );
@@ -160,14 +185,26 @@ export interface SpawnResponse {
 }
 
 export async function fetchSlashCommands(cwd: string): Promise<SlashCommand[]> {
-  const r = await fetch(`/api/commands?cwd=${encodeURIComponent(cwd)}`);
+  // Best-effort fetchers: callers treat "no data" and "failed" the same, so
+  // swallow the apiFetch throw too (the 401 event has already fired by then).
+  let r: Response;
+  try {
+    r = await apiFetch(`/api/commands?cwd=${encodeURIComponent(cwd)}`);
+  } catch {
+    return [];
+  }
   if (!r.ok) return [];
   const data = (await r.json()) as { commands?: SlashCommand[] };
   return Array.isArray(data.commands) ? data.commands : [];
 }
 
 export async function fetchRecentSpawnDirs(): Promise<string[]> {
-  const r = await fetch("/api/spawn/recent");
+  let r: Response;
+  try {
+    r = await apiFetch("/api/spawn/recent");
+  } catch {
+    return [];
+  }
   if (!r.ok) return [];
   const data = (await r.json()) as { dirs?: string[] };
   return Array.isArray(data.dirs) ? data.dirs : [];
@@ -176,7 +213,7 @@ export async function fetchRecentSpawnDirs(): Promise<string[]> {
 // ---- Projects ------------------------------------------------------------
 
 export async function fetchProjects(): Promise<ProjectInfo[]> {
-  const r = await fetch("/api/projects");
+  const r = await apiFetch("/api/projects");
   if (!r.ok) throw new Error(`projects: ${r.status}`);
   const data = (await r.json()) as { projects: ProjectInfo[] };
   return data.projects;
@@ -189,7 +226,7 @@ export type PlanResponse =
 export async function fetchProjectPlan(
   projectKey: string,
 ): Promise<PlanResponse> {
-  const r = await fetch(
+  const r = await apiFetch(
     `/api/projects/${encodeURIComponent(projectKey)}/plan`,
   );
   if (!r.ok) throw new Error(`plan: ${r.status}`);
@@ -200,7 +237,7 @@ export async function captureToProject(
   projectKey: string,
   text: string,
 ): Promise<ProjectInfo | null> {
-  const r = await fetch(
+  const r = await apiFetch(
     `/api/projects/${encodeURIComponent(projectKey)}/capture`,
     {
       method: "POST",
@@ -237,7 +274,7 @@ export interface InstallResponse {
 export async function installProject(
   projectKey: string,
 ): Promise<InstallResponse> {
-  const r = await fetch(
+  const r = await apiFetch(
     `/api/projects/${encodeURIComponent(projectKey)}/install`,
     { method: "POST" },
   );
@@ -246,7 +283,7 @@ export async function installProject(
 }
 
 export async function spawnSession(cwd: string): Promise<SpawnResponse> {
-  const r = await fetch("/api/sessions/new", {
+  const r = await apiFetch("/api/sessions/new", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd }),

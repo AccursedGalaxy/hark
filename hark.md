@@ -34,6 +34,16 @@ Server-Sent Events (SSE). Browser opens one stream per session it is actively vi
 
 Bg/agent sessions and terminal-launched-without-tmux sessions have no `TMUX_PANE`. Visible in sidebar with a badge; transcript readable; composer disabled.
 
+## Access control
+
+Every `/api` route is token-protected (the write path is `tmux send-keys` into live sessions — an open port would be RCE for the whole tailnet/LAN). The static app shell stays open so the login screen can load; all data lives behind `/api`.
+
+- **Token:** `~/.config/hark/token` (0600), generated on first boot — the server logs the path, never the token. `HARK_AUTH_TOKEN` overrides it for tests/dev.
+- **Browsers:** log in once per device — the login screen exchanges the token for a 1-year `hark_auth` cookie (a SHA-256 digest of the token, so the cookie jar never holds the secret).
+- **Loopback is exempt:** local Claude Code hooks and CLI curls against `localhost` need no credentials (checked against the socket peer address, never spoofable headers).
+- **Scripts:** send `Authorization: Bearer $(cat ~/.config/hark/token)`.
+- **Rotation:** delete the token file and restart the server — a new token is generated and every issued cookie is invalidated at once.
+
 ## Design decisions
 
 | #  | Topic        | Choice                                                                 |

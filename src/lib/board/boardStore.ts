@@ -4,18 +4,16 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
-// The BOARD: a first-class, id-addressed task store — the PM's operational
+// The BOARD: a first-class, id-addressed task store — the project's task
 // substrate. It replaces brittle PLAN.md prose surgery (long-bullet string-match
 // edits) with atomic, keyed operations.
 //
-// CRITICAL difference from metrics.db: the board is a SOURCE OF TRUTH, not a
-// derived/rebuildable projection. A metrics wipe/rebuild must NOT touch it — so
-// it lives in its OWN file (board.db) beside metrics.db, never inside it.
+// The board is a SOURCE OF TRUTH, not a derived/rebuildable projection — it
+// lives in its own per-project file (`.hark/board.db`) and must never be wiped.
 //
-// Reuses the node:sqlite layer shipped for metrics (PR #24): same dependency,
-// same shape — pure builders + a thin runtime wrapper. No new dependency, no
-// daemon, offline + self-contained (the design doc's "native SoT, GH is a
-// projection").
+// Built on node:sqlite: pure builders + a thin runtime wrapper. No new
+// dependency, no daemon, offline + self-contained (the design doc's "native
+// SoT, GH is a projection").
 //
 // TWO load-bearing correctness properties drive every design choice here; they
 // are the reason the board exists, not optional polish:
@@ -28,13 +26,13 @@ import { DatabaseSync } from "node:sqlite";
 //      AUTOINCREMENT ids + WAL + a busy_timeout mean two writers never lose an
 //      append and never overwrite each other.
 
-// Bumped when the schema changes shape. Stored in PRAGMA user_version. UNLIKE
-// metrics.db, a mismatch here is NOT a licence to wipe — the board is the source
-// of truth, so a future change must MIGRATE, not rebuild.
+// Bumped when the schema changes shape. Stored in PRAGMA user_version. A
+// mismatch here is NOT a licence to wipe — the board is the source of truth,
+// so a future change must MIGRATE, not rebuild.
 export const SCHEMA_VERSION = 2;
 
-// Task lifecycle at the *task* grain (mirrors the worker lifecycle, but a task
-// is not an agent). inbox → backlog → ready → in-progress → review → done, plus
+// Task lifecycle at the *task* grain.
+// inbox → backlog → ready → in-progress → review → done, plus
 // blocked. `inbox` is the pre-triage capture state: anything the dashboard
 // capture box or a quick `hark board add` drops in lands here until the PM
 // triages it (promote → backlog/ready, or close as noise). It REPLACES the old
@@ -69,8 +67,9 @@ export type SettableField = (typeof SETTABLE_FIELDS)[number];
 
 export const SCHEMA_DDL: readonly string[] = [
   // The board itself. `assignee` = role | agentId | workstream; `depends_on` =
-  // task id(s) (comma-joined). orch_id/agent_id link a task to the worker once
-  // it's dispatched — the join key to metrics.db.
+  // task id(s) (comma-joined). orch_id/agent_id are legacy columns from the
+  // removed orchestration layer — kept because shipped rows carry them and the
+  // schema only ever migrates forward.
   `CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     title TEXT,
@@ -104,8 +103,7 @@ export const SCHEMA_DDL: readonly string[] = [
 // ---- Schema migrations ------------------------------------------------------
 //
 // The board is a SOURCE OF TRUTH, so a schema bump must EVOLVE the existing
-// file, never rebuild it (that's the durability promise that separates it from
-// the rebuildable metrics.db). Each migration carries the target version it
+// file, never rebuild it. Each migration carries the target version it
 // produces and an `up` that takes a db FROM the previous version TO `to`. They
 // run in ascending order, each inside its own transaction, and `user_version`
 // is stamped only after the body succeeds — so a half-applied migration rolls
@@ -249,10 +247,9 @@ function migrateLegacyBoard(legacy: string, target: string): void {
 //
 // NOTE on worktrees: a linked git worktree has its own toplevel (its `.git` is a
 // file), so this resolves it to that worktree's own `.hark/board.db`, NOT the
-// main tree's. That is acceptable because the board is the PM-HEAD's tool, and
-// the PM-head runs at the main project root — workers in worktrees don't drive
-// the board. If that ever changes, resolve worktrees to their shared root via
-// `git rev-parse --git-common-dir`.
+// main tree's. That is acceptable because the board is driven from the main
+// project root in practice. If that ever changes, resolve worktrees to their
+// shared root via `git rev-parse --git-common-dir`.
 export function findProjectRoot(startDir: string): string {
   let dir = path.resolve(startDir);
   for (;;) {

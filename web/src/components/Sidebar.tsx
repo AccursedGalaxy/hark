@@ -366,7 +366,20 @@ function SessionRow({
   onClick: () => void;
   onClose: (e: React.MouseEvent) => void;
 }) {
-  const style = STATE_TO_DESIGN[session.state] ?? STATE_TO_DESIGN.idle;
+  let style = STATE_TO_DESIGN[session.state] ?? STATE_TO_DESIGN.idle;
+  // Tier the "wait" badge by attention severity so the rail distinguishes
+  // "Claude is stuck on a decision" (ASKING, amber — unchanged default,
+  // also covers a viewed-but-unanswered pending where the kind is soft-
+  // cleared) from "the turn died" (ERROR, coral) and "turn finished, your
+  // move" (DONE, jade). Dot classes are the existing status colors from
+  // design.css — no new styles.
+  if (session.state === "wait") {
+    if (session.attentionKind === "error") {
+      style = { dot: "error", tag: "waiting", label: "ERROR" };
+    } else if (session.attentionKind === "idle") {
+      style = { dot: "idle", tag: "waiting", label: "DONE" };
+    }
+  }
   const label = sessionLabel(session);
   const showRO = !session.hasTmuxPane;
 

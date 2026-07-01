@@ -15,19 +15,31 @@ import { useProjects } from "./hooks/useProjects";
 import { useSessions } from "./hooks/useSessions";
 import { pickCaptureDefaultProject } from "./lib/captureDefaults";
 import { sessionLabel, tildeify } from "./lib/format";
+import type { AttentionKind } from "./lib/protocol";
 import { getContextRail, setContextRail } from "./lib/theme";
 
 const WIDE_QUERY = "(min-width: 880px)";
 const BASE_TITLE = "hark";
 
-function setFavicon(attentionCount: number) {
+// Favicon dot color per attention tier. The dot shows the single
+// highest-severity tier across all sessions:
+//   blocking → red (act now: Claude is stuck on a decision)
+//   error    → coral, the app's error status color (--coral in design.css,
+//              hexified because the favicon SVG can't read CSS variables)
+//   idle     → amber, the app's accent (calm "your turn" nudge)
+const TIER_DOT_COLOR: Record<Exclude<AttentionKind, null>, string> = {
+  blocking: "#ef4444",
+  error: "#f97770",
+  idle: "#eca851",
+};
+
+function setFavicon(kind: AttentionKind) {
   if (typeof document === "undefined") return;
   const link = document.getElementById("favicon") as HTMLLinkElement | null;
   if (!link) return;
-  const svg =
-    attentionCount > 0
-      ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0a0a0a"/><text x="14" y="22" font-family="ui-sans-serif,system-ui" font-size="18" font-weight="700" text-anchor="middle" fill="#e6e6e6">h</text><circle cx="24" cy="9" r="7" fill="#ef4444"/></svg>`
-      : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0a0a0a"/><text x="16" y="22" font-family="ui-sans-serif,system-ui" font-size="18" font-weight="700" text-anchor="middle" fill="#e6e6e6">h</text></svg>`;
+  const svg = kind
+    ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0a0a0a"/><text x="14" y="22" font-family="ui-sans-serif,system-ui" font-size="18" font-weight="700" text-anchor="middle" fill="#e6e6e6">h</text><circle cx="24" cy="9" r="7" fill="${TIER_DOT_COLOR[kind]}"/></svg>`
+    : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0a0a0a"/><text x="16" y="22" font-family="ui-sans-serif,system-ui" font-size="18" font-weight="700" text-anchor="middle" fill="#e6e6e6">h</text></svg>`;
   const href = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
   if (link.href !== href) link.href = href;
 }
@@ -40,6 +52,7 @@ export default function App() {
     connected,
     sessions,
     attentionCount,
+    attentionCounts,
     current,
     currentSession,
     setCurrent: setCurrentRaw,
@@ -97,10 +110,21 @@ export default function App() {
   });
 
   useEffect(() => {
-    const prefix = attentionCount > 0 ? `(${attentionCount}) ` : "";
+    // Tier logic: sessions blocked on a decision outrank everything — the
+    // title shows just their count with a bang ("(2!) hark") so a glance at
+    // the tab says "N sessions are stuck on you". With nothing blocking,
+    // fall back to the total attention count without the bang ("(3) hark":
+    // errors + idle nudges — worth a look, nothing stuck). The favicon dot
+    // mirrors the same precedence: blocking > error > idle.
+    const { blocking, error, idle } = attentionCounts;
+    const total = blocking + error + idle;
+    const prefix =
+      blocking > 0 ? `(${blocking}!) ` : total > 0 ? `(${total}) ` : "";
     document.title = `${prefix}${BASE_TITLE}`;
-    setFavicon(attentionCount);
-  }, [attentionCount]);
+    setFavicon(
+      blocking > 0 ? "blocking" : error > 0 ? "error" : idle > 0 ? "idle" : null,
+    );
+  }, [attentionCounts]);
 
   useEffect(() => {
     if (!wide) return;

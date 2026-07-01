@@ -20,6 +20,7 @@
     "install-service": "tsx src/bin/install-service.ts",
     "uninstall-service": "tsx src/bin/install-service.ts --uninstall",
     "test": "vitest run",
+    "test:memory": "NODE_OPTIONS=--expose-gc vitest run src/lib/memoryRegression.test.ts",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -32,7 +33,7 @@
     "@types/compression": "^1.8.1",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.5",
-    "concurrently": "^9.1.0",
+    "concurrently": "^9.2.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^4.1.7"

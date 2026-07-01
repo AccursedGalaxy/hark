@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { derivePromptKind, deriveState, type RawSession } from "./protocol.js";
+import {
+  deriveAttentionKind,
+  derivePromptKind,
+  deriveState,
+  type RawSession,
+} from "./protocol.js";
 
 function baseSession(overrides: Partial<RawSession> = {}): RawSession {
   return {
@@ -209,5 +214,112 @@ describe("derivePromptKind", () => {
         notificationType: "auth_success",
       }),
     ).toBe(null);
+  });
+});
+
+describe("deriveAttentionKind", () => {
+  it("returns null for no state / no attention", () => {
+    expect(deriveAttentionKind(undefined)).toBe(null);
+    // The kind mirrors the boolean: even with a pending prompt alive
+    // (viewed-but-unanswered), a cleared needsAttention means no ambient
+    // signal.
+    expect(
+      deriveAttentionKind({
+        needsAttention: false,
+        lastEvent: "PermissionRequest",
+        pending: {
+          kind: "tool_permission",
+          toolName: "Bash",
+          toolInput: {},
+          requestedAt: 1,
+        },
+      }),
+    ).toBe(null);
+  });
+
+  it("a live pending decision → 'blocking' regardless of the last event", () => {
+    expect(
+      deriveAttentionKind({
+        needsAttention: true,
+        lastEvent: "SubagentStart",
+        pending: {
+          kind: "ask_user_question",
+          questions: [],
+          requestedAt: 1,
+        },
+      }),
+    ).toBe("blocking");
+  });
+
+  it("legacy pendingPermission alone → 'blocking'", () => {
+    expect(
+      deriveAttentionKind({
+        needsAttention: true,
+        lastEvent: "PermissionRequest",
+        pendingPermission: { toolName: "Bash", toolInput: {}, requestedAt: 1 },
+      }),
+    ).toBe("blocking");
+  });
+
+  it("Notification(permission_prompt / elicitation_dialog) → 'blocking'", () => {
+    for (const notificationType of [
+      "permission_prompt",
+      "elicitation_dialog",
+    ]) {
+      expect(
+        deriveAttentionKind({
+          needsAttention: true,
+          lastEvent: "Notification",
+          notificationType,
+        }),
+      ).toBe("blocking");
+    }
+  });
+
+  it("lastError → 'error'; blocking still dominates when both are present", () => {
+    expect(
+      deriveAttentionKind({
+        needsAttention: true,
+        lastEvent: "Notification",
+        notificationType: "idle_prompt",
+        lastError: { errorType: "rate_limit", errorMessage: "", occurredAt: 1 },
+      }),
+    ).toBe("error");
+    expect(
+      deriveAttentionKind({
+        needsAttention: true,
+        lastEvent: "PermissionRequest",
+        pending: {
+          kind: "tool_permission",
+          toolName: "Bash",
+          toolInput: {},
+          requestedAt: 1,
+        },
+        lastError: { errorType: "rate_limit", errorMessage: "", occurredAt: 1 },
+      }),
+    ).toBe("blocking");
+  });
+
+  it("unknown notification types → 'idle', never 'blocking' (unlike promptKind's permission default)", () => {
+    expect(
+      deriveAttentionKind({
+        needsAttention: true,
+        lastEvent: "Notification",
+        notificationType: "some_future_type",
+      }),
+    ).toBe("idle");
+  });
+
+  it("Stop / idle_prompt → 'idle'", () => {
+    expect(
+      deriveAttentionKind({ needsAttention: true, lastEvent: "Stop" }),
+    ).toBe("idle");
+    expect(
+      deriveAttentionKind({
+        needsAttention: true,
+        lastEvent: "Notification",
+        notificationType: "idle_prompt",
+      }),
+    ).toBe("idle");
   });
 });

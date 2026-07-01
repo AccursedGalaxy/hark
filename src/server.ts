@@ -60,6 +60,13 @@ import {
   type SseWriter,
 } from "./lib/transcriptStream.js";
 import { storeUpload } from "./lib/uploads.js";
+import {
+  buildAuthCookie,
+  constantTimeEquals,
+  evaluateRequest,
+  isAuthenticated,
+  loadOrCreateToken,
+} from "./lib/auth.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -212,6 +219,86 @@ app.use(
 
 app.use(express.json({ limit: "1mb" }));
 
+// ---- Auth boundary --------------------------------------------------------
+//
+// hark listens on 0.0.0.0 and can type into live Claude Code sessions, so an
+// unauthenticated /api is remote code execution for anyone on the tailnet or
+// LAN. Everything under /api sits behind this middleware; the static shell
+// stays open so the SPA can load and show its login screen (all data lives
+// behind /api). See lib/auth.ts for the token/cookie scheme.
+//
+// `HARK_AUTH_TOKEN` overrides the on-disk token for tests/dev; otherwise the
+// token lives at ~/.config/hark/token (generated on first boot). We log the
+// path, never the token.
+const envToken = process.env.HARK_AUTH_TOKEN;
+let authToken: string;
+if (envToken) {
+  authToken = envToken;
+} else {
+  const loaded = await loadOrCreateToken();
+  authToken = loaded.token;
+  console.log(
+    `Auth token ${loaded.created ? "generated" : "loaded"}: ${loaded.filePath}`,
+  );
+}
+
+// requireAuth: runs before every route below (including both SSE endpoints —
+// EventSource sends same-origin cookies automatically, so they need nothing
+// beyond ordering). Loopback peers are exempt: local Claude Code hooks POST
+// /api/hook with no credentials, and the CLI/dev tooling curls localhost.
+// The decision itself lives in lib/auth.ts as a pure function; this just
+// feeds it the request. Note we trust only the socket peer address — never
+// spoofable headers like X-Forwarded-For.
+app.use((req, res, next) => {
+  const verdict = evaluateRequest(
+    {
+      remoteAddress: req.socket.remoteAddress,
+      path: req.path,
+      method: req.method,
+      cookieHeader: req.headers.cookie,
+      authHeader: req.headers.authorization,
+    },
+    authToken,
+  );
+  if (verdict === "deny") {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  next();
+});
+
+// Browser login: exchange the token (typed once per device) for the
+// long-lived hark_auth cookie. Constant-time check — see lib/auth.ts.
+app.post("/api/auth/login", (req, res) => {
+  const supplied = (req.body ?? {}) as { token?: unknown };
+  if (
+    typeof supplied.token !== "string" ||
+    !constantTimeEquals(supplied.token, authToken)
+  ) {
+    res.status(401).json({ error: "invalid token" });
+    return;
+  }
+  res.setHeader("Set-Cookie", buildAuthCookie(authToken));
+  res.json({ ok: true });
+});
+
+// Auth probe for the client's AuthGate: same logic as the middleware but
+// always answers 200 with a boolean, so an unauthenticated page load can
+// decide to show the login card without console-noisy 401s. Loopback counts
+// as authenticated (it was never asked to log in).
+app.get("/api/auth/status", (req, res) => {
+  res.json({
+    authenticated: isAuthenticated(
+      {
+        remoteAddress: req.socket.remoteAddress,
+        cookieHeader: req.headers.cookie,
+        authHeader: req.headers.authorization,
+      },
+      authToken,
+    ),
+  });
+});
+
 const promptState = new PromptState();
 type HookSubscriber = (ev: HookBroadcast) => void;
 const hookSubscribers = new Set<HookSubscriber>();
@@ -265,6 +352,9 @@ async function buildSessionList(): Promise<unknown[]> {
         tmuxLocation: loc ? formatLocation(loc) : null,
         tmuxWindowName: loc?.windowName ?? null,
         needsAttention: att?.needsAttention ?? false,
+        // Severity tier of the attention flag (blocking > error > idle) so
+        // clients can pick ambient signal strength instead of one red dot.
+        attentionKind: att?.attentionKind ?? null,
         lastEvent: att?.lastEvent,
         lastEventAt: att?.lastEventAt,
         lastEventMessage: att?.message,
@@ -303,6 +393,10 @@ async function buildSessionList(): Promise<unknown[]> {
           tmuxLocation: loc ? formatLocation(loc) : null,
           tmuxWindowName: loc?.windowName ?? null,
           needsAttention: true,
+          // The trust dialog blocks the whole session until the user
+          // confirms — same "stuck on a decision" severity as a pending
+          // permission, even though it never flows through PromptState.
+          attentionKind: "blocking" as const,
           lastEvent: "Pending",
           lastEventAt: now,
           lastEventMessage: "Waiting for trust confirmation",
