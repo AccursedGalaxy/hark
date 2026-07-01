@@ -186,8 +186,8 @@ export function applyBoardOp(store: BoardStore, op: BoardOp): BoardResult {
       return { kind: "task", task, changed };
     }
     case "close": {
-      // Attribution falls back to the ambient session/PM id so a bare `close`
-      // from inside an orchestrated session still records who landed it.
+      // Attribution falls back to the ambient session id so a bare `close`
+      // from inside a hark-managed session still records who landed it.
       const by =
         op.by ?? process.env.HARK_SESSION_ID ?? process.env.HARK_PM_ID ?? undefined;
       const { task, changed } = store.setTask(op.id, {
