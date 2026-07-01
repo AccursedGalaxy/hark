@@ -17,6 +17,7 @@
     "install-service": "tsx src/bin/install-service.ts",
     "uninstall-service": "tsx src/bin/install-service.ts --uninstall",
     "test": "vitest run",
+    "test:memory": "NODE_OPTIONS=--expose-gc vitest run src/lib/memoryRegression.test.ts",
     "test:watch": "vitest"
   },
   "dependencies": {

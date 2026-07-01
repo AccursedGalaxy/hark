@@ -1,0 +1,56 @@
+# CI: build + full test suite + a dedicated memory-regression guard.
+#
+# The guard step exists because the server once heap-OOM'd every 5-8 hours
+# ("Ineffective mark-compacts near heap limit") from a slow leak in a
+# long-lived hot path. src/lib/memoryRegression.test.ts hammers each of those
+# paths in a loop and asserts bounded heap growth — but it needs V8's GC to
+# be forceable (`--expose-gc`) to measure anything, so it skips itself in
+# the plain `npm test` run and gets its own step here with NODE_OPTIONS set.
+# A failure in the "Memory regression guard" step means exactly one thing:
+# a hot path started retaining memory per iteration. Do not merge past it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  # One run per ref; superseded pushes to the same PR/branch get cancelled.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24: the server uses node:sqlite (needs a modern runtime; prod
+      # runs Node 25). 24 is the closest LTS line available on runners.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # Root package.json declares the `web` workspace, so a single `npm ci`
+      # installs both the server deps and the React client's.
+      - name: Install dependencies
+        run: npm ci
+
+      # Web workspace (vite) build + server tsc — same as a release build,
+      # so type errors in either half fail CI even where tests don't reach.
+      - name: Build
+        run: npm run build
+
+      # Full suite. The memory-regression file self-skips here (no
+      # --expose-gc) rather than faking a pass — it runs for real below.
+      - name: Test
+        run: npm test
+
+      # The heap guard, isolated in its own step so a regression fails CI
+      # under an unmistakable name instead of drowning in the suite output.
+      - name: Memory regression guard
+        run: npx vitest run src/lib/memoryRegression.test.ts
+        env:
+          NODE_OPTIONS: --expose-gc
