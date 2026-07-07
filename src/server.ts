@@ -857,13 +857,13 @@ app.get("/api/projects", async (_req, res) => {
       listLiveSessions(),
       listPendingSessions(),
     ]);
-    await Promise.all([
+    const resolved = await Promise.all([
       ...sessions.map((s) => resolveProjectCached(s.cwd)),
       ...pending.map((p) => resolveProjectCached(p.cwd)),
     ]);
     const seen = new Set<string>();
     const out: ProjectInfo[] = [];
-    for (const v of projectCache.values()) {
+    for (const v of resolved) {
       if (!v || seen.has(v.key)) continue;
       seen.add(v.key);
       const [exists, mtime] = await Promise.all([
