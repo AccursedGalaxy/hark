@@ -442,6 +442,10 @@ button, [role="button"], a, summary { touch-action: manipulation; }
   display: flex; align-items: center; gap: 6px;
   overflow: hidden;
 }
+/* The pinned "Needs you" block gets extra breathing room before the first
+   project group so the triage list reads as its own section. */
+.needs-group { margin-bottom: 12px; }
+
 .session-path .branch {
   color: var(--indigo);
   display: inline-flex; align-items: center; gap: 4px;

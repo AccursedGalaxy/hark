@@ -28,7 +28,6 @@ export function Sidebar({
   sessions,
   current,
   onPick,
-  attentionCount,
   onSpawned,
   onClose,
   showContext,
@@ -41,7 +40,6 @@ export function Sidebar({
   sessions: SessionView[];
   current: string | null;
   onPick: (id: string) => void;
-  attentionCount: number;
   onSpawned: (pid: number | null) => void;
   onClose: (id: string) => Promise<void>;
   showContext: boolean;
@@ -67,29 +65,32 @@ export function Sidebar({
     });
   }, [sessions, filter]);
 
-  const { needs, idle } = useMemo(() => {
-    const needs: SessionView[] = [];
-    const idle: SessionView[] = [];
-    for (const s of filtered) {
-      if (s.state === "wait" || s.state === "busy" || s.needsAttention) {
-        needs.push(s);
-      } else {
-        idle.push(s);
-      }
-    }
-    return { needs, idle };
-  }, [filtered]);
+  // "Needs you" is exactly the wait state (attention-flagged or blocked on a
+  // prompt) — busy sessions are running fine and stay in their project group.
+  const needs = useMemo(
+    () => filtered.filter((s) => s.state === "wait"),
+    [filtered],
+  );
 
-  const ordered = useMemo(() => [...needs, ...idle], [needs, idle]);
+  // The badge stays a global alert: it counts every wait-state session, not
+  // just the ones matching the search filter, so triage pressure is never
+  // hidden by a narrowed rail.
+  const waitCount = useMemo(
+    () => sessions.filter((s) => s.state === "wait").length,
+    [sessions],
+  );
 
-  // Group sessions by projectKey, preserving the needs-first ordering inside
-  // each group. Sessions without a projectKey land in the trailing "no
-  // project" bucket; they're rendered as a flat list without a header so the
-  // rail doesn't show a confusing empty/orphan label at the bottom.
+  // Group ALL sessions by projectKey so headers and counts stay truthful even
+  // when a project's sessions are pinned above in "Needs you" — the header
+  // must keep rendering (it's the way into PLAN.md) and its count covers the
+  // pinned rows too. Only non-wait sessions render as rows inside the group;
+  // wait rows live exclusively in the pinned section. Sessions without a
+  // projectKey land in the trailing "no project" bucket, rendered as a flat
+  // headerless list (wait-state orphans are likewise pinned, not repeated).
   const { projectGroups, orphanSessions } = useMemo(() => {
     const groups = new Map<string, SessionView[]>();
     const orphans: SessionView[] = [];
-    for (const s of ordered) {
+    for (const s of filtered) {
       const key = s.projectKey ?? null;
       if (!key) {
         orphans.push(s);
@@ -101,38 +102,48 @@ export function Sidebar({
     }
 
     const projectByKey = new Map(projects.map((p) => [p.key, p] as const));
-    const orderedKeys: string[] = [];
-    const seen = new Set<string>();
-    for (const s of ordered) {
-      const k = s.projectKey;
-      if (!k || seen.has(k)) continue;
-      seen.add(k);
-      orderedKeys.push(k);
-    }
-    // Surface projects that exist server-side but have no sessions yet, so
-    // the user can still click into PLAN.md from the rail.
-    for (const p of projects) {
-      if (!seen.has(p.key)) {
-        seen.add(p.key);
-        orderedKeys.push(p.key);
-      }
-    }
 
-    const result = orderedKeys.map((key) => {
-      const info = projectByKey.get(key);
-      const name =
-        info?.name ??
-        key.split("/").filter(Boolean).slice(-1)[0] ??
-        key;
-      return {
-        key,
-        name,
-        sessions: groups.get(key) ?? [],
-      };
-    });
+    const result = Array.from(groups.entries())
+      .map(([key, sessions]) => {
+        const info = projectByKey.get(key);
+        const name =
+          info?.name ?? key.split("/").filter(Boolean).slice(-1)[0] ?? key;
 
-    return { projectGroups: result, orphanSessions: orphans };
-  }, [ordered, projects]);
+        // Sort groups by recency: max(updatedAt ?? lastEventAt ?? startedAt)
+        const maxTime = Math.max(
+          ...sessions.map(
+            (s) => s.updatedAt ?? s.lastEventAt ?? s.startedAt ?? 0,
+          ),
+        );
+
+        return {
+          key,
+          name,
+          sessions,
+          rows: sessions.filter((s) => s.state !== "wait"),
+          maxTime,
+        };
+      })
+      .sort((a, b) => b.maxTime - a.maxTime);
+
+    return {
+      projectGroups: result,
+      orphanSessions: orphans.filter((s) => s.state !== "wait"),
+    };
+  }, [filtered, projects]);
+
+  // Single row renderer shared by the pinned "Needs you" list, project
+  // groups, and orphans — new SessionRow props only need wiring here.
+  const renderRow = (s: SessionView) => (
+    <SessionRow
+      key={s.sessionId}
+      session={s}
+      active={s.sessionId === current}
+      closing={closing === s.sessionId}
+      onClick={() => onPick(s.sessionId)}
+      onClose={(e) => void handleClose(s, e)}
+    />
+  );
 
   const handleClose = async (s: SessionView, ev: React.MouseEvent) => {
     ev.stopPropagation();
@@ -240,11 +251,19 @@ export function Sidebar({
 
       <div className="section-label">
         <span>Needs you</span>
-        <span className="count">{attentionCount || needs.length}</span>
+        <span className="count">{waitCount}</span>
       </div>
 
       <div className="sessions">
-        {projectGroups.length === 0 && orphanSessions.length === 0 ? (
+        {needs.length > 0 && (
+          <div className="project-group needs-group">
+            {needs.map(renderRow)}
+          </div>
+        )}
+
+        {projectGroups.length === 0 &&
+        orphanSessions.length === 0 &&
+        needs.length === 0 ? (
           <div
             style={{
               padding: "12px 14px",
@@ -265,28 +284,10 @@ export function Sidebar({
                   active={currentProject === g.key}
                   onClick={() => onPickProject(g.key)}
                 />
-                {g.sessions.map((s) => (
-                  <SessionRow
-                    key={s.sessionId}
-                    session={s}
-                    active={s.sessionId === current}
-                    closing={closing === s.sessionId}
-                    onClick={() => onPick(s.sessionId)}
-                    onClose={(e) => void handleClose(s, e)}
-                  />
-                ))}
+                {g.rows.map(renderRow)}
               </div>
             ))}
-            {orphanSessions.map((s) => (
-              <SessionRow
-                key={s.sessionId}
-                session={s}
-                active={s.sessionId === current}
-                closing={closing === s.sessionId}
-                onClick={() => onPick(s.sessionId)}
-                onClose={(e) => void handleClose(s, e)}
-              />
-            ))}
+            {orphanSessions.map(renderRow)}
           </>
         )}
       </div>
@@ -414,7 +415,11 @@ function SessionRow({
         </span>
       </div>
       <div className="session-meta">
-        <span className={"tag " + (active ? "accent" : "")}>{session.kind}</span>
+        {session.kind !== "interactive" && (
+          <span className={"tag " + (active ? "accent" : "")}>
+            {session.kind}
+          </span>
+        )}
         {session.tmuxLocation && (
           <span className="tag" title={`tmux ${session.tmuxLocation}`}>
             {session.tmuxLocation}
