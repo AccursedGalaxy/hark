@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildContractCommand,
   buildHookCommand,
+  contractUrlFor,
   installHooks,
   isManagedCommand,
   uninstallHooks,
@@ -30,9 +32,30 @@ describe("isManagedCommand", () => {
     expect(isManagedCommand(buildHookCommand(URL), URL)).toBe(true);
   });
 
+  it("identifies the SessionStart contract command as managed", () => {
+    expect(isManagedCommand(buildContractCommand(URL), URL)).toBe(true);
+  });
+
   it("does not match unrelated commands", () => {
     expect(isManagedCommand("echo hi", URL)).toBe(false);
     expect(isManagedCommand("curl https://example.com", URL)).toBe(false);
+  });
+});
+
+describe("contract command (SessionStart)", () => {
+  it("derives the contract url from the hook url", () => {
+    expect(contractUrlFor(URL)).toBe(
+      "http://localhost:3000/api/artifact-contract",
+    );
+  });
+
+  it("GETs the contract, capped and non-fatal, with stdout kept", () => {
+    const cmd = buildContractCommand(URL);
+    expect(cmd).toContain("--max-time");
+    expect(cmd).toMatch(/\|\|\s*true/);
+    // stdout is the whole point — it becomes session context. Only stderr
+    // may be discarded (the "2>" form).
+    expect(cmd).not.toMatch(/(?<!2)>\/dev\/null/);
   });
 });
 
@@ -61,6 +84,19 @@ describe("installHooks", () => {
       expect(next.hooks[ev]).toHaveLength(1);
       expect(next.hooks[ev][0].hooks[0].command).toBe(buildHookCommand(URL));
     }
+  });
+
+  it("registers the SessionStart contract hook (stdout-bearing GET)", () => {
+    const next = installHooks({}, URL);
+    expect(next.hooks.SessionStart).toHaveLength(1);
+    expect(next.hooks.SessionStart[0].hooks[0].command).toBe(
+      buildContractCommand(URL),
+    );
+  });
+
+  it("uninstall removes the SessionStart contract hook", () => {
+    const next = uninstallHooks(installHooks({}, URL), URL);
+    expect(next.hooks?.SessionStart ?? []).toHaveLength(0);
   });
 
   it("does not register the legacy decision events", () => {

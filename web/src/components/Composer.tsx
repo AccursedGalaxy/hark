@@ -694,10 +694,11 @@ export function Composer({
             value={text}
             placeholder={placeholderText}
             disabled={disabled || lockedByQuestion}
-            // Hint to iOS / Android soft keyboards: show a "send"-style
-            // return key. Doesn't change our hardware-keyboard Enter
-            // handling, just relabels the on-screen key.
-            enterKeyHint="send"
+            // Hint to iOS / Android soft keyboards: a plain return key.
+            // On touch devices Enter inserts a newline (sending is the Send
+            // button's job — see shouldSendOnEnter), so a "send"-styled key
+            // would lie about what the key does.
+            enterKeyHint="enter"
             onChange={(e) => {
               setText(e.target.value);
               setCaret(e.target.selectionStart);
@@ -827,8 +828,7 @@ function isTouch() {
 // Module-level latch: once we observe a keydown with characteristics that
 // only a hardware keyboard can produce (modifier keys, function keys, Tab,
 // arrows, Escape), remember it for the rest of the session and let Enter
-// submit from then on. The visualViewport heuristic below is the
-// first-keypress fallback for plain Enter on iPad PWAs.
+// submit from then on.
 let sawHardwareKeyboard = false;
 function noteKeyForHardwareDetection(e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean }) {
   if (sawHardwareKeyboard) return;
@@ -851,19 +851,22 @@ function noteKeyForHardwareDetection(e: { key: string; metaKey: boolean; ctrlKey
 
 // Whether pressing Enter (without Shift) should submit instead of inserting
 // a newline. Desktop / mouse devices always submit. On a touch device we
-// submit when a hardware keyboard is detected — either because we've seen
-// a hardware-only key in this session, or because `any-pointer: fine`
-// reports a trackpad/mouse alongside the touch screen (e.g. iPad + Magic
-// Keyboard), or because no on-screen keyboard is currently visible.
+// submit only on positive evidence of a hardware keyboard — a hardware-only
+// key seen this session, or `any-pointer: fine` reporting a trackpad/mouse
+// alongside the touch screen (e.g. iPad + Magic Keyboard). No evidence →
+// Enter inserts a newline and sending is the Send button's job.
+//
+// There used to be a visualViewport fallback here ("no on-screen keyboard
+// visible → submit"), measured as innerHeight − visualViewport.height. It
+// inverted on iOS PWAs whenever the layout viewport resizes WITH the soft
+// keyboard (newer iOS standalone behavior, and our own keyboard-inset
+// handling): the gap reads ~0 with the keyboard open, so every Enter sent
+// and phones lost the ability to type a newline at all.
 function shouldSendOnEnter() {
   if (typeof window === "undefined") return true;
   if (window.matchMedia("(pointer: fine)").matches) return true;
   if (sawHardwareKeyboard) return true;
-  if (window.matchMedia("(any-pointer: fine)").matches) return true;
-  const vv = window.visualViewport;
-  if (!vv) return false;
-  const softKeyboardGap = window.innerHeight - (vv.height + vv.offsetTop);
-  return softKeyboardGap < 100;
+  return window.matchMedia("(any-pointer: fine)").matches;
 }
 
 function formatSize(bytes: number): string {

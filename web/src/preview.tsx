@@ -6,6 +6,7 @@
 // Not bundled by the main entry; only built when /preview.html is requested.
 
 import { createRoot } from "react-dom/client";
+import { Markdown } from "./components/Markdown";
 import { PromptPanel } from "./components/PromptPanel";
 import type { Pending, SendBody, SessionError } from "./lib/protocol";
 import "./styles/index.css";
@@ -261,6 +262,42 @@ npm test -- --run promptFormat
   },
 ];
 
+// Markdown samples exercising the hark:html artifact path — a closed artifact
+// (with an external img the sanitizer must strip), a still-streaming one, and
+// a bare ```html block that must stay a code block.
+const markdownSamples: Array<{ title: string; source: string }> = [
+  {
+    title: "hark:html artifact — styled card + inline SVG + blocked external img",
+    source: [
+      "Before the artifact.",
+      "",
+      "```hark:html",
+      '<div style="border:1px solid var(--line-strong); border-radius:12px; padding:14px 16px; max-width:420px">',
+      "  <strong>hark:html v1 — render check</strong>",
+      '  <p style="margin:6px 0; color:var(--fg-2); font-size:13px">Styled card + inline SVG; the external img below must be stripped.</p>',
+      '  <svg viewBox="0 0 220 64" width="220" height="64" role="img" aria-label="demo bars">',
+      '    <rect x="0" y="34" width="40" height="30" rx="3" fill="#4ade80"/>',
+      '    <rect x="50" y="22" width="40" height="42" rx="3" fill="#4ade80"/>',
+      '    <rect x="100" y="10" width="40" height="54" rx="3" fill="#60a5fa"/>',
+      '    <rect x="150" y="28" width="40" height="36" rx="3" fill="#f472b6"/>',
+      "  </svg>",
+      '  <img src="https://evil.example/leak.png" alt="EXFIL-BLOCKED" width="40" height="12">',
+      "</div>",
+      "```",
+      "",
+      "After the artifact.",
+    ].join("\n"),
+  },
+  {
+    title: "hark:html artifact — still streaming (unclosed fence)",
+    source: "Working on it:\n\n```hark:html\n<div>partial…",
+  },
+  {
+    title: "bare ```html stays a code block (rendering is opt-in)",
+    source: "```html\n<b>just a code sample</b>\n```",
+  },
+];
+
 function Preview() {
   return (
     <div style={{ maxWidth: 720, margin: "32px auto", padding: "0 16px" }}>
@@ -285,6 +322,24 @@ function Preview() {
             busy={false}
             onSend={noop}
           />
+        </section>
+      ))}
+      <h1 style={{ marginBottom: 24 }}>Markdown / hark:html artifact preview</h1>
+      {markdownSamples.map((sample, i) => (
+        <section key={`md-${i}`} style={{ marginBottom: 32 }}>
+          <h2
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: "var(--fg-3)",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              marginBottom: 8,
+            }}
+          >
+            {sample.title}
+          </h2>
+          <Markdown source={sample.source} />
         </section>
       ))}
     </div>

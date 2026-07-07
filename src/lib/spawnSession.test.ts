@@ -22,11 +22,23 @@ describe("buildNewWindowArgs", () => {
       "-F",
       "#{pane_pid}",
       "-t",
-      "claude",
+      "=claude:",
       "-c",
       "/home/aki/Projects/hark",
       "claude",
     ]);
+  });
+
+  it("targets the session exactly, at the next free window index", () => {
+    // tmux's default session names are numeric ("0", "1", …). A bare numeric
+    // -t parses as a WINDOW index ("create at index 1" → "index 1 in use");
+    // `=name:` pins the session by exact match and lets tmux pick the index.
+    const args = buildNewWindowArgs({
+      sessionName: "1",
+      cwd: "/tmp",
+      command: "claude",
+    });
+    expect(args[args.indexOf("-t") + 1]).toBe("=1:");
   });
 
   it("supports multi-word commands as a single argv element", () => {
@@ -49,7 +61,7 @@ describe("buildNewWindowArgs", () => {
     expect(i).toBeGreaterThan(-1);
     expect(args[i + 1]).toBe("hark-coder");
     // Pane targeting still keys off the session name, untouched by -n.
-    expect(args[args.indexOf("-t") + 1]).toBe("claude");
+    expect(args[args.indexOf("-t") + 1]).toBe("=claude:");
   });
 
   it("omits -n when no windowName is given", () => {

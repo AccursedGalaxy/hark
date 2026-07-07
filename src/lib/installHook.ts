@@ -41,8 +41,22 @@ export function buildHookCommand(url: string): string {
   return `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}' >/dev/null 2>&1 || true`;
 }
 
+// The SessionStart hook is the one managed hook whose stdout MATTERS: Claude
+// Code injects it into the new session's context, which is how sessions learn
+// the hark:html artifact format (served by GET /api/artifact-contract, text
+// owned by src/lib/artifactContract.ts). Unlike the legacy synchronous
+// decision hooks this runs ONCE per session, and --max-time caps the cost
+// when the server is down (empty stdout → no context, silently fine).
+export function contractUrlFor(hookUrl: string): string {
+  return hookUrl.replace(/\/api\/hook$/, "/api/artifact-contract");
+}
+
+export function buildContractCommand(url: string): string {
+  return `curl -sS --max-time 2 '${contractUrlFor(url)}' 2>/dev/null || true`;
+}
+
 export function isManagedCommand(command: string, url: string): boolean {
-  return command.includes(url);
+  return command.includes(url) || command.includes(contractUrlFor(url));
 }
 
 function cloneSettings(s: Settings): Settings {
@@ -54,7 +68,14 @@ function ensureHooksMap(s: Settings): HooksMap {
   return s.hooks;
 }
 
-const ALL_MANAGED_EVENTS = [...MANAGED_EVENTS, ...LEGACY_EVENTS] as const;
+// SessionStart is managed but NOT in MANAGED_EVENTS: those all POST the event
+// payload to /api/hook, while SessionStart curls the artifact contract and
+// feeds its stdout back to Claude Code as session context.
+const ALL_MANAGED_EVENTS = [
+  ...MANAGED_EVENTS,
+  "SessionStart",
+  ...LEGACY_EVENTS,
+] as const;
 
 // Strip managed entries (matched by server URL) from the given events.
 // Mutates `hooks` in place; deletes an event key whose groups empty out.
@@ -83,7 +104,9 @@ export function installHooks(input: Settings, url: string): Settings {
   const next = cloneSettings(input);
   const hooks = ensureHooksMap(next);
   const fireAndForget = buildHookCommand(url);
-  for (const event of MANAGED_EVENTS) {
+  const commandFor = (event: string): string =>
+    event === "SessionStart" ? buildContractCommand(url) : fireAndForget;
+  for (const event of [...MANAGED_EVENTS, "SessionStart"]) {
     const groups: HookGroup[] = Array.isArray(hooks[event]) ? hooks[event] : [];
     const hasManaged = groups.some((g) =>
       Array.isArray(g.hooks) &&
@@ -93,7 +116,10 @@ export function installHooks(input: Settings, url: string): Settings {
       hooks[event] = groups;
       continue;
     }
-    hooks[event] = [...groups, { hooks: [{ type: "command", command: fireAndForget }] }];
+    hooks[event] = [
+      ...groups,
+      { hooks: [{ type: "command", command: commandFor(event) }] },
+    ];
   }
   // Migration: clear stale synchronous decision hooks a previous version
   // registered under the legacy events — they'd otherwise block every tool

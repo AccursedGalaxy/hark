@@ -74,8 +74,14 @@ export function buildNewWindowArgs(input: SpawnInput): string[] {
     "-P",
     "-F",
     "#{pane_pid}",
+    // `=name:` — exact-match the SESSION and let tmux pick the next free
+    // window index. A bare name is wrong twice over: tmux prefix-matches it
+    // against all session names, and a numeric name (tmux's defaults are
+    // 0, 1, 2…) parses as a WINDOW index instead — `new-window -t 1` means
+    // "create at index 1" and fails with "index 1 in use" once that index
+    // is taken.
     "-t",
-    input.sessionName,
+    `=${input.sessionName}:`,
     ...(input.windowName ? ["-n", input.windowName] : []),
     "-c",
     input.cwd,
