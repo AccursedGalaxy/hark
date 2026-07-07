@@ -51,7 +51,6 @@ export default function App() {
   const {
     connected,
     sessions,
-    attentionCount,
     attentionCounts,
     current,
     currentSession,
@@ -195,7 +194,6 @@ export default function App() {
           sessions={sessions}
           current={current}
           onPick={setCurrent}
-          attentionCount={attentionCount}
           onSpawned={(pid) => {
             if (pid !== null) setAwaitingPid(pid);
             refresh();

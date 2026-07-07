@@ -53,7 +53,6 @@ export interface AttentionCounts {
 export interface SessionsApi {
   connected: boolean;
   sessions: SessionView[];
-  attentionCount: number;
   attentionCounts: AttentionCounts;
   current: string | null;
   currentSession: SessionView | null;
@@ -292,14 +291,9 @@ export function useSessions(): SessionsApi {
     return sortSessions(merged);
   }, [rawSessions, attention]);
 
-  const attentionCount = useMemo(
-    () => sessions.filter((s) => s.needsAttention).length,
-    [sessions],
-  );
-
-  // Per-tier split of the same population (applyAttention guarantees a
-  // non-null kind whenever needsAttention is set, so the tiers sum to
-  // attentionCount).
+  // Per-tier split of the attention population (applyAttention guarantees a
+  // non-null kind whenever needsAttention is set, so the tiers sum to the
+  // total attention count).
   const attentionCounts = useMemo<AttentionCounts>(() => {
     const counts: AttentionCounts = { blocking: 0, error: 0, idle: 0 };
     for (const s of sessions) {
@@ -630,7 +624,6 @@ export function useSessions(): SessionsApi {
   return {
     connected,
     sessions,
-    attentionCount,
     attentionCounts,
     current,
     currentSession,
