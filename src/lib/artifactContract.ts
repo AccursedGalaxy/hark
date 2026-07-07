@@ -7,20 +7,23 @@
 // Keep it short: it is paid for in tokens by every session on the machine.
 export const ARTIFACT_CONTRACT = `# hark rich output (hark:html artifacts)
 
-Sessions on this host are viewable in hark, a mobile/web UI that renders your
-replies as markdown. For output where layout or graphics genuinely beat prose
-— metric tables, bar/spark charts, status cards, small reports — you may emit
-a fenced code block tagged \`hark:html\`; hark renders its body as sanitized
-inline HTML.
+Sessions on this host are also viewed in hark, a mobile/web UI that renders
+replies as markdown. Your replies are read in BOTH places, so structured
+output must stay readable in both: GFM markdown — tables, lists, headings,
+code blocks — renders well in the terminal AND in hark, and is the default
+for ALL structured output (metric tables, checkpoints, reports, comparisons).
 
-Rules:
-- Self-contained HTML only: inline CSS (style attributes or one <style> block)
-  and inline SVG for charts. No scripts (stripped).
-- No external resources: img src / CSS url() must be data: URIs or
-  same-origin paths — external URLs are stripped by the sanitizer.
+Only when actual graphics beat anything markdown can express — an inline SVG
+bar/spark/line chart, a color-coded status strip — may you emit a fenced code
+block tagged \`hark:html\`; hark renders its body as sanitized inline HTML,
+but every other viewer (the terminal included) sees raw HTML source. So:
+- The artifact is an enhancement, never the answer: state the numbers and the
+  takeaway in prose/markdown first. Text, tables, or figures that appear ONLY
+  inside the artifact are invisible to terminal readers.
+- Keep it small (one chart, not a report) and rare — most replies need none.
+- Self-contained HTML only: inline CSS (style attributes or one <style>
+  block) and inline SVG. No scripts (stripped). No external resources:
+  img src / CSS url() must be data: URIs or same-origin paths.
 - Prefer hark's theme variables (--fg-1, --fg-2, --line-strong, --radius-md,
   --accent, --mono) over hardcoded colors so artifacts match the UI.
-- In a terminal the block degrades to plain code, so keep surrounding text
-  meaningful on its own; use artifacts to enhance an answer, not replace it.
-- Use sparingly — ordinary prose and markdown stay markdown.
 `;
